@@ -1,0 +1,120 @@
+use ratatui::layout::{Constraint, Layout, Rect};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    Wide,
+    Medium,
+    Narrow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenLayout {
+    pub mode: LayoutMode,
+    pub top_bar: Rect,
+    pub main: Rect,
+    pub footer: Rect,
+    pub list: Rect,
+    pub details: Option<Rect>,
+    pub pomodoro: Option<Rect>,
+}
+
+pub fn layout_mode(width: u16) -> LayoutMode {
+    match width {
+        0..=69 => LayoutMode::Narrow,
+        70..=99 => LayoutMode::Medium,
+        _ => LayoutMode::Wide,
+    }
+}
+
+pub fn split_screen(area: Rect, medium_drawer_open: bool) -> ScreenLayout {
+    let mode = layout_mode(area.width);
+    let outer = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Min(0),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    match mode {
+        LayoutMode::Wide => {
+            let panes =
+                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(outer[1]);
+            let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(panes[1]);
+            ScreenLayout {
+                mode,
+                top_bar: outer[0],
+                main: outer[1],
+                footer: outer[2],
+                list: panes[0],
+                details: Some(right[0]),
+                pomodoro: Some(right[1]),
+            }
+        }
+        LayoutMode::Medium => {
+            let panes = if medium_drawer_open {
+                Layout::vertical([Constraint::Min(0), Constraint::Length(11)]).split(outer[1])
+            } else {
+                Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(outer[1])
+            };
+            let details = medium_drawer_open.then_some(panes[1]);
+            ScreenLayout {
+                mode,
+                top_bar: outer[0],
+                main: outer[1],
+                footer: outer[2],
+                list: panes[0],
+                details,
+                pomodoro: details,
+            }
+        }
+        LayoutMode::Narrow => ScreenLayout {
+            mode,
+            top_bar: outer[0],
+            main: outer[1],
+            footer: outer[2],
+            list: outer[1],
+            details: None,
+            pomodoro: None,
+        },
+    }
+}
+
+pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(2)).max(1);
+    let height = height.min(area.height.saturating_sub(2)).max(1);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Rect;
+
+    use super::{LayoutMode, centered_rect, layout_mode, split_screen};
+
+    #[test]
+    fn selects_expected_layout_modes() {
+        assert_eq!(layout_mode(60), LayoutMode::Narrow);
+        assert_eq!(layout_mode(80), LayoutMode::Medium);
+        assert_eq!(layout_mode(120), LayoutMode::Wide);
+    }
+
+    #[test]
+    fn centers_overlay_inside_bounds() {
+        let rect = centered_rect(Rect::new(0, 0, 100, 40), 40, 12);
+        assert_eq!(rect.width, 40);
+        assert_eq!(rect.height, 12);
+    }
+
+    #[test]
+    fn medium_layout_can_hide_details_drawer() {
+        let layout = split_screen(Rect::new(0, 0, 80, 24), false);
+        assert!(layout.details.is_none());
+    }
+}

@@ -1,0 +1,877 @@
+use std::cmp::min;
+use std::io::{Stdout, stdout};
+use std::time::{Duration, Instant};
+
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+
+use crate::config::Config;
+use crate::db::Database;
+use crate::domain::pomodoro::{
+    PomodoroKind, PomodoroRun, PomodoroState, PomodoroSummary, progress_ratio, remaining_seconds,
+};
+use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
+use crate::domain::todo::TodoStatus;
+use crate::error::Result;
+use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
+use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
+use crate::tui::theme::Theme;
+
+const EVENT_POLL_MS: u64 = 250;
+
+type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+pub fn run(
+    database: &mut Database,
+    config: &Config,
+    session_slug: Option<String>,
+    revision: Option<u32>,
+) -> Result<()> {
+    let resolved_slug = database.resolve_session_slug(session_slug.as_deref())?;
+    database.mark_session_opened(&resolved_slug, now_utc_timestamp())?;
+
+    let mut screen = SessionScreen::new(resolved_slug, revision, config.clone());
+    screen.reload(database)?;
+
+    let mut terminal = init_terminal()?;
+    let result = event_loop(&mut terminal, database, &mut screen);
+    restore_terminal(&mut terminal)?;
+    result
+}
+
+fn event_loop(
+    terminal: &mut AppTerminal,
+    database: &mut Database,
+    screen: &mut SessionScreen,
+) -> Result<()> {
+    loop {
+        terminal.draw(|frame| screen.render(frame))?;
+
+        if event::poll(Duration::from_millis(EVENT_POLL_MS))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    if screen.handle_key(database, key_event)? {
+                        break Ok(());
+                    }
+                }
+                Event::Mouse(mouse_event) => {
+                    screen.handle_mouse(database, terminal.size()?.into(), mouse_event)?
+                }
+                Event::Resize(_, _) => {}
+                _ => {}
+            }
+        } else {
+            screen.handle_tick(database)?;
+        }
+
+        screen.expire_toast();
+    }
+}
+
+fn init_terminal() -> Result<AppTerminal> {
+    enable_raw_mode()?;
+    let mut handle = stdout();
+    execute!(handle, EnterAlternateScreen, EnableMouseCapture)?;
+    Ok(Terminal::new(CrosstermBackend::new(handle))?)
+}
+
+fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Overlay {
+    Help,
+    History,
+    Details,
+}
+
+#[derive(Debug, Clone)]
+struct ToastState {
+    message: String,
+    expires_at: Instant,
+}
+
+#[derive(Debug)]
+struct SessionScreen {
+    session_slug: String,
+    revision: Option<u32>,
+    snapshot: Option<SessionSnapshot>,
+    revisions: Vec<RevisionSummary>,
+    pomodoro_summary: PomodoroSummary,
+    active_run: Option<PomodoroRun>,
+    selected_index: usize,
+    scroll_offset: usize,
+    history_index: usize,
+    medium_drawer_open: bool,
+    overlay: Option<Overlay>,
+    toast: Option<ToastState>,
+    theme: Theme,
+    config: Config,
+}
+
+impl SessionScreen {
+    fn new(session_slug: String, revision: Option<u32>, config: Config) -> Self {
+        Self {
+            session_slug,
+            revision,
+            snapshot: None,
+            revisions: Vec::new(),
+            pomodoro_summary: PomodoroSummary {
+                completed_focus_runs: 0,
+                total_focus_seconds: 0,
+            },
+            active_run: None,
+            selected_index: 0,
+            scroll_offset: 0,
+            history_index: 0,
+            medium_drawer_open: true,
+            overlay: None,
+            toast: None,
+            theme: Theme::from_config(&config),
+            config,
+        }
+    }
+
+    fn reload(&mut self, database: &Database) -> Result<()> {
+        let selected_todo_id = self.current_todo().map(|todo| todo.todo_id);
+        let snapshot = database.load_snapshot(&self.session_slug, self.revision)?;
+        self.revisions = database.list_revisions(&self.session_slug)?;
+        self.pomodoro_summary = database.pomodoro_summary_for_session(
+            snapshot.session.id,
+            self.revision.map(|_| snapshot.revision.created_at),
+        )?;
+        self.active_run = database.get_active_pomodoro()?;
+        self.snapshot = Some(snapshot);
+        self.reselect(selected_todo_id);
+        if let Some(revision) = self.revision {
+            self.history_index = self
+                .revisions
+                .iter()
+                .position(|candidate| candidate.revision_number == revision)
+                .unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    fn handle_key(&mut self, database: &mut Database, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+            return Ok(true);
+        }
+
+        match self.overlay {
+            Some(Overlay::History) => return self.handle_history_key(database, key),
+            Some(Overlay::Help) => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+                ) {
+                    self.overlay = None;
+                }
+                return Ok(false);
+            }
+            Some(Overlay::Details) => {
+                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+                    self.overlay = None;
+                }
+                return Ok(false);
+            }
+            None => {}
+        }
+
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => Ok(true),
+            KeyCode::Char('?') => {
+                self.overlay = Some(Overlay::Help);
+                Ok(false)
+            }
+            KeyCode::Up | KeyCode::Char('k')
+                if matches!(key.code, KeyCode::Up)
+                    || key_matches_binding(&key, &self.config.keys.up) =>
+            {
+                self.move_selection(-1, self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if matches!(key.code, KeyCode::Down)
+                    || key_matches_binding(&key, &self.config.keys.down) =>
+            {
+                self.move_selection(1, self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.selected_index = 0;
+                self.scroll_offset = 0;
+                Ok(false)
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.selected_index = self.snapshot().todos.len().saturating_sub(1);
+                self.ensure_selection_visible(self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::PageUp => {
+                self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::PageDown => {
+                self.move_selection(self.visible_rows() as isize, self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_selection(self.visible_rows() as isize, self.visible_rows());
+                Ok(false)
+            }
+            KeyCode::Char('x') | KeyCode::Char(' ')
+                if key_matches_binding(&key, &self.config.keys.toggle_done) =>
+            {
+                self.toggle_selected_todo(database)?;
+                Ok(false)
+            }
+            KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
+                self.overlay = Some(Overlay::History);
+                Ok(false)
+            }
+            KeyCode::Char('r') if self.revision.is_some() => {
+                self.revision = None;
+                self.reload(database)?;
+                Ok(false)
+            }
+            KeyCode::Char('p') if key_matches_binding(&key, &self.config.keys.pomodoro) => {
+                self.handle_pomodoro(database, PomodoroKind::Focus)?;
+                Ok(false)
+            }
+            KeyCode::Char('b') => {
+                self.handle_pomodoro(database, PomodoroKind::ShortBreak)?;
+                Ok(false)
+            }
+            KeyCode::Char('B') => {
+                self.handle_pomodoro(database, PomodoroKind::LongBreak)?;
+                Ok(false)
+            }
+            KeyCode::Char('c') => {
+                self.cancel_active_pomodoro(database)?;
+                Ok(false)
+            }
+            KeyCode::Tab => {
+                self.medium_drawer_open = !self.medium_drawer_open;
+                Ok(false)
+            }
+            KeyCode::Enter => {
+                if matches!(
+                    split_screen(Rect::new(0, 0, 60, 24), self.medium_drawer_open).mode,
+                    LayoutMode::Narrow
+                ) {
+                    self.overlay = Some(Overlay::Details);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn handle_history_key(&mut self, database: &Database, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.history_index = self.history_index.saturating_sub(1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.history_index = min(
+                    self.history_index + 1,
+                    self.revisions.len().saturating_sub(1),
+                );
+            }
+            KeyCode::Enter => {
+                if let Some(revision) = self.revisions.get(self.history_index) {
+                    self.revision = Some(revision.revision_number);
+                    self.overlay = None;
+                    self.reload(database)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_mouse(
+        &mut self,
+        database: &mut Database,
+        area: Rect,
+        mouse: MouseEvent,
+    ) -> Result<()> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.move_selection(-1, self.visible_rows()),
+            MouseEventKind::ScrollDown => self.move_selection(1, self.visible_rows()),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if matches!(self.overlay, Some(Overlay::History)) {
+                    self.handle_history_click(database, area, mouse.row)?;
+                    return Ok(());
+                }
+                let layout = split_screen(area, self.medium_drawer_open);
+                if let Some(target) =
+                    list_click_target(layout.list, self.scroll_offset, mouse.column, mouse.row)
+                {
+                    match target {
+                        ListClickTarget::Checkbox(index) => {
+                            self.selected_index = index;
+                            self.toggle_selected_todo(database)?;
+                        }
+                        ListClickTarget::Row(index) => self.selected_index = index,
+                    }
+                    self.ensure_selection_visible(self.visible_rows());
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_history_click(&mut self, database: &Database, area: Rect, y: u16) -> Result<()> {
+        let overlay = centered_rect(area, 70, 16);
+        let list_y = overlay.y.saturating_add(1);
+        let index = usize::from(y.saturating_sub(list_y));
+        if let Some(revision) = self.revisions.get(index) {
+            self.revision = Some(revision.revision_number);
+            self.overlay = None;
+            self.reload(database)?;
+        }
+        Ok(())
+    }
+
+    fn handle_tick(&mut self, database: &mut Database) -> Result<()> {
+        let Some(run) = self.active_run.clone() else {
+            return Ok(());
+        };
+        if matches!(run.state, PomodoroState::Running)
+            && remaining_seconds(&run, now_utc_timestamp()) == 0
+        {
+            database.complete_pomodoro(run.id, now_utc_timestamp())?;
+            self.set_toast(String::from("Pomodoro completed"));
+            self.reload(database)?;
+        }
+        Ok(())
+    }
+
+    fn toggle_selected_todo(&mut self, database: &mut Database) -> Result<()> {
+        let Some(todo) = self.current_todo() else {
+            return Ok(());
+        };
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return Ok(());
+        }
+
+        let next_status = match todo.status {
+            TodoStatus::Open => TodoStatus::Done,
+            TodoStatus::Done => TodoStatus::Open,
+        };
+        database.set_todo_status(
+            todo.todo_id,
+            Some(&self.session_slug),
+            next_status,
+            now_utc_timestamp(),
+        )?;
+        self.reload(database)
+    }
+
+    fn handle_pomodoro(&mut self, database: &mut Database, kind: PomodoroKind) -> Result<()> {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return Ok(());
+        }
+        if let Some(run) = self.active_run.clone() {
+            if run.session_id != self.snapshot().session.id {
+                self.set_toast(String::from("Another session already has an active timer"));
+                return Ok(());
+            }
+            match run.state {
+                PomodoroState::Running if matches!(kind, PomodoroKind::Focus) => {
+                    database.pause_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                PomodoroState::Paused if matches!(kind, PomodoroKind::Focus) => {
+                    database.resume_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                _ => {}
+            }
+        } else {
+            let todo_id = self.current_todo().map(|todo| todo.todo_id);
+            database.start_pomodoro(
+                &self.session_slug,
+                todo_id,
+                kind,
+                pomodoro_seconds(&self.config, kind),
+                now_utc_timestamp(),
+            )?;
+        }
+        self.reload(database)
+    }
+
+    fn cancel_active_pomodoro(&mut self, database: &mut Database) -> Result<()> {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return Ok(());
+        }
+        if let Some(run) = self.current_session_run().cloned() {
+            database.cancel_pomodoro(run.id, now_utc_timestamp())?;
+            self.reload(database)?;
+        }
+        Ok(())
+    }
+
+    fn render(&self, frame: &mut ratatui::Frame<'_>) {
+        let layout = split_screen(frame.area(), self.medium_drawer_open);
+        let snapshot = self.snapshot();
+        frame.render_widget(self.top_bar(snapshot), layout.top_bar);
+        frame.render_stateful_widget(
+            self.todo_list(snapshot, layout.list.height),
+            layout.list,
+            &mut self.list_state(),
+        );
+        if let Some(details_area) = layout.details {
+            if matches!(layout.mode, LayoutMode::Medium) {
+                let panes =
+                    Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
+                        .split(details_area);
+                frame.render_widget(self.details_panel(snapshot), panes[0]);
+                frame.render_widget(self.pomodoro_panel(snapshot), panes[1]);
+            } else {
+                frame.render_widget(self.details_panel(snapshot), details_area);
+            }
+        }
+        if let Some(pomodoro_area) = layout
+            .pomodoro
+            .filter(|_| matches!(layout.mode, LayoutMode::Wide))
+        {
+            frame.render_widget(self.pomodoro_panel(snapshot), pomodoro_area);
+        }
+        frame.render_widget(self.footer(layout.mode), layout.footer);
+
+        if matches!(layout.mode, LayoutMode::Narrow)
+            && matches!(self.overlay, Some(Overlay::Details))
+        {
+            let area = centered_rect(frame.area(), 52, 12);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.details_panel(snapshot), area);
+        }
+        if matches!(self.overlay, Some(Overlay::Help)) {
+            let area = centered_rect(frame.area(), 54, 12);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.help_overlay(), area);
+        }
+        if matches!(self.overlay, Some(Overlay::History)) {
+            let area = centered_rect(frame.area(), 70, 16);
+            frame.render_widget(Clear, area);
+            frame.render_stateful_widget(self.history_overlay(), area, &mut self.history_state());
+        }
+        if let Some(toast) = &self.toast {
+            let area = centered_rect(frame.area(), 50, 3);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(toast.message.clone())
+                    .block(Block::default().borders(Borders::ALL).title("Notice"))
+                    .style(
+                        Style::default()
+                            .fg(self.theme.fg_warning)
+                            .bg(self.theme.bg_overlay),
+                    ),
+                area,
+            );
+        }
+    }
+
+    fn top_bar(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+        let revision = self
+            .revision
+            .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
+        let mut lines = vec![Line::from(format!(
+            "todui | {} ({}) | {revision}",
+            snapshot.session.name, snapshot.session.slug
+        ))];
+        if self.is_read_only() {
+            lines.push(Line::from(format!(
+                "Viewing session {} @ r{} — {} — read-only",
+                snapshot.session.slug,
+                snapshot.revision.revision_number,
+                format_full_local(snapshot.revision.created_at)
+            )));
+        } else if let Some(run) = self.current_session_run() {
+            lines.push(Line::from(format!(
+                "{} · {} remaining",
+                run.kind.label(),
+                format_duration(remaining_seconds(run, now_utc_timestamp()))
+            )));
+        }
+
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Session"))
+            .style(self.theme.block_style())
+    }
+
+    fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> List<'static> {
+        let visible_rows = height.saturating_sub(2).max(1) as usize;
+        let items = snapshot
+            .todos
+            .iter()
+            .skip(self.scroll_offset)
+            .take(visible_rows)
+            .map(|todo| ListItem::new(todo_line(todo, self.current_session_run())))
+            .collect::<Vec<_>>();
+
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Todos"))
+            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+    }
+
+    fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+        let text = if let Some(todo) = self.current_todo() {
+            format!(
+                "title: {}\nstatus: {}\nnotes: {}\ncreated: {}\nupdated: {}\ncompleted: {}\nid: {}",
+                todo.title,
+                if todo.status == TodoStatus::Done {
+                    "done"
+                } else {
+                    "open"
+                },
+                if todo.notes.trim().is_empty() {
+                    "-"
+                } else {
+                    todo.notes.trim()
+                },
+                format_full_local(todo.created_at),
+                format_full_local(todo.updated_at),
+                todo.completed_at
+                    .map(format_full_local)
+                    .unwrap_or_else(|| String::from("-")),
+                todo.todo_id
+            )
+        } else {
+            format!("No todos in session {}", snapshot.session.slug)
+        };
+
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Details"))
+            .style(self.theme.block_style())
+    }
+
+    fn pomodoro_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+        let run = self.current_session_run();
+        let mut lines = Vec::new();
+        if self.is_read_only() {
+            lines.push(Line::from(format!(
+                "Focus runs up to this revision: {}",
+                self.pomodoro_summary.completed_focus_runs
+            )));
+            lines.push(Line::from(format!(
+                "Total focus time: {}",
+                format_duration(self.pomodoro_summary.total_focus_seconds)
+            )));
+        } else if let Some(run) = run {
+            lines.push(Line::from(format!(
+                "{} · {} remaining",
+                run.kind.label(),
+                format_duration(remaining_seconds(run, now_utc_timestamp()))
+            )));
+            lines.push(Line::from(progress_bar(run, now_utc_timestamp())));
+            lines.push(Line::from(format!(
+                "Linked: {}",
+                linked_title(run, snapshot)
+            )));
+            lines.push(Line::from("[p pause/resume] [c cancel]"));
+        } else if self.active_run.is_some() {
+            lines.push(Line::from("Another session has an active timer"));
+        } else {
+            lines.push(Line::from("No active run"));
+            lines.push(Line::from("[p focus] [b short break] [B long break]"));
+        }
+        let _ = Gauge::default();
+
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Pomodoro"))
+            .style(self.theme.block_style())
+    }
+
+    fn footer(&self, layout_mode: LayoutMode) -> Paragraph<'static> {
+        let text = if self.is_read_only() {
+            "j/k move  H history  r return to head  q quit"
+        } else {
+            match layout_mode {
+                LayoutMode::Wide => "j/k move  space toggle  H history  p pomodoro  q quit",
+                LayoutMode::Medium => {
+                    "j/k move  space toggle  Tab drawer  H history  p pomodoro  q quit"
+                }
+                LayoutMode::Narrow => {
+                    "j/k move  space toggle  Enter details  H history  p pomodoro  q quit"
+                }
+            }
+        };
+        Paragraph::new(text)
+            .block(Block::default().borders(Borders::ALL).title("Keys"))
+            .style(self.theme.block_style())
+    }
+
+    fn help_overlay(&self) -> Paragraph<'static> {
+        Paragraph::new(
+            "Navigation: j/k, arrows, PageUp/PageDown\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nQuit: q or Esc",
+        )
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Help"))
+        .style(self.theme.block_style())
+    }
+
+    fn history_overlay(&self) -> List<'static> {
+        let items = self
+            .revisions
+            .iter()
+            .map(|revision| {
+                ListItem::new(format!(
+                    "r{}  {}  todo:{} done:{}  {}",
+                    revision.revision_number,
+                    format_full_local(revision.created_at),
+                    revision.todo_count,
+                    revision.done_count,
+                    revision.reason
+                ))
+            })
+            .collect::<Vec<_>>();
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("History"))
+            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+    }
+
+    fn current_todo(&self) -> Option<&RevisionTodo> {
+        self.snapshot.as_ref()?.todos.get(self.selected_index)
+    }
+
+    fn current_session_run(&self) -> Option<&PomodoroRun> {
+        self.active_run
+            .as_ref()
+            .filter(|run| run.session_id == self.snapshot().session.id)
+    }
+
+    fn snapshot(&self) -> &SessionSnapshot {
+        self.snapshot.as_ref().expect("snapshot loaded")
+    }
+
+    fn visible_rows(&self) -> usize {
+        8
+    }
+
+    fn is_read_only(&self) -> bool {
+        matches!(self.snapshot().mode, RevisionMode::Historical(_))
+    }
+
+    fn reselect(&mut self, todo_id: Option<i64>) {
+        if let Some(todo_id) = todo_id
+            && let Some(index) = self
+                .snapshot()
+                .todos
+                .iter()
+                .position(|todo| todo.todo_id == todo_id)
+        {
+            self.selected_index = index;
+        }
+        self.selected_index = min(
+            self.selected_index,
+            self.snapshot().todos.len().saturating_sub(1),
+        );
+        self.ensure_selection_visible(self.visible_rows());
+    }
+
+    fn move_selection(&mut self, delta: isize, visible_rows: usize) {
+        let todo_count = self.snapshot().todos.len();
+        if todo_count == 0 {
+            self.selected_index = 0;
+            self.scroll_offset = 0;
+            return;
+        }
+        if delta.is_negative() {
+            self.selected_index = self.selected_index.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.selected_index = min(
+                self.selected_index + delta as usize,
+                todo_count.saturating_sub(1),
+            );
+        }
+        self.ensure_selection_visible(visible_rows);
+    }
+
+    fn ensure_selection_visible(&mut self, visible_rows: usize) {
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + visible_rows {
+            self.scroll_offset = self.selected_index + 1 - visible_rows;
+        }
+    }
+
+    fn list_state(&self) -> ListState {
+        let mut state = ListState::default();
+        state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
+        state
+    }
+
+    fn history_state(&self) -> ListState {
+        let mut state = ListState::default();
+        state.select(Some(self.history_index));
+        state
+    }
+
+    fn set_toast(&mut self, message: String) {
+        self.toast = Some(ToastState {
+            message,
+            expires_at: Instant::now() + Duration::from_secs(2),
+        });
+    }
+
+    fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| Instant::now() >= toast.expires_at)
+        {
+            self.toast = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListClickTarget {
+    Checkbox(usize),
+    Row(usize),
+}
+
+fn list_click_target(
+    list_area: Rect,
+    scroll_offset: usize,
+    x: u16,
+    y: u16,
+) -> Option<ListClickTarget> {
+    let inner_x = list_area.x.saturating_add(1);
+    let inner_y = list_area.y.saturating_add(1);
+    if x < inner_x || y < inner_y || y >= list_area.bottom().saturating_sub(1) {
+        return None;
+    }
+
+    let row_index = scroll_offset + usize::from(y.saturating_sub(inner_y));
+    if x <= inner_x.saturating_add(2) {
+        Some(ListClickTarget::Checkbox(row_index))
+    } else {
+        Some(ListClickTarget::Row(row_index))
+    }
+}
+
+fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
+    match kind {
+        PomodoroKind::Focus => i64::from(config.pomodoro.focus_minutes) * 60,
+        PomodoroKind::ShortBreak => i64::from(config.pomodoro.short_break_minutes) * 60,
+        PomodoroKind::LongBreak => i64::from(config.pomodoro.long_break_minutes) * 60,
+    }
+}
+
+fn format_duration(seconds: i64) -> String {
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+fn linked_title(run: &PomodoroRun, snapshot: &SessionSnapshot) -> String {
+    run.todo_id
+        .and_then(|todo_id| {
+            snapshot
+                .todos
+                .iter()
+                .find(|todo| todo.todo_id == todo_id)
+                .map(|todo| todo.title.clone())
+        })
+        .unwrap_or_else(|| String::from("session-only"))
+}
+
+fn todo_line(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> String {
+    let marker = match todo.status {
+        TodoStatus::Open => "[ ]",
+        TodoStatus::Done => "[x]",
+    };
+    let mut suffix = match todo.status {
+        TodoStatus::Open => format!("created {}", format_compact_local(todo.created_at)),
+        TodoStatus::Done => format!(
+            "done {}",
+            format_compact_local(todo.completed_at.unwrap_or(todo.updated_at))
+        ),
+    };
+    if run.is_some_and(|active| {
+        active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
+    }) {
+        suffix = format!("FOCUS {suffix}");
+    }
+    format!("{marker} {}  {suffix}", todo.title)
+}
+
+fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
+    bindings.iter().any(|binding| match binding.as_str() {
+        "up" => matches!(key.code, KeyCode::Up),
+        "down" => matches!(key.code, KeyCode::Down),
+        "space" => matches!(key.code, KeyCode::Char(' ')),
+        value if value.len() == 1 => {
+            matches!(key.code, KeyCode::Char(character) if value.starts_with(character))
+        }
+        _ => false,
+    })
+}
+
+fn progress_bar(run: &PomodoroRun, now: i64) -> String {
+    let ratio = progress_ratio(run, now);
+    let filled = (ratio * 20.0).round() as usize;
+    let empty = 20_usize.saturating_sub(filled);
+    format!(
+        "{}{} {:>3}%",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        (ratio * 100.0) as u32
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::layout::Rect;
+
+    use super::{ListClickTarget, format_duration, list_click_target};
+
+    #[test]
+    fn identifies_checkbox_and_row_click_targets() {
+        let area = Rect::new(0, 0, 40, 10);
+        assert_eq!(
+            list_click_target(area, 0, 1, 1),
+            Some(ListClickTarget::Checkbox(0))
+        );
+        assert_eq!(
+            list_click_target(area, 0, 6, 2),
+            Some(ListClickTarget::Row(1))
+        );
+    }
+
+    #[test]
+    fn formats_duration_mm_ss() {
+        assert_eq!(format_duration(65), "01:05");
+    }
+}
