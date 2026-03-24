@@ -38,6 +38,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
+Coverage:
+
+```bash
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+cargo llvm-cov --workspace --all-features --lcov --output-path coverage/lcov.info --fail-under-lines 80
+```
+
 ## Paths
 
 Default paths:
