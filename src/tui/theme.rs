@@ -81,3 +81,27 @@ fn color_from_name(name: &str) -> Option<Color> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::Color;
+
+    use super::Theme;
+    use crate::config::Config;
+
+    #[test]
+    fn builds_dark_and_light_themes_from_config() {
+        let dark = Theme::from_config(&Config::default());
+        assert_eq!(dark.fg_accent, Color::Cyan);
+
+        let mut config = Config::default();
+        config.theme.mode = String::from("light");
+        config.theme.accent = String::from("red");
+        let light = Theme::from_config(&config);
+
+        assert_eq!(light.fg_default, Color::Black);
+        assert_eq!(light.border_focus, Color::Red);
+        assert_eq!(light.selected_style().bg, Some(light.bg_selected));
+        assert_eq!(light.block_style().fg, Some(light.fg_default));
+    }
+}

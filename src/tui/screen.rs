@@ -853,9 +853,25 @@ fn progress_bar(run: &PomodoroRun, now: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
+    };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{ListClickTarget, format_duration, list_click_target};
+    use super::{
+        ListClickTarget, Overlay, SessionScreen, format_duration, key_matches_binding,
+        list_click_target, progress_bar,
+    };
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
+    use crate::domain::revision::RevisionMode;
 
     #[test]
     fn identifies_checkbox_and_row_click_targets() {
@@ -873,5 +889,273 @@ mod tests {
     #[test]
     fn formats_duration_mm_ss() {
         assert_eq!(format_duration(65), "01:05");
+    }
+
+    #[test]
+    fn key_binding_matches_defaults_and_custom_values() {
+        let key = key(KeyCode::Char('x'));
+        assert!(key_matches_binding(
+            &key,
+            &[String::from("space"), String::from("x")]
+        ));
+        assert!(!key_matches_binding(&key, &[String::from("p")]));
+    }
+
+    #[test]
+    fn progress_bar_renders_percentage() {
+        let run = crate::domain::pomodoro::PomodoroRun {
+            id: 1,
+            session_id: 1,
+            todo_id: None,
+            kind: PomodoroKind::Focus,
+            state: PomodoroState::Running,
+            planned_seconds: 100,
+            started_at: 0,
+            paused_at: None,
+            accumulated_pause: 0,
+            ended_at: None,
+            updated_at: 0,
+        };
+        assert!(progress_bar(&run, 50).contains("50%"));
+    }
+
+    #[test]
+    fn screen_handles_navigation_toggle_history_and_read_only_paths() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        assert!(
+            !screen
+                .handle_key(&mut database, key(KeyCode::Char('?')))
+                .unwrap()
+        );
+        assert!(matches!(screen.overlay, Some(Overlay::Help)));
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+        assert!(screen.overlay.is_none());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        assert_eq!(screen.selected_index, 1);
+        screen.handle_key(&mut database, key(KeyCode::Up)).unwrap();
+        assert_eq!(screen.selected_index, 0);
+        screen.handle_key(&mut database, key(KeyCode::End)).unwrap();
+        assert_eq!(screen.selected_index, 1);
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+        assert_eq!(screen.selected_index, 0);
+        screen
+            .handle_key(&mut database, key(KeyCode::PageDown))
+            .unwrap();
+        assert_eq!(screen.selected_index, 1);
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+        assert_eq!(
+            screen.snapshot().todos[0].status,
+            crate::domain::todo::TodoStatus::Done
+        );
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        assert!(matches!(screen.overlay, Some(Overlay::History)));
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(matches!(
+            screen.snapshot().mode,
+            RevisionMode::Historical(_)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('r')))
+            .unwrap();
+        assert!(matches!(screen.snapshot().mode, RevisionMode::Head));
+    }
+
+    #[test]
+    fn screen_handles_mouse_history_and_pomodoro_controls() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_mouse(
+                &mut database,
+                area,
+                mouse(MouseEventKind::Down(MouseButton::Left), 6, 5),
+            )
+            .unwrap();
+        assert_eq!(screen.selected_index, 0);
+
+        screen
+            .handle_mouse(
+                &mut database,
+                area,
+                mouse(MouseEventKind::Down(MouseButton::Left), 1, 5),
+            )
+            .unwrap();
+        assert_eq!(
+            screen.snapshot().todos[0].status,
+            crate::domain::todo::TodoStatus::Done
+        );
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(screen.current_session_run().is_some());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.current_session_run().unwrap().state,
+            PomodoroState::Paused
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.current_session_run().unwrap().state,
+            PomodoroState::Running
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('c')))
+            .unwrap();
+        assert!(screen.current_session_run().is_none());
+
+        screen.overlay = Some(Overlay::History);
+        screen
+            .handle_mouse(
+                &mut database,
+                area,
+                mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+            )
+            .unwrap();
+        assert!(matches!(
+            screen.snapshot().mode,
+            RevisionMode::Historical(_)
+        ));
+    }
+
+    #[test]
+    fn screen_tick_completes_timer_and_toast_expires() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let run = database
+            .start_pomodoro(&screen.session_slug, None, PomodoroKind::Focus, 1, 0)
+            .expect("run");
+        database.complete_pomodoro(run.id, 1).expect("complete");
+        screen.reload(&database).unwrap();
+        screen.active_run = Some(crate::domain::pomodoro::PomodoroRun {
+            state: PomodoroState::Running,
+            started_at: 0,
+            planned_seconds: 0,
+            ..run
+        });
+        screen.handle_tick(&mut database).unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("completed"));
+
+        screen.toast.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+        screen.expire_toast();
+        assert!(screen.toast.is_none());
+    }
+
+    #[test]
+    fn render_covers_wide_medium_narrow_and_overlay_states() {
+        let (_directory, _database, mut screen) = seeded_screen();
+
+        let wide = render_buffer(&screen, 120, 24);
+        assert!(wide.contains("Writing Sprint"));
+        assert!(wide.contains("Pomodoro"));
+
+        screen.medium_drawer_open = true;
+        let medium = render_buffer(&screen, 80, 24);
+        assert!(medium.contains("Keys"));
+
+        screen.overlay = Some(Overlay::Details);
+        let narrow = render_buffer(&screen, 60, 24);
+        assert!(narrow.contains("Details"));
+
+        screen.overlay = Some(Overlay::History);
+        let history = render_buffer(&screen, 120, 24);
+        assert!(history.contains("History"));
+
+        screen.overlay = Some(Overlay::Help);
+        let help = render_buffer(&screen, 120, 24);
+        assert!(help.contains("Navigation"));
+
+        screen.toast = Some(super::ToastState {
+            message: String::from("hello"),
+            expires_at: Instant::now() + Duration::from_secs(1),
+        });
+        let toast = render_buffer(&screen, 120, 24);
+        assert!(toast.contains("Notice"));
+    }
+
+    fn seeded_screen() -> (tempfile::TempDir, Database, SessionScreen) {
+        let (directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        database
+            .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
+            .expect("todo");
+        database
+            .add_todo(&session.slug, "Review bindings", "", 1_711_275_800)
+            .expect("todo");
+
+        let mut screen = SessionScreen::new(session.slug, None, Config::default());
+        screen.reload(&database).expect("reload");
+        (directory, database, screen)
+    }
+
+    fn render_buffer(screen: &SessionScreen, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| screen.render(frame)).expect("draw");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn buffer_to_string(buffer: &Buffer) -> String {
+        let mut lines = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut line = String::new();
+            for x in 0..buffer.area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 }

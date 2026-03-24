@@ -228,4 +228,29 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].slug, "writing-sprint");
     }
+
+    #[test]
+    fn resolves_recent_session_and_marks_opened() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        database
+            .create_session("Reading Sprint", None, 1_711_275_700)
+            .expect("session");
+
+        assert_eq!(
+            database.resolve_session_slug(None).expect("recent"),
+            "reading-sprint"
+        );
+
+        let marked = database
+            .mark_session_opened("writing-sprint", 1_711_275_800)
+            .expect("marked");
+        assert_eq!(marked.slug, "writing-sprint");
+        assert_eq!(
+            database.resolve_session_slug(None).expect("recent"),
+            "writing-sprint"
+        );
+    }
 }

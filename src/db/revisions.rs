@@ -140,6 +140,7 @@ fn map_revision_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<RevisionTodo> 
 mod tests {
     use crate::db::Database;
     use crate::domain::todo::TodoStatus;
+    use crate::error::AppError;
 
     #[test]
     fn lists_revision_history() {
@@ -163,5 +164,59 @@ mod tests {
         assert_eq!(revisions.len(), 3);
         assert_eq!(revisions[0].revision_number, 3);
         assert_eq!(revisions[2].revision_number, 1);
+    }
+
+    #[test]
+    fn loads_head_and_historical_snapshots() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        let todo = database
+            .add_todo(&session.slug, "Draft spec", "note", 1_711_275_700)
+            .expect("todo");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&session.slug),
+                TodoStatus::Done,
+                1_711_275_800,
+            )
+            .expect("done");
+
+        let head = database.load_snapshot(&session.slug, None).expect("head");
+        assert_eq!(head.todos.len(), 1);
+        assert!(matches!(
+            head.mode,
+            crate::domain::revision::RevisionMode::Head
+        ));
+
+        let historical = database
+            .load_snapshot(&session.slug, Some(1))
+            .expect("revision");
+        assert!(historical.todos.is_empty());
+        assert!(matches!(
+            historical.mode,
+            crate::domain::revision::RevisionMode::Historical(1)
+        ));
+    }
+
+    #[test]
+    fn returns_revision_not_found_for_missing_revision() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+
+        let error = database
+            .revision_summary(&session.slug, 9)
+            .expect_err("missing revision");
+        assert!(matches!(
+            error,
+            AppError::RevisionNotFound {
+                session: _,
+                revision: 9
+            }
+        ));
     }
 }
