@@ -10,18 +10,18 @@ Primary references:
 
 ## Current Milestone Status
 
-- Current state: planning/docs only.
+- Current state: implementation complete.
 - Completed:
   - source spec captured in [spec.md](spec.md)
   - execution docs created
+  - Milestone 0: Rust crate scaffold, module tree, config/path resolution, baseline gate
+  - Milestone 1: SQLite schema, session/todo CLI flows, live markdown export, revision snapshots under the hood
+  - Milestone 2: head TUI session view, navigation, mouse hitbox behavior, terminal cleanup
+  - Milestone 3: revision history CLI/TUI flow, read-only revision mode, return-to-head behavior
+  - Milestone 4: Pomodoro persistence, state machine, session card, active-run uniqueness
+  - Milestone 5: config-driven theme/durations, export option matrix, expanded tests
 - Next:
-  - Milestone 0: scaffold Rust crate, quality gate, path/config baseline
-- After that:
-  - Milestone 1: schema + basic CLI flows
-  - Milestone 2: head TUI
-  - Milestone 3: revisions/history/read-only mode
-  - Milestone 4: Pomodoro
-  - Milestone 5: config/theme/export polish/tests
+  - optional UX refinement only; plan scope is complete
 
 ## Decisions Made
 
@@ -37,14 +37,46 @@ Primary references:
   - Pomodoro embedded in session view
   - GFM default export
   - keyboard-first plus additive mouse support
+- Milestone 0 implementation choices:
+  - binary + library crate split so CLI, DB, export, and TUI layers are testable
+  - config defaults and path resolution follow spec exactly, with env overrides for config + DB
+  - module tree mirrors the target architecture so later milestones can fill behavior without structural churn
+- Milestone 1 implementation choices:
+  - SQLite schema follows the spec tables and PRAGMAs, using `PRAGMA user_version` for migration tracking
+  - session mutations already create immutable full snapshots, which keeps later history/read-only work simple
+  - CLI outputs stay compact and scriptable: identifiers / tab-separated summaries to stdout, errors via process exit path
+- Milestone 2-5 implementation choices:
+  - `resume` now opens a real ratatui+crossterm session view and always restores terminal state on exit/error
+  - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
+  - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
+  - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
 
 ## How To Run + Demo
 
 Current repo state:
 
-- No Rust crate yet.
-- No runnable binary yet.
-- Demo commands below are target smoke tests once Milestone 1+ lands.
+- Rust crate initialized.
+- `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` pass at milestone 0.
+- Milestone 1 smoke commands now pass:
+
+```bash
+target/debug/todui session new "Writing Sprint"
+target/debug/todui add "Draft design spec" --session writing-sprint
+target/debug/todui done 1 --session writing-sprint
+target/debug/todui export md writing-sprint --format gfm
+```
+
+Final validation commands run clean:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+target/debug/todui session history writing-sprint
+target/debug/todui resume writing-sprint
+target/debug/todui resume writing-sprint --revision 1
+target/debug/todui export md writing-sprint --revision 1 --timestamps full --include-notes
+```
 
 Target smoke commands:
 
@@ -69,6 +101,5 @@ todui export md writing-sprint --revision 2 --timestamps full --include-notes
 
 ## Known Issues / Follow-Ups
 
-- App implementation not started yet.
-- Validation commands in [plan.md](plan.md) are future-facing until crate scaffold exists.
-- Need to convert this log from planning state to execution log once Milestone 0 starts.
+- No open blockers against [plan.md](plan.md).
+- Follow-up space, if wanted later: richer TUI editing modals and deeper render snapshot coverage.
