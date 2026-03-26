@@ -46,7 +46,8 @@ Primary references:
   - session mutations already create immutable full snapshots, which keeps later history/read-only work simple
   - CLI outputs stay compact and scriptable: identifiers / tab-separated summaries to stdout, errors via process exit path
 - Milestone 2-5 implementation choices:
-  - `resume` now opens a real ratatui+crossterm session view and always restores terminal state on exit/error
+  - bare `todui` now opens a real ratatui+crossterm session overview, while `resume` stays the direct session opener
+  - the overview is browse-only; session recency changes only when a session is actually entered, and `o` returns from a session back to the overview
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
@@ -72,6 +73,7 @@ Final validation commands run clean:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+target/debug/todui
 target/debug/todui session history writing-sprint
 target/debug/todui resume writing-sprint
 target/debug/todui resume writing-sprint --revision 1
@@ -83,6 +85,7 @@ Target smoke commands:
 ```bash
 todui session new "Writing Sprint"
 todui add "Draft design spec" --session writing-sprint
+todui
 todui resume writing-sprint
 todui session history writing-sprint
 todui export md writing-sprint --format gfm

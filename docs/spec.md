@@ -73,6 +73,7 @@ Only one active run may exist globally at any time.
 
 The app shall:
 	•	create and list sessions
+	•	open a session overview when launched without a subcommand
 	•	resume the most recent session by default
 	•	resume a named session
 	•	open a previous revision of a session
@@ -180,6 +181,7 @@ Binary name: todui
 
 8.1 Command summary
 
+todui
 todui session new <name> [--slug <slug>]
 todui session list
 todui session history [<session>]
@@ -240,15 +242,29 @@ todui export md writing-sprint --revision 3 > sprint.md
 
 9.1 Entry points
 
-todui resume is the primary TUI entry command.
+todui without a subcommand opens the primary TUI session overview.
+
+todui resume remains the direct session-entry command.
 
 No separate todui tui command is required in v1.
 
 9.2 Screens
 
-9.2.1 Session view
+9.2.1 Session overview
 
-Default screen. Shows live head or a historical revision of one session.
+Default screen when launched as `todui`.
+
+Shows:
+	•	all sessions ordered by last_opened_at descending
+	•	display name and slug
+	•	current revision
+	•	open/done counts
+
+Enter opens the selected session head.
+
+9.2.2 Session view
+
+Shows live head or a historical revision of one session.
 
 Layout:
 	•	top bar
@@ -256,7 +272,7 @@ Layout:
 	•	right detail pane
 	•	footer
 
-9.2.2 Revision history overlay
+9.2.3 Revision history overlay
 
 Open from session view.
 
@@ -267,7 +283,7 @@ Shows:
 	•	todo count
 	•	done count
 
-9.2.3 Todo editor modal
+9.2.4 Todo editor modal
 
 Simple modal for:
 	•	add todo
@@ -330,6 +346,7 @@ Shows key hints:
 	•	n new
 	•	p Pomodoro
 	•	H history
+	•	o overview
 	•	q quit
 
 9.4 Narrow terminal behavior
@@ -372,6 +389,7 @@ Session actions
 	•	Space / x toggle done
 	•	Enter open details/editor
 	•	H open revision history
+	•	o return to the session overview
 	•	r when in revision mode, return to head
 	•	p open or trigger Pomodoro action on selected todo/session
 

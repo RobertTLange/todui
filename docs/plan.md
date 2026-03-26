@@ -47,6 +47,7 @@ Design notes:
 Fixed decisions; do not re-open unless spec changes:
 
 - `todui resume` defaults to most recent session head.
+- bare `todui` opens the session overview and does not mutate last-opened state by itself.
 - Historical revisions are view-only and read-only.
 - Revision strategy = full snapshot per successful session mutation.
 - Markdown export default = GFM.
@@ -117,6 +118,7 @@ todui export md writing-sprint --format gfm
 
 Scope:
 
+- Implement bare `todui` overview flow that lists sessions and opens the selected session head.
 - Implement `todui resume` head flow.
 - Build top bar, list pane, detail pane, footer.
 - Implement selection, keyboard navigation, Vim aliases, mouse row select, checkbox toggle hitbox.
@@ -125,6 +127,7 @@ Scope:
 
 Acceptance criteria:
 
+- `todui` opens the overview TUI, including an empty state when no sessions exist.
 - TUI opens the most recent session or requested session head.
 - Keyboard-only flow covers all v1 head interactions.
 - Mouse support works where terminal reports it, but app remains fully usable without it.
