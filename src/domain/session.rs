@@ -19,6 +19,12 @@ pub struct SessionSummary {
     pub current_revision: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionHeadToken {
+    pub current_revision: u32,
+    pub updated_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
     pub session: Session,
