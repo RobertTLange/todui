@@ -151,6 +151,16 @@ pub fn execute<W: Write>(
     writer: &mut W,
     cli: Cli,
 ) -> Result<()> {
+    execute_with_runner(database, config, writer, cli, &mut DefaultTuiRunner)
+}
+
+fn execute_with_runner<W: Write>(
+    database: &mut Database,
+    config: &config::Config,
+    writer: &mut W,
+    cli: Cli,
+    runner: &mut impl TuiRunner,
+) -> Result<()> {
     match cli.command {
         Some(Command::Session { command }) => handle_session_command(database, writer, command),
         Some(Command::Add {
@@ -189,10 +199,40 @@ pub fn execute<W: Write>(
             Ok(())
         }
         Some(Command::Resume { session, revision }) => {
-            tui::screen::run(database, config, session, revision)
+            runner.run_session(database, config, session, revision)
         }
         Some(Command::Export { command }) => handle_export_command(database, writer, command),
-        None => Ok(()),
+        None => runner.run_overview(database, config),
+    }
+}
+
+trait TuiRunner {
+    fn run_overview(&mut self, database: &mut Database, config: &config::Config) -> Result<()>;
+
+    fn run_session(
+        &mut self,
+        database: &mut Database,
+        config: &config::Config,
+        session: Option<String>,
+        revision: Option<u32>,
+    ) -> Result<()>;
+}
+
+struct DefaultTuiRunner;
+
+impl TuiRunner for DefaultTuiRunner {
+    fn run_overview(&mut self, database: &mut Database, config: &config::Config) -> Result<()> {
+        tui::overview::run(database, config)
+    }
+
+    fn run_session(
+        &mut self,
+        database: &mut Database,
+        config: &config::Config,
+        session: Option<String>,
+        revision: Option<u32>,
+    ) -> Result<()> {
+        tui::screen::run(database, config, session, revision)
     }
 }
 
@@ -235,6 +275,117 @@ fn handle_session_command<W: Write>(
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::{Cli, Command, DefaultTuiRunner, SessionCommand, execute_with_runner};
+    use crate::config::Config;
+    use crate::db::Database;
+    use crate::error::Result;
+
+    #[derive(Default)]
+    struct SpyTuiRunner {
+        overview_calls: usize,
+        session_calls: Vec<(Option<String>, Option<u32>)>,
+    }
+
+    impl super::TuiRunner for SpyTuiRunner {
+        fn run_overview(&mut self, _database: &mut Database, _config: &Config) -> Result<()> {
+            self.overview_calls += 1;
+            Ok(())
+        }
+
+        fn run_session(
+            &mut self,
+            _database: &mut Database,
+            _config: &Config,
+            session: Option<String>,
+            revision: Option<u32>,
+        ) -> Result<()> {
+            self.session_calls.push((session, revision));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_command_dispatches_to_overview() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut writer = Vec::new();
+        let mut runner = SpyTuiRunner::default();
+
+        execute_with_runner(
+            &mut database,
+            &Config::default(),
+            &mut writer,
+            Cli { command: None },
+            &mut runner,
+        )
+        .expect("execute");
+
+        assert_eq!(runner.overview_calls, 1);
+        assert!(runner.session_calls.is_empty());
+        assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn resume_command_dispatches_to_session_screen() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut writer = Vec::new();
+        let mut runner = SpyTuiRunner::default();
+
+        execute_with_runner(
+            &mut database,
+            &Config::default(),
+            &mut writer,
+            Cli {
+                command: Some(Command::Resume {
+                    session: Some(String::from("writing-sprint")),
+                    revision: Some(3),
+                }),
+            },
+            &mut runner,
+        )
+        .expect("execute");
+
+        assert_eq!(runner.overview_calls, 0);
+        assert_eq!(
+            runner.session_calls,
+            vec![(Some(String::from("writing-sprint")), Some(3))]
+        );
+    }
+
+    #[test]
+    fn session_commands_do_not_hit_tui_runner() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut writer = Vec::new();
+        let mut runner = SpyTuiRunner::default();
+
+        execute_with_runner(
+            &mut database,
+            &Config::default(),
+            &mut writer,
+            Cli {
+                command: Some(Command::Session {
+                    command: SessionCommand::New {
+                        name: String::from("Writing Sprint"),
+                        slug: None,
+                    },
+                }),
+            },
+            &mut runner,
+        )
+        .expect("execute");
+
+        assert_eq!(runner.overview_calls, 0);
+        assert!(runner.session_calls.is_empty());
+        assert_eq!(String::from_utf8(writer).expect("utf8"), "writing-sprint\n");
+    }
+
+    #[test]
+    fn default_tui_runner_stays_constructible() {
+        let _runner = DefaultTuiRunner;
     }
 }
 
