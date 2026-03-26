@@ -20,6 +20,16 @@ pub struct SessionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOverview {
+    pub slug: String,
+    pub name: String,
+    pub last_opened_at: i64,
+    pub current_revision: u32,
+    pub todo_count: i64,
+    pub done_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
     pub session: Session,
     pub todos: Vec<crate::domain::todo::Todo>,

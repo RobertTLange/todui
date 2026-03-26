@@ -2,7 +2,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::db::Database;
 use crate::domain::revision::RevisionSummary;
-use crate::domain::session::{Session, SessionSummary, slugify, validate_slug};
+use crate::domain::session::{Session, SessionOverview, SessionSummary, slugify, validate_slug};
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -35,6 +35,25 @@ impl Database {
              ORDER BY last_opened_at DESC, id DESC",
         )?;
         let rows = statement.query_map([], map_session_summary)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_session_overview(&self) -> Result<Vec<SessionOverview>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                sessions.slug,
+                sessions.name,
+                sessions.last_opened_at,
+                sessions.current_revision,
+                COALESCE(session_revisions.todo_count, 0),
+                COALESCE(session_revisions.done_count, 0)
+             FROM sessions
+             LEFT JOIN session_revisions
+               ON session_revisions.session_id = sessions.id
+              AND session_revisions.revision_number = sessions.current_revision
+             ORDER BY sessions.last_opened_at DESC, sessions.id DESC",
+        )?;
+        let rows = statement.query_map([], map_session_overview)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -200,6 +219,17 @@ fn map_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSumma
     })
 }
 
+fn map_session_overview(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOverview> {
+    Ok(SessionOverview {
+        slug: row.get(0)?,
+        name: row.get(1)?,
+        last_opened_at: row.get(2)?,
+        current_revision: row.get(3)?,
+        todo_count: row.get(4)?,
+        done_count: row.get(5)?,
+    })
+}
+
 pub(crate) fn map_revision_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RevisionSummary> {
     Ok(RevisionSummary {
         revision_number: row.get(0)?,
@@ -252,5 +282,41 @@ mod tests {
             database.resolve_session_slug(None).expect("recent"),
             "writing-sprint"
         );
+    }
+
+    #[test]
+    fn lists_overview_rows_in_recent_order_with_counts() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let writing = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        database
+            .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
+            .expect("todo");
+        database
+            .add_todo(&writing.slug, "Review keybindings", "", 1_711_275_660)
+            .expect("todo");
+        database
+            .set_todo_status(
+                1,
+                Some(&writing.slug),
+                crate::domain::todo::TodoStatus::Done,
+                1_711_275_670,
+            )
+            .expect("done");
+
+        let reading = database
+            .create_session("Reading Sprint", None, 1_711_275_700)
+            .expect("session");
+        database
+            .mark_session_opened(&writing.slug, 1_711_275_800)
+            .expect("opened");
+
+        let overview = database.list_session_overview().expect("overview");
+        assert_eq!(overview.len(), 2);
+        assert_eq!(overview[0].slug, writing.slug);
+        assert_eq!(overview[0].todo_count, 2);
+        assert_eq!(overview[0].done_count, 1);
+        assert_eq!(overview[1].slug, reading.slug);
     }
 }

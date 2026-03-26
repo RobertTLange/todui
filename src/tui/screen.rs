@@ -1,17 +1,10 @@
 use std::cmp::min;
-use std::io::{Stdout, stdout};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -27,11 +20,10 @@ use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
+use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
 
 const EVENT_POLL_MS: u64 = 250;
-
-type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn run(
     database: &mut Database,
@@ -39,31 +31,44 @@ pub fn run(
     session_slug: Option<String>,
     revision: Option<u32>,
 ) -> Result<()> {
+    super::run(
+        database,
+        config,
+        super::TuiRoute::Session {
+            session_slug,
+            revision,
+        },
+    )
+}
+
+pub(crate) fn run_in_terminal(
+    terminal: &mut AppTerminal,
+    database: &mut Database,
+    config: &Config,
+    session_slug: Option<String>,
+    revision: Option<u32>,
+) -> Result<SessionExit> {
     let resolved_slug = database.resolve_session_slug(session_slug.as_deref())?;
     database.mark_session_opened(&resolved_slug, now_utc_timestamp())?;
 
     let mut screen = SessionScreen::new(resolved_slug, revision, config.clone());
     screen.reload(database)?;
-
-    let mut terminal = init_terminal()?;
-    let result = event_loop(&mut terminal, database, &mut screen);
-    restore_terminal(&mut terminal)?;
-    result
+    event_loop(terminal, database, &mut screen)
 }
 
 fn event_loop(
     terminal: &mut AppTerminal,
     database: &mut Database,
     screen: &mut SessionScreen,
-) -> Result<()> {
+) -> Result<SessionExit> {
     loop {
         terminal.draw(|frame| screen.render(frame))?;
 
         if event::poll(Duration::from_millis(EVENT_POLL_MS))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    if screen.handle_key(database, key_event)? {
-                        break Ok(());
+                    if let Some(exit) = screen.handle_key(database, key_event)? {
+                        break Ok(exit);
                     }
                 }
                 Event::Mouse(mouse_event) => {
@@ -80,22 +85,10 @@ fn event_loop(
     }
 }
 
-fn init_terminal() -> Result<AppTerminal> {
-    enable_raw_mode()?;
-    let mut handle = stdout();
-    execute!(handle, EnterAlternateScreen, EnableMouseCapture)?;
-    Ok(Terminal::new(CrosstermBackend::new(handle))?)
-}
-
-fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionExit {
+    Quit,
+    Overview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,9 +166,13 @@ impl SessionScreen {
         Ok(())
     }
 
-    fn handle_key(&mut self, database: &mut Database, key: KeyEvent) -> Result<bool> {
+    fn handle_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            return Ok(true);
+            return Ok(Some(SessionExit::Quit));
         }
 
         match self.overlay {
@@ -187,97 +184,98 @@ impl SessionScreen {
                 ) {
                     self.overlay = None;
                 }
-                return Ok(false);
+                return Ok(None);
             }
             Some(Overlay::Details) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.overlay = None;
                 }
-                return Ok(false);
+                return Ok(None);
             }
             None => {}
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Ok(true),
+            KeyCode::Char('q') | KeyCode::Esc => Ok(Some(SessionExit::Quit)),
+            KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
             KeyCode::Char('?') => {
                 self.overlay = Some(Overlay::Help);
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Up | KeyCode::Char('k')
                 if matches!(key.code, KeyCode::Up)
                     || key_matches_binding(&key, &self.config.keys.up) =>
             {
                 self.move_selection(-1, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Down | KeyCode::Char('j')
                 if matches!(key.code, KeyCode::Down)
                     || key_matches_binding(&key, &self.config.keys.down) =>
             {
                 self.move_selection(1, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.selected_index = 0;
                 self.scroll_offset = 0;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::End | KeyCode::Char('G') => {
                 self.selected_index = self.snapshot().todos.len().saturating_sub(1);
                 self.ensure_selection_visible(self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::PageUp => {
                 self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::PageDown => {
                 self.move_selection(self.visible_rows() as isize, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(self.visible_rows() as isize, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('x') | KeyCode::Char(' ')
                 if key_matches_binding(&key, &self.config.keys.toggle_done) =>
             {
                 self.toggle_selected_todo(database)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
                 self.overlay = Some(Overlay::History);
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('r') if self.revision.is_some() => {
                 self.revision = None;
                 self.reload(database)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('p') if key_matches_binding(&key, &self.config.keys.pomodoro) => {
                 self.handle_pomodoro(database, PomodoroKind::Focus)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('b') => {
                 self.handle_pomodoro(database, PomodoroKind::ShortBreak)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('B') => {
                 self.handle_pomodoro(database, PomodoroKind::LongBreak)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('c') => {
                 self.cancel_active_pomodoro(database)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Tab => {
                 self.medium_drawer_open = !self.medium_drawer_open;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Enter => {
                 if matches!(
@@ -286,13 +284,17 @@ impl SessionScreen {
                 ) {
                     self.overlay = Some(Overlay::Details);
                 }
-                Ok(false)
+                Ok(None)
             }
-            _ => Ok(false),
+            _ => Ok(None),
         }
     }
 
-    fn handle_history_key(&mut self, database: &Database, key: KeyEvent) -> Result<bool> {
+    fn handle_history_key(
+        &mut self,
+        database: &Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -313,7 +315,7 @@ impl SessionScreen {
             }
             _ => {}
         }
-        Ok(false)
+        Ok(None)
     }
 
     fn handle_mouse(
@@ -616,15 +618,17 @@ impl SessionScreen {
 
     fn footer(&self, layout_mode: LayoutMode) -> Paragraph<'static> {
         let text = if self.is_read_only() {
-            "j/k move  H history  r return to head  q quit"
+            "j/k move  H history  r return to head  o overview  q quit"
         } else {
             match layout_mode {
-                LayoutMode::Wide => "j/k move  space toggle  H history  p pomodoro  q quit",
+                LayoutMode::Wide => {
+                    "j/k move  space toggle  H history  p pomodoro  o overview  q quit"
+                }
                 LayoutMode::Medium => {
-                    "j/k move  space toggle  Tab drawer  H history  p pomodoro  q quit"
+                    "j/k move  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  space toggle  Enter details  H history  p pomodoro  q quit"
+                    "j/k move  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
                 }
             }
         };
@@ -635,7 +639,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -865,7 +869,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        ListClickTarget, Overlay, SessionScreen, format_duration, key_matches_binding,
+        ListClickTarget, Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding,
         list_click_target, progress_bar,
     };
     use crate::config::Config;
@@ -923,9 +927,10 @@ mod tests {
     fn screen_handles_navigation_toggle_history_and_read_only_paths() {
         let (_directory, mut database, mut screen) = seeded_screen();
         assert!(
-            !screen
+            screen
                 .handle_key(&mut database, key(KeyCode::Char('?')))
                 .unwrap()
+                .is_none()
         );
         assert!(matches!(screen.overlay, Some(Overlay::Help)));
         screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
@@ -983,6 +988,13 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('r')))
             .unwrap();
         assert!(matches!(screen.snapshot().mode, RevisionMode::Head));
+
+        assert_eq!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Char('o')))
+                .unwrap(),
+            Some(SessionExit::Overview)
+        );
     }
 
     #[test]
@@ -1080,6 +1092,7 @@ mod tests {
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
         assert!(wide.contains("Pomodoro"));
+        assert!(wide.contains("o overview"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
@@ -1096,6 +1109,7 @@ mod tests {
         screen.overlay = Some(Overlay::Help);
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
+        assert!(help.contains("Overview: o"));
 
         screen.toast = Some(super::ToastState {
             message: String::from("hello"),
