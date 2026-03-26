@@ -26,8 +26,14 @@ pub fn layout_mode(width: u16) -> LayoutMode {
     }
 }
 
-pub fn split_screen(area: Rect, medium_drawer_open: bool, top_bar_height: u16) -> ScreenLayout {
+pub fn split_screen(
+    area: Rect,
+    medium_drawer_open: bool,
+    top_bar_height: u16,
+    pomodoro_height: u16,
+) -> ScreenLayout {
     let mode = layout_mode(area.width);
+    let pomodoro_height = pomodoro_height.max(3);
     let outer = Layout::vertical([
         Constraint::Length(top_bar_height.max(3)),
         Constraint::Min(0),
@@ -40,7 +46,7 @@ pub fn split_screen(area: Rect, medium_drawer_open: bool, top_bar_height: u16) -
             let panes =
                 Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
                     .split(outer[1]);
-            let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+            let right = Layout::vertical([Constraint::Min(0), Constraint::Length(pomodoro_height)])
                 .split(panes[1]);
             ScreenLayout {
                 mode,
@@ -54,19 +60,26 @@ pub fn split_screen(area: Rect, medium_drawer_open: bool, top_bar_height: u16) -
         }
         LayoutMode::Medium => {
             let panes = if medium_drawer_open {
-                Layout::vertical([Constraint::Min(0), Constraint::Length(11)]).split(outer[1])
+                Layout::vertical([
+                    Constraint::Min(0),
+                    Constraint::Length(pomodoro_height.saturating_add(6)),
+                ])
+                .split(outer[1])
             } else {
                 Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(outer[1])
             };
-            let details = medium_drawer_open.then_some(panes[1]);
+            let drawer = medium_drawer_open.then(|| {
+                Layout::vertical([Constraint::Min(0), Constraint::Length(pomodoro_height)])
+                    .split(panes[1])
+            });
             ScreenLayout {
                 mode,
                 top_bar: outer[0],
                 main: outer[1],
                 footer: outer[2],
                 list: panes[0],
-                details,
-                pomodoro: details,
+                details: drawer.as_ref().map(|areas| areas[0]),
+                pomodoro: drawer.as_ref().map(|areas| areas[1]),
             }
         }
         LayoutMode::Narrow => ScreenLayout {
@@ -114,7 +127,13 @@ mod tests {
 
     #[test]
     fn medium_layout_can_hide_details_drawer() {
-        let layout = split_screen(Rect::new(0, 0, 80, 24), false, 3);
+        let layout = split_screen(Rect::new(0, 0, 80, 24), false, 3, 4);
         assert!(layout.details.is_none());
+    }
+
+    #[test]
+    fn medium_layout_sizes_pomodoro_to_requested_height() {
+        let layout = split_screen(Rect::new(0, 0, 80, 24), true, 3, 4);
+        assert_eq!(layout.pomodoro.expect("pomodoro").height, 4);
     }
 }
