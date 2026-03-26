@@ -23,6 +23,7 @@ use crate::domain::pomodoro::{
     PomodoroKind, PomodoroRun, PomodoroState, PomodoroSummary, progress_ratio, remaining_seconds,
 };
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
+use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
@@ -119,6 +120,7 @@ struct SessionScreen {
     revisions: Vec<RevisionSummary>,
     pomodoro_summary: PomodoroSummary,
     active_run: Option<PomodoroRun>,
+    head_token: Option<SessionHeadToken>,
     selected_index: usize,
     scroll_offset: usize,
     history_index: usize,
@@ -141,6 +143,7 @@ impl SessionScreen {
                 total_focus_seconds: 0,
             },
             active_run: None,
+            head_token: None,
             selected_index: 0,
             scroll_offset: 0,
             history_index: 0,
@@ -161,6 +164,7 @@ impl SessionScreen {
             self.revision.map(|_| snapshot.revision.created_at),
         )?;
         self.active_run = database.get_active_pomodoro()?;
+        self.head_token = Some(database.session_head_token(&self.session_slug)?);
         self.snapshot = Some(snapshot);
         self.reselect(selected_todo_id);
         if let Some(revision) = self.revision {
@@ -362,6 +366,7 @@ impl SessionScreen {
     }
 
     fn handle_tick(&mut self, database: &mut Database) -> Result<()> {
+        self.refresh_live_head(database)?;
         let Some(run) = self.active_run.clone() else {
             return Ok(());
         };
@@ -370,6 +375,18 @@ impl SessionScreen {
         {
             database.complete_pomodoro(run.id, now_utc_timestamp())?;
             self.set_toast(String::from("Pomodoro completed"));
+            self.reload(database)?;
+        }
+        Ok(())
+    }
+
+    fn refresh_live_head(&mut self, database: &Database) -> Result<()> {
+        if self.revision.is_some() {
+            return Ok(());
+        }
+
+        let latest = database.session_head_token(&self.session_slug)?;
+        if self.head_token != Some(latest) {
             self.reload(database)?;
         }
         Ok(())
@@ -853,6 +870,7 @@ fn progress_bar(run: &PomodoroRun, now: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     use crossterm::event::{
@@ -1074,6 +1092,71 @@ mod tests {
     }
 
     #[test]
+    fn screen_tick_refreshes_head_after_external_todo_add() {
+        let (_directory, mut database, mut screen, database_path) = seeded_screen_with_path();
+        let mut external = Database::open(&database_path).expect("external database");
+
+        external
+            .add_todo(&screen.session_slug, "Ship live refresh", "", 1_711_275_900)
+            .expect("external todo");
+        screen.handle_tick(&mut database).expect("tick");
+
+        let titles = screen
+            .snapshot()
+            .todos
+            .iter()
+            .map(|todo| todo.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec!["Draft spec", "Review bindings", "Ship live refresh"]
+        );
+    }
+
+    #[test]
+    fn screen_tick_keeps_historical_revision_frozen() {
+        let (_directory, mut database, mut screen, database_path) = seeded_screen_with_path();
+        let mut external = Database::open(&database_path).expect("external database");
+        let revision = screen.snapshot().revision.revision_number;
+
+        screen.revision = Some(revision);
+        screen.reload(&database).expect("load historical revision");
+        external
+            .add_todo(
+                &screen.session_slug,
+                "Should stay hidden",
+                "",
+                1_711_275_900,
+            )
+            .expect("external todo");
+
+        screen.handle_tick(&mut database).expect("tick");
+
+        assert_eq!(screen.snapshot().todos.len(), 2);
+        assert!(
+            screen
+                .snapshot()
+                .todos
+                .iter()
+                .all(|todo| todo.title != "Should stay hidden")
+        );
+    }
+
+    #[test]
+    fn screen_tick_ignores_unrelated_session_creation() {
+        let (_directory, mut database, mut screen, database_path) = seeded_screen_with_path();
+        let mut external = Database::open(&database_path).expect("external database");
+
+        external
+            .create_session("Reading Sprint", None, 1_711_275_900)
+            .expect("external session");
+        screen.handle_tick(&mut database).expect("tick");
+
+        assert_eq!(screen.session_slug, "writing-sprint");
+        assert_eq!(screen.snapshot().todos.len(), 2);
+    }
+
+    #[test]
     fn render_covers_wide_medium_narrow_and_overlay_states() {
         let (_directory, _database, mut screen) = seeded_screen();
 
@@ -1106,7 +1189,13 @@ mod tests {
     }
 
     fn seeded_screen() -> (tempfile::TempDir, Database, SessionScreen) {
+        let (directory, database, screen, _) = seeded_screen_with_path();
+        (directory, database, screen)
+    }
+
+    fn seeded_screen_with_path() -> (tempfile::TempDir, Database, SessionScreen, PathBuf) {
         let (directory, mut database) = Database::open_temp().expect("database");
+        let database_path = directory.path().join("todui.db");
         let session = database
             .create_session("Writing Sprint", None, 1_711_275_600)
             .expect("session");
@@ -1119,7 +1208,7 @@ mod tests {
 
         let mut screen = SessionScreen::new(session.slug, None, Config::default());
         screen.reload(&database).expect("reload");
-        (directory, database, screen)
+        (directory, database, screen, database_path)
     }
 
     fn render_buffer(screen: &SessionScreen, width: u16, height: u16) -> String {
