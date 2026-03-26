@@ -281,7 +281,12 @@ impl SessionScreen {
             }
             KeyCode::Enter => {
                 if matches!(
-                    split_screen(Rect::new(0, 0, 60, 24), self.medium_drawer_open).mode,
+                    split_screen(
+                        Rect::new(0, 0, 60, 24),
+                        self.medium_drawer_open,
+                        self.top_bar_height(),
+                    )
+                    .mode,
                     LayoutMode::Narrow
                 ) {
                     self.overlay = Some(Overlay::Details);
@@ -330,7 +335,7 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
-                let layout = split_screen(area, self.medium_drawer_open);
+                let layout = split_screen(area, self.medium_drawer_open, self.top_bar_height());
                 if let Some(target) =
                     list_click_target(layout.list, self.scroll_offset, mouse.column, mouse.row)
                 {
@@ -442,7 +447,7 @@ impl SessionScreen {
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
-        let layout = split_screen(frame.area(), self.medium_drawer_open);
+        let layout = split_screen(frame.area(), self.medium_drawer_open, self.top_bar_height());
         let snapshot = self.snapshot();
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
@@ -528,6 +533,14 @@ impl SessionScreen {
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title("Session"))
             .style(self.theme.block_style())
+    }
+
+    fn top_bar_height(&self) -> u16 {
+        if self.is_read_only() || self.current_session_run().is_some() {
+            4
+        } else {
+            3
+        }
     }
 
     fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> List<'static> {
@@ -994,7 +1007,7 @@ mod tests {
             .handle_mouse(
                 &mut database,
                 area,
-                mouse(MouseEventKind::Down(MouseButton::Left), 6, 5),
+                mouse(MouseEventKind::Down(MouseButton::Left), 6, 4),
             )
             .unwrap();
         assert_eq!(screen.selected_index, 0);
@@ -1003,7 +1016,7 @@ mod tests {
             .handle_mouse(
                 &mut database,
                 area,
-                mouse(MouseEventKind::Down(MouseButton::Left), 1, 5),
+                mouse(MouseEventKind::Down(MouseButton::Left), 1, 4),
             )
             .unwrap();
         assert_eq!(
@@ -1080,6 +1093,9 @@ mod tests {
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
         assert!(wide.contains("Pomodoro"));
+        let wide_lines = wide.lines().collect::<Vec<_>>();
+        assert!(wide_lines[2].starts_with("└"));
+        assert!(wide_lines[3].contains("Todos"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
