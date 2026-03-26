@@ -26,10 +26,10 @@ pub fn layout_mode(width: u16) -> LayoutMode {
     }
 }
 
-pub fn split_screen(area: Rect, medium_drawer_open: bool) -> ScreenLayout {
+pub fn split_screen(area: Rect, medium_drawer_open: bool, top_bar_height: u16) -> ScreenLayout {
     let mode = layout_mode(area.width);
     let outer = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(top_bar_height.max(3)),
         Constraint::Min(0),
         Constraint::Length(3),
     ])
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn medium_layout_can_hide_details_drawer() {
-        let layout = split_screen(Rect::new(0, 0, 80, 24), false);
+        let layout = split_screen(Rect::new(0, 0, 80, 24), false, 3);
         assert!(layout.details.is_none());
     }
 }
