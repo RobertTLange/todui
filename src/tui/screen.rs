@@ -72,7 +72,9 @@ fn event_loop(
         if event::poll(Duration::from_millis(EVENT_POLL_MS))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    if let Some(exit) = screen.handle_key(database, key_event)? {
+                    if let Some(exit) =
+                        screen.handle_key_in_area(database, key_event, terminal.size()?.into())?
+                    {
                         break Ok(exit);
                     }
                 }
@@ -84,6 +86,9 @@ fn event_loop(
             }
         } else {
             screen.handle_tick(database)?;
+            if screen.take_pending_bell() {
+                let _ = super::terminal::ring_terminal(terminal);
+            }
         }
 
         screen.expire_toast();
@@ -146,6 +151,7 @@ struct SessionScreen {
     overlay: Option<Overlay>,
     todo_editor: TodoEditorState,
     toast: Option<ToastState>,
+    pending_completion_bell: bool,
     theme: Theme,
     config: Config,
 }
@@ -170,6 +176,7 @@ impl SessionScreen {
             overlay: None,
             todo_editor: TodoEditorState::default(),
             toast: None,
+            pending_completion_bell: false,
             theme: Theme::from_config(&config),
             config,
         }
@@ -197,10 +204,20 @@ impl SessionScreen {
         Ok(())
     }
 
+    #[cfg(test)]
     fn handle_key(
         &mut self,
         database: &mut Database,
         key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
+        self.handle_key_in_area(database, key, Rect::new(0, 0, 120, 24))
+    }
+
+    fn handle_key_in_area(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+        area: Rect,
     ) -> Result<Option<SessionExit>> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             return Ok(Some(SessionExit::Quit));
@@ -329,16 +346,7 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Enter => {
-                if matches!(
-                    split_screen(
-                        Rect::new(0, 0, 60, 24),
-                        self.medium_drawer_open,
-                        self.top_bar_height(),
-                        4,
-                    )
-                    .mode,
-                    LayoutMode::Narrow
-                ) {
+                if matches!(self.layout_for_area(area).mode, LayoutMode::Narrow) {
                     self.overlay = Some(Overlay::Details);
                 }
                 Ok(None)
@@ -507,6 +515,9 @@ impl SessionScreen {
             && remaining_seconds(&run, now_utc_timestamp()) == 0
         {
             database.complete_pomodoro(run.id, now_utc_timestamp())?;
+            if self.config.pomodoro.notify_on_complete {
+                self.pending_completion_bell = true;
+            }
             self.set_toast(String::from("Pomodoro completed"));
             self.reload(database)?;
         }
@@ -987,6 +998,12 @@ impl SessionScreen {
         {
             self.toast = None;
         }
+    }
+
+    fn take_pending_bell(&mut self) -> bool {
+        let pending = self.pending_completion_bell;
+        self.pending_completion_bell = false;
+        pending
     }
 
     fn open_todo_editor(&mut self) {
@@ -1762,7 +1779,7 @@ mod tests {
         assert!(medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
-        let narrow = render_buffer(&screen, 60, 24);
+        let narrow = render_buffer(&screen, 49, 24);
         assert!(narrow.contains("Details"));
 
         screen.overlay = Some(Overlay::History);
@@ -1785,6 +1802,42 @@ mod tests {
         });
         let toast = render_buffer(&screen, 120, 24);
         assert!(toast.contains("Notice"));
+    }
+
+    fn stacked_layout_keeps_details_and_pomodoro_visible_at_sixty_columns() {
+        let (_directory, _database, screen) = seeded_screen();
+
+        let stacked = render_buffer(&screen, 60, 24);
+        assert!(stacked.contains("Details"));
+        assert!(stacked.contains("Pomodoro"));
+    }
+
+    #[test]
+    fn tiny_layout_keeps_overlay_details_flow_below_fifty_columns() {
+        let (_directory, _database, mut screen) = seeded_screen();
+
+        let tiny = render_buffer(&screen, 49, 24);
+        assert!(!tiny.contains("Details"));
+        assert!(!tiny.contains("Pomodoro"));
+
+        screen.overlay = Some(Overlay::Details);
+        let details = render_buffer(&screen, 49, 24);
+        assert!(details.contains("Details"));
+    }
+
+    #[test]
+    fn enter_uses_real_viewport_width_for_details_overlay() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key_in_area(&mut database, key(KeyCode::Enter), Rect::new(0, 0, 60, 24))
+            .unwrap();
+        assert!(screen.overlay.is_none());
+
+        screen
+            .handle_key_in_area(&mut database, key(KeyCode::Enter), Rect::new(0, 0, 49, 24))
+            .unwrap();
+        assert!(matches!(screen.overlay, Some(Overlay::Details)));
     }
 
     #[test]
