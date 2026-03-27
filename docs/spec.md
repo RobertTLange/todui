@@ -305,7 +305,7 @@ Shows live head or a historical revision of one session.
 Layout:
 	•	top bar
 	•	main list pane
-	•	right detail pane
+	•	Pomodoro pane when width allows
 	•	footer
 
 9.2.3 Revision history overlay
@@ -358,16 +358,14 @@ Row examples:
 [x] Review CLI commands            done 10:05
 [ ] Write markdown exporter   FOCUS created 10:12
 
-Right pane
-
-Two stacked cards:
-	1.	Todo details card
+Details overlay
 	•	title
 	•	status
 	•	notes
 	•	created / updated / completed timestamps
 	•	internal todo id
-	2.	Pomodoro card
+
+Pomodoro pane
 	•	phase label: FOCUS, SHORT BREAK, LONG BREAK
 	•	remaining time
 	•	progress bar
@@ -390,26 +388,23 @@ Shows key hints:
 9.4 Narrow terminal behavior
 
 Width >= 100 columns
-	•	two-column layout
-	•	list left, details+Pomodoro right
+	•	list takes the main pane
+	•	Pomodoro stays visible below the list
 
 Width 50–99 columns
 	•	list takes full width
-	•	right pane becomes bottom drawer
-	•	toggle drawer with Tab
+	•	Pomodoro stays visible below the list
 
 Width < 50 columns
 	•	single-pane list
-	•	Enter opens detail modal
+	•	i or Right opens detail modal
 	•	Pomodoro badge remains in top bar
-	•	Pomodoro controls open in modal
 
 9.5 Keyboard bindings
 
 Global
 	•	q quit screen / close overlay / quit app
 	•	Esc close modal or overlay
-	•	Tab switch focused pane
 	•	? help overlay
 	•	Ctrl-c hard exit
 
@@ -427,9 +422,9 @@ Session actions
 	•	d delete selected todo after confirmation
 	•	D delete current session after confirmation
 	•	Space / x toggle done
-	•	Enter open details
+	•	i or Right open details
 	•	H open revision history
-	•	Left or o return to the session overview
+	•	Left closes details first, otherwise returns to the session overview
 	•	r when in revision mode, return to head
 	•	p open or trigger Pomodoro action on selected todo/session
 
@@ -524,7 +519,7 @@ pomodoro runs
 
 Render rules
 	•	list rows show compact local-time timestamps
-	•	details pane shows full local datetime
+	•	details overlay shows full local datetime
 	•	CLI markdown export uses ISO-like human-readable text
 	•	database never stores localtime strings
 
