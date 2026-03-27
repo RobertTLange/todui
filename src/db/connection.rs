@@ -90,6 +90,18 @@ mod tests {
                   done_count        INTEGER NOT NULL,
                   UNIQUE(session_id, revision_number)
                 ) STRICT;
+                CREATE TABLE session_revision_todos (
+                  revision_id       INTEGER NOT NULL REFERENCES session_revisions(id) ON DELETE CASCADE,
+                  todo_id           INTEGER NOT NULL,
+                  title             TEXT NOT NULL,
+                  notes             TEXT NOT NULL,
+                  status            TEXT NOT NULL CHECK (status IN ('open', 'done')),
+                  position          INTEGER NOT NULL,
+                  created_at        INTEGER NOT NULL,
+                  updated_at        INTEGER NOT NULL,
+                  completed_at      INTEGER,
+                  PRIMARY KEY (revision_id, todo_id)
+                ) STRICT;
                 CREATE TABLE todos (
                   id                INTEGER PRIMARY KEY,
                   session_id        INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -114,6 +126,10 @@ mod tests {
                   accumulated_pause   INTEGER NOT NULL DEFAULT 0,
                   ended_at            INTEGER,
                   updated_at          INTEGER NOT NULL
+                ) STRICT;
+                CREATE TABLE app_state (
+                  key               TEXT PRIMARY KEY,
+                  value             TEXT NOT NULL
                 ) STRICT;
                 ",
             )
@@ -141,6 +157,38 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("revision tag column");
+        let session_repo_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('sessions') WHERE name = 'repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session repo column");
+        let todo_repo_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('todos') WHERE name = 'repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("todo repo column");
+        let revision_repo_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('session_revisions') WHERE name = 'session_repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revision repo column");
+        let revision_todo_repo_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('session_revision_todos') WHERE name = 'repo'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revision todo repo column");
         let pomodoro_session_not_null: i64 = reopened
             .connection
             .query_row(
@@ -153,6 +201,10 @@ mod tests {
         assert_eq!(user_version, LATEST_USER_VERSION);
         assert_eq!(session_tag_exists, "tag");
         assert_eq!(revision_tag_exists, "session_tag");
+        assert_eq!(session_repo_exists, "repo");
+        assert_eq!(todo_repo_exists, "repo");
+        assert_eq!(revision_repo_exists, "session_repo");
+        assert_eq!(revision_todo_repo_exists, "repo");
         assert_eq!(pomodoro_session_not_null, 0);
     }
 }

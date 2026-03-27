@@ -6,6 +6,7 @@ pub struct Session {
     pub slug: String,
     pub name: String,
     pub tag: Option<String>,
+    pub repo: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_opened_at: i64,
@@ -17,6 +18,7 @@ pub struct SessionSummary {
     pub slug: String,
     pub name: String,
     pub tag: Option<String>,
+    pub repo: Option<String>,
     pub last_opened_at: i64,
     pub current_revision: u32,
 }
@@ -32,6 +34,7 @@ pub struct SessionOverview {
     pub slug: String,
     pub name: String,
     pub tag: Option<String>,
+    pub repo: Option<String>,
     pub last_opened_at: i64,
     pub current_revision: u32,
     pub todo_count: i64,

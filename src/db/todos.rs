@@ -2,7 +2,8 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::db::Database;
 use crate::db::sessions::create_revision_snapshot;
-use crate::domain::todo::{Todo, TodoStatus};
+use crate::domain::github::normalize_optional_repo;
+use crate::domain::todo::{RepoSource, RepoTodoMatch, Todo, TodoStatus};
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -11,9 +12,11 @@ impl Database {
         session_slug: &str,
         title: &str,
         notes: &str,
+        repo: Option<&str>,
         now: i64,
     ) -> Result<Todo> {
         let transaction = self.connection.transaction()?;
+        let resolved_repo = normalize_optional_repo(repo)?;
         let session_id = transaction
             .query_row(
                 "SELECT id FROM sessions WHERE slug = ?1",
@@ -31,9 +34,9 @@ impl Database {
 
         transaction.execute(
             "INSERT INTO todos (
-                session_id, title, notes, status, position, created_at, updated_at, completed_at
-             ) VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?5, NULL)",
-            params![session_id, title, notes, position, now],
+                session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?6, NULL)",
+            params![session_id, title, notes, resolved_repo, position, now],
         )?;
         let todo_id = transaction.last_insert_rowid();
 
@@ -116,14 +119,21 @@ impl Database {
         session_slug: Option<&str>,
         title: &str,
         notes: &str,
+        repo: Option<&str>,
         now: i64,
     ) -> Result<Todo> {
         let transaction = self.connection.transaction()?;
-        let (session_id, current_title, current_notes): (i64, String, String) = transaction
+        let resolved_repo = normalize_optional_repo(repo)?;
+        let (session_id, current_title, current_notes, current_repo): (
+            i64,
+            String,
+            String,
+            Option<String>,
+        ) = transaction
             .query_row(
-                "SELECT session_id, title, notes FROM todos WHERE id = ?1",
+                "SELECT session_id, title, notes, repo FROM todos WHERE id = ?1",
                 [todo_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
             .ok_or(AppError::TodoNotFound(todo_id))?;
@@ -142,12 +152,12 @@ impl Database {
             }
         }
 
-        if current_title != title || current_notes != notes {
+        if current_title != title || current_notes != notes || current_repo != resolved_repo {
             transaction.execute(
                 "UPDATE todos
-                 SET title = ?1, notes = ?2, updated_at = ?3
-                 WHERE id = ?4",
-                params![title, notes, now, todo_id],
+                 SET title = ?1, notes = ?2, repo = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![title, notes, resolved_repo, now, todo_id],
             )?;
             transaction.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -173,7 +183,7 @@ impl Database {
         let transaction = self.connection.transaction()?;
         let todo = transaction
             .query_row(
-                "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
+                "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
                  FROM todos
                  WHERE id = ?1",
                 [todo_id],
@@ -220,7 +230,7 @@ impl Database {
 
     pub fn get_live_todos(&self, session_id: i64) -> Result<Vec<Todo>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
+            "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
              FROM todos
              WHERE session_id = ?1
              ORDER BY position ASC",
@@ -232,7 +242,7 @@ impl Database {
     pub fn get_todo(&self, todo_id: i64) -> Result<Todo> {
         self.connection
             .query_row(
-                "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
+                "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
                  FROM todos WHERE id = ?1",
                 [todo_id],
                 map_todo,
@@ -242,10 +252,29 @@ impl Database {
                 other => AppError::Database(other),
             })
     }
+
+    pub fn search_todos_by_repo(&self, repo: &str) -> Result<Vec<RepoTodoMatch>> {
+        let normalized_repo = crate::domain::github::normalize_repo(repo)?;
+        let mut statement = self.connection.prepare(
+            "SELECT
+                todos.id,
+                sessions.slug,
+                todos.title,
+                todos.status,
+                COALESCE(todos.repo, sessions.repo) AS effective_repo,
+                CASE WHEN todos.repo IS NOT NULL THEN 'todo' ELSE 'session' END AS source
+             FROM todos
+             JOIN sessions ON sessions.id = todos.session_id
+             WHERE COALESCE(todos.repo, sessions.repo) = ?1
+             ORDER BY sessions.last_opened_at DESC, sessions.id DESC, todos.position ASC",
+        )?;
+        let rows = statement.query_map([normalized_repo], map_repo_todo_match)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 }
 
 fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
-    let status = match row.get::<_, String>(4)?.as_str() {
+    let status = match row.get::<_, String>(5)?.as_str() {
         "done" => TodoStatus::Done,
         _ => TodoStatus::Open,
     };
@@ -255,11 +284,32 @@ fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
         session_id: row.get(1)?,
         title: row.get(2)?,
         notes: row.get(3)?,
+        repo: row.get(4)?,
         status,
-        position: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        completed_at: row.get(8)?,
+        position: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+        completed_at: row.get(9)?,
+    })
+}
+
+fn map_repo_todo_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoTodoMatch> {
+    let status = match row.get::<_, String>(3)?.as_str() {
+        "done" => TodoStatus::Done,
+        _ => TodoStatus::Open,
+    };
+    let source = match row.get::<_, String>(5)?.as_str() {
+        "todo" => RepoSource::Todo,
+        _ => RepoSource::Session,
+    };
+
+    Ok(RepoTodoMatch {
+        todo_id: row.get(0)?,
+        session_slug: row.get(1)?,
+        title: row.get(2)?,
+        status,
+        effective_repo: row.get(4)?,
+        source,
     })
 }
 
@@ -281,10 +331,10 @@ mod tests {
     fn adds_todos_and_tracks_revisions() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
 
         assert_eq!(todo.position, 1);
@@ -299,10 +349,10 @@ mod tests {
     fn toggles_done_and_undone_timestamps() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
 
         let done = database
@@ -332,10 +382,10 @@ mod tests {
     fn edits_todo_title_and_notes_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
 
         let edited = database
@@ -344,12 +394,14 @@ mod tests {
                 Some(&session.slug),
                 "Draft final spec",
                 "",
+                Some("@ExampleOrg/todui-keymove"),
                 1_711_275_800,
             )
             .expect("edited");
 
         assert_eq!(edited.title, "Draft final spec");
         assert_eq!(edited.notes, "");
+        assert_eq!(edited.repo.as_deref(), Some("exampleorg/todui-keymove"));
         assert_eq!(edited.updated_at, 1_711_275_800);
         assert_eq!(
             database
@@ -364,16 +416,16 @@ mod tests {
     fn deletes_todo_reorders_positions_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         let first = database
-            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let second = database
-            .add_todo(&session.slug, "Review bindings", "", 1_711_275_800)
+            .add_todo(&session.slug, "Review bindings", "", None, 1_711_275_800)
             .expect("todo");
         let third = database
-            .add_todo(&session.slug, "Ship release", "", 1_711_275_900)
+            .add_todo(&session.slug, "Ship release", "", None, 1_711_275_900)
             .expect("todo");
 
         let deleted = database
@@ -401,10 +453,10 @@ mod tests {
     fn deleting_todo_does_not_affect_global_pomodoro() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let run = database
             .start_pomodoro(
@@ -424,5 +476,45 @@ mod tests {
             run.state,
             crate::domain::pomodoro::PomodoroState::Running
         ));
+    }
+
+    #[test]
+    fn searches_todos_by_effective_repo() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session(
+                "Writing Sprint",
+                None,
+                None,
+                Some("https://github.com/ExampleOrg/todui-keymove"),
+                1_711_275_600,
+            )
+            .expect("session");
+        let inherited = database
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .expect("todo");
+        let override_todo = database
+            .add_todo(
+                &session.slug,
+                "Review CLI",
+                "",
+                Some("@OpenAI/codex"),
+                1_711_275_800,
+            )
+            .expect("todo");
+
+        let session_matches = database
+            .search_todos_by_repo("exampleorg/todui-keymove")
+            .expect("search");
+        assert_eq!(session_matches.len(), 1);
+        assert_eq!(session_matches[0].todo_id, inherited.id);
+        assert_eq!(session_matches[0].source.as_str(), "session");
+
+        let override_matches = database
+            .search_todos_by_repo("https://github.com/openai/codex")
+            .expect("search");
+        assert_eq!(override_matches.len(), 1);
+        assert_eq!(override_matches[0].todo_id, override_todo.id);
+        assert_eq!(override_matches[0].source.as_str(), "todo");
     }
 }
