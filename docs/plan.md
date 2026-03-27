@@ -54,7 +54,7 @@ Fixed decisions; do not re-open unless spec changes:
 - Session deletion is a hard delete and does not create a final revision.
 - Markdown export default = GFM.
 - Sessions may carry one optional tag; overview groups by tag and shows `untagged` last.
-- Pomodoro lives inside session view only.
+- Pomodoro runs are global, with an active footer shown in overview and live session views.
 - Keyboard-first, mouse-complete, modeless navigation.
 - SQLite config = WAL + foreign keys on + busy timeout + STRICT tables.
 - Timestamps stored as UTC Unix epoch integers.
