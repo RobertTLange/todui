@@ -108,10 +108,20 @@ struct ToastState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TodoEditorState {
+    mode: TodoEditorMode,
     title: String,
     notes: String,
     focused_field: EditorField,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TodoEditorMode {
+    #[default]
+    Create,
+    Edit {
+        todo_id: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -263,6 +273,10 @@ impl SessionScreen {
             }
             KeyCode::Char('n') => {
                 self.open_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Char('e') => {
+                self.open_selected_todo_editor();
                 Ok(None)
             }
             KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
@@ -684,13 +698,13 @@ impl SessionScreen {
         } else {
             match layout_mode {
                 LayoutMode::Wide => {
-                    "j/k move  n new  space toggle  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  space toggle  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Medium => {
-                    "j/k move  n new  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  n new  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
                 }
             }
         };
@@ -701,7 +715,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -712,14 +726,14 @@ impl SessionScreen {
         render_editor(
             &self.theme,
             EditorView {
-                title: "New Todo",
+                title: self.todo_editor_title(),
                 primary_label: "Title",
                 primary_value: &self.todo_editor.title,
                 secondary_label: Some("Notes"),
                 secondary_value: Some(&self.todo_editor.notes),
                 focused_field: self.todo_editor.focused_field,
                 error: self.todo_editor.error.as_deref(),
-                footer_hint: "Tab next field  Enter create  Esc cancel",
+                footer_hint: self.todo_editor_footer_hint(),
             },
         )
     }
@@ -844,8 +858,31 @@ impl SessionScreen {
             return;
         }
         self.todo_editor = TodoEditorState {
+            mode: TodoEditorMode::Create,
             focused_field: EditorField::Primary,
             ..TodoEditorState::default()
+        };
+        self.overlay = Some(Overlay::TodoEditor);
+    }
+
+    fn open_selected_todo_editor(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+
+        let Some((todo_id, title, notes)) = self
+            .current_todo()
+            .map(|todo| (todo.todo_id, todo.title.clone(), todo.notes.clone()))
+        else {
+            return;
+        };
+        self.todo_editor = TodoEditorState {
+            mode: TodoEditorMode::Edit { todo_id },
+            title,
+            notes,
+            focused_field: EditorField::Primary,
+            error: None,
         };
         self.overlay = Some(Overlay::TodoEditor);
     }
@@ -862,12 +899,23 @@ impl SessionScreen {
             return Ok(());
         }
 
-        let created = match database.add_todo(
-            &self.session_slug,
-            title,
-            self.todo_editor.notes.trim(),
-            now_utc_timestamp(),
-        ) {
+        let saved = match self.todo_editor.mode {
+            TodoEditorMode::Create => database.add_todo(
+                &self.session_slug,
+                title,
+                self.todo_editor.notes.trim(),
+                now_utc_timestamp(),
+            ),
+            TodoEditorMode::Edit { todo_id } => database.update_todo(
+                todo_id,
+                Some(&self.session_slug),
+                title,
+                self.todo_editor.notes.trim(),
+                now_utc_timestamp(),
+            ),
+        };
+
+        let saved = match saved {
             Ok(todo) => todo,
             Err(error) => {
                 self.todo_editor.error = Some(error.to_string());
@@ -876,9 +924,13 @@ impl SessionScreen {
         };
 
         self.reload(database)?;
-        self.reselect(Some(created.id));
+        self.reselect(Some(saved.id));
+        let toast = match self.todo_editor.mode {
+            TodoEditorMode::Create => String::from("Todo added"),
+            TodoEditorMode::Edit { .. } => String::from("Todo updated"),
+        };
         self.close_todo_editor();
-        self.set_toast(String::from("Todo added"));
+        self.set_toast(toast);
         Ok(())
     }
 
@@ -886,6 +938,20 @@ impl SessionScreen {
         match self.todo_editor.focused_field {
             EditorField::Primary => &mut self.todo_editor.title,
             EditorField::Secondary => &mut self.todo_editor.notes,
+        }
+    }
+
+    fn todo_editor_title(&self) -> &'static str {
+        match self.todo_editor.mode {
+            TodoEditorMode::Create => "New Todo",
+            TodoEditorMode::Edit { .. } => "Edit Todo",
+        }
+    }
+
+    fn todo_editor_footer_hint(&self) -> &'static str {
+        match self.todo_editor.mode {
+            TodoEditorMode::Create => "Tab next field  Enter create  Esc cancel",
+            TodoEditorMode::Edit { .. } => "Tab next field  Enter save  Esc cancel",
         }
     }
 }
@@ -1145,6 +1211,40 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('r')))
             .unwrap();
         assert!(matches!(screen.snapshot().mode, RevisionMode::Head));
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Edit Todo"));
+        for _ in 0.."Draft spec".len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "Draft polished spec".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for _ in 0.."cover db".len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "cover db and tui".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos[0].title, "Draft polished spec");
+        assert_eq!(screen.snapshot().todos[0].notes, "cover db and tui");
 
         assert_eq!(
             screen
@@ -1188,6 +1288,11 @@ mod tests {
             .unwrap();
         assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
         assert_eq!(screen.snapshot().todos.len(), revision_todo_count);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
     }
 
     #[test]
@@ -1285,6 +1390,7 @@ mod tests {
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
         assert!(wide.contains("Pomodoro"));
+        assert!(wide.contains("e edit"));
         assert!(wide.contains("o overview"));
 
         screen.medium_drawer_open = true;

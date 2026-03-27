@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::config;
 use crate::db::Database;
 use crate::domain::todo::TodoStatus;
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::export::markdown::{self, MarkdownOptions};
 use crate::timestamp::{format_export_local, now_utc_timestamp};
 use crate::tui;
@@ -36,6 +36,17 @@ pub enum Command {
         session: Option<String>,
         #[arg(long = "note")]
         note: Option<String>,
+    },
+    Edit {
+        todo_id: i64,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long = "note", conflicts_with = "clear_note")]
+        note: Option<String>,
+        #[arg(long = "clear-note")]
+        clear_note: bool,
     },
     Done {
         todo_id: i64,
@@ -178,6 +189,13 @@ fn execute_with_runner<W: Write>(
             writeln!(writer, "{}", todo.id)?;
             Ok(())
         }
+        Some(Command::Edit {
+            todo_id,
+            session,
+            title,
+            note,
+            clear_note,
+        }) => handle_edit_command(database, writer, todo_id, session, title, note, clear_note),
         Some(Command::Done { todo_id, session }) => {
             let todo = database.set_todo_status(
                 todo_id,
@@ -276,6 +294,43 @@ fn handle_session_command<W: Write>(
             Ok(())
         }
     }
+}
+
+fn handle_edit_command<W: Write>(
+    database: &mut Database,
+    writer: &mut W,
+    todo_id: i64,
+    session: Option<String>,
+    title: Option<String>,
+    note: Option<String>,
+    clear_note: bool,
+) -> Result<()> {
+    if title.is_none() && note.is_none() && !clear_note {
+        return Err(AppError::InvalidCommandUsage(
+            "edit requires --title, --note, or --clear-note",
+        ));
+    }
+
+    let current = database.get_todo(todo_id)?;
+    let next_title = title.unwrap_or(current.title);
+    let next_notes = if clear_note {
+        String::new()
+    } else {
+        note.unwrap_or(current.notes)
+    };
+    if next_title.trim().is_empty() {
+        return Err(AppError::InvalidCommandUsage("title cannot be empty"));
+    }
+
+    let todo = database.update_todo(
+        todo_id,
+        session.as_deref(),
+        &next_title,
+        &next_notes,
+        now_utc_timestamp(),
+    )?;
+    writeln!(writer, "{}\tedited", todo.id)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -433,7 +488,7 @@ fn handle_export_command<W: Write>(
 
 #[cfg(test)]
 mod execute_tests {
-    use crate::cli::{Cli, execute, parse_from};
+    use crate::cli::{Cli, Command, execute, parse_from};
     use crate::config::Config;
     use crate::db::Database;
 
@@ -481,6 +536,57 @@ mod execute_tests {
         let rendered = String::from_utf8(export).expect("utf8");
         assert!(rendered.contains("# Session: writing-sprint"));
         assert!(rendered.contains("- [ ] Draft spec"));
+    }
+
+    #[test]
+    fn edits_todo_from_cli() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut output = Vec::new();
+
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut output,
+            parse_from(["todui", "session", "new", "Writing Sprint"]),
+        )
+        .expect("create session");
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut output,
+            parse_from([
+                "todui",
+                "add",
+                "Draft spec",
+                "--session",
+                "writing-sprint",
+                "--note",
+                "cover db",
+            ]),
+        )
+        .expect("add todo");
+
+        let mut edit_output = Vec::new();
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut edit_output,
+            Cli {
+                command: Some(Command::Edit {
+                    todo_id: 1,
+                    session: Some(String::from("writing-sprint")),
+                    title: Some(String::from("Draft final spec")),
+                    note: None,
+                    clear_note: true,
+                }),
+            },
+        )
+        .expect("edit todo");
+
+        assert_eq!(String::from_utf8(edit_output).expect("utf8"), "1\tedited\n");
+        let todo = database.get_todo(1).expect("todo");
+        assert_eq!(todo.title, "Draft final spec");
+        assert!(todo.notes.is_empty());
     }
 }
 
@@ -531,6 +637,38 @@ mod tests {
                 assert_eq!(timestamps, TimestampMode::Compact);
                 assert!(!include_notes);
                 assert!(!open_only);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_edit_command() {
+        let cli = parse_from([
+            "todui",
+            "edit",
+            "7",
+            "--session",
+            "writing-sprint",
+            "--title",
+            "Draft final spec",
+            "--note",
+            "cover TUI",
+        ]);
+
+        match cli.command.expect("command") {
+            Command::Edit {
+                todo_id,
+                session,
+                title,
+                note,
+                clear_note,
+            } => {
+                assert_eq!(todo_id, 7);
+                assert_eq!(session.as_deref(), Some("writing-sprint"));
+                assert_eq!(title.as_deref(), Some("Draft final spec"));
+                assert_eq!(note.as_deref(), Some("cover TUI"));
+                assert!(!clear_note);
             }
             other => panic!("unexpected command: {other:?}"),
         }
