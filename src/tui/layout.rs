@@ -13,7 +13,7 @@ pub struct ScreenLayout {
     pub top_bar: Rect,
     pub main: Rect,
     pub list: Rect,
-    pub pomodoro: Option<Rect>,
+    pub footer: Option<Rect>,
 }
 
 pub fn layout_mode(width: u16) -> LayoutMode {
@@ -24,9 +24,8 @@ pub fn layout_mode(width: u16) -> LayoutMode {
     }
 }
 
-pub fn split_screen(area: Rect, top_bar_height: u16, pomodoro_height: u16) -> ScreenLayout {
+pub fn split_screen(area: Rect, top_bar_height: u16, footer_height: Option<u16>) -> ScreenLayout {
     let mode = layout_mode(area.width);
-    let pomodoro_height = pomodoro_height.max(3);
     let outer = Layout::vertical([
         Constraint::Length(top_bar_height.max(3)),
         Constraint::Min(0),
@@ -34,10 +33,11 @@ pub fn split_screen(area: Rect, top_bar_height: u16, pomodoro_height: u16) -> Sc
     .split(area);
 
     match mode {
-        LayoutMode::Wide | LayoutMode::Medium => {
+        _ if footer_height.is_some() => {
+            let footer_height = footer_height.unwrap_or(0).max(3);
             let panes = Layout::vertical([
                 Constraint::Min(0),
-                Constraint::Length(pomodoro_height.min(outer[1].height)),
+                Constraint::Length(footer_height.min(outer[1].height)),
             ])
             .split(outer[1]);
             ScreenLayout {
@@ -45,15 +45,15 @@ pub fn split_screen(area: Rect, top_bar_height: u16, pomodoro_height: u16) -> Sc
                 top_bar: outer[0],
                 main: outer[1],
                 list: panes[0],
-                pomodoro: Some(panes[1]),
+                footer: Some(panes[1]),
             }
         }
-        LayoutMode::Narrow => ScreenLayout {
+        _ => ScreenLayout {
             mode,
             top_bar: outer[0],
             main: outer[1],
             list: outer[1],
-            pomodoro: None,
+            footer: None,
         },
     }
 }
@@ -92,20 +92,26 @@ mod tests {
     }
 
     #[test]
-    fn wide_layout_uses_requested_pomodoro_height() {
-        let layout = split_screen(Rect::new(0, 0, 120, 24), 3, 4);
-        assert_eq!(layout.pomodoro.expect("pomodoro").height, 4);
+    fn wide_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 120, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
     }
 
     #[test]
-    fn medium_layout_uses_requested_pomodoro_height() {
-        let layout = split_screen(Rect::new(0, 0, 80, 24), 3, 4);
-        assert_eq!(layout.pomodoro.expect("pomodoro").height, 4);
+    fn medium_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 80, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
     }
 
     #[test]
-    fn narrow_layout_hides_inline_pomodoro() {
-        let layout = split_screen(Rect::new(0, 0, 49, 24), 3, 4);
-        assert!(layout.pomodoro.is_none());
+    fn layout_hides_footer_when_not_requested() {
+        let layout = split_screen(Rect::new(0, 0, 120, 24), 3, None);
+        assert!(layout.footer.is_none());
+    }
+
+    #[test]
+    fn narrow_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 49, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
     }
 }

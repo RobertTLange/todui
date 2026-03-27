@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::domain::pomodoro::{PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
@@ -19,6 +20,7 @@ use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
 const SUMMARY_PANEL_PERCENT: u16 = 15;
@@ -54,6 +56,8 @@ pub(crate) fn run_in_terminal(
                 Event::Resize(_, _) => {}
                 _ => {}
             }
+        } else {
+            screen.handle_tick(database)?;
         }
     }
 }
@@ -67,6 +71,8 @@ pub(crate) enum OverviewExit {
 #[derive(Debug)]
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
+    active_run: Option<PomodoroRun>,
+    active_run_title: Option<String>,
     selected_index: usize,
     scroll_offset: usize,
     theme: Theme,
@@ -112,6 +118,8 @@ impl OverviewScreen {
     fn new(config: Config) -> Self {
         Self {
             sessions: Vec::new(),
+            active_run: None,
+            active_run_title: None,
             selected_index: 0,
             scroll_offset: 0,
             theme: Theme::from_config(&config),
@@ -124,9 +132,26 @@ impl OverviewScreen {
 
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.sessions = database.list_session_overview()?;
+        if let Some((run, title)) = database.get_active_pomodoro_with_link()? {
+            self.active_run = Some(run);
+            self.active_run_title = title;
+        } else {
+            self.active_run = None;
+            self.active_run_title = None;
+        }
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
+    }
+
+    fn handle_tick(&mut self, database: &mut Database) -> Result<()> {
+        if let Some(run) = self.active_run.clone()
+            && matches!(run.state, PomodoroState::Running)
+            && remaining_seconds(&run, now_utc_timestamp()) == 0
+        {
+            database.complete_pomodoro(run.id, now_utc_timestamp())?;
+        }
+        self.reload(database)
     }
 
     fn handle_key(
@@ -300,8 +325,7 @@ impl OverviewScreen {
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         self.last_area = frame.area();
-        let chunks =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(frame.area());
+        let chunks = self.root_chunks(frame.area());
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
         frame.render_widget(self.top_bar(), chunks[0]);
@@ -309,7 +333,7 @@ impl OverviewScreen {
         if self.sessions.is_empty() {
             frame.render_widget(self.empty_state(), chunks[1]);
         } else {
-            let (list_area, summary_area, details_area) = self.body_areas(frame.area());
+            let (list_area, summary_area, details_area) = self.body_areas(chunks[1]);
             frame.render_stateful_widget(
                 self.session_list(list_area.height),
                 list_area,
@@ -319,6 +343,20 @@ impl OverviewScreen {
             if let Some(details_area) = details_area {
                 frame.render_widget(self.details_panel(), details_area);
             }
+        }
+
+        if let Some(run) = self.active_run.as_ref()
+            && let Some(footer_area) = chunks.get(2).copied()
+        {
+            frame.render_widget(
+                active_footer(
+                    &self.theme,
+                    run,
+                    self.active_run_title.as_deref(),
+                    now_utc_timestamp(),
+                ),
+                footer_area,
+            );
         }
 
         if matches!(self.overlay, Some(OverviewOverlay::Help)) {
@@ -483,7 +521,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nActive timer: shown in footer\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -535,7 +573,7 @@ impl OverviewScreen {
 
     fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
-            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
         .block(
@@ -598,11 +636,10 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
-        self.body_areas(area).0
+        self.body_areas(self.root_chunks(area)[1]).0
     }
 
-    fn body_areas(&self, area: Rect) -> (Rect, Rect, Option<Rect>) {
-        let body = Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(area)[1];
+    fn body_areas(&self, body: Rect) -> (Rect, Rect, Option<Rect>) {
         if body.width >= 90 {
             let columns =
                 Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
@@ -614,6 +651,14 @@ impl OverviewScreen {
             let stacked = Layout::vertical(self.summary_split(body.height)).split(body);
             (stacked[0], stacked[1], None)
         }
+    }
+
+    fn root_chunks(&self, area: Rect) -> Vec<Rect> {
+        let mut constraints = vec![Constraint::Length(3), Constraint::Min(8)];
+        if self.active_run.is_some() {
+            constraints.push(Constraint::Length(active_footer_height()));
+        }
+        Layout::vertical(constraints).split(area).to_vec()
     }
 
     fn summary_split(&self, total_height: u16) -> [Constraint; 2] {
@@ -855,6 +900,7 @@ mod tests {
     use super::{OverviewExit, OverviewScreen, list_row_index};
     use crate::config::Config;
     use crate::db::Database;
+    use crate::domain::pomodoro::PomodoroKind;
 
     #[test]
     fn overview_screen_handles_navigation_and_open() {
@@ -994,6 +1040,7 @@ mod tests {
         assert!(wide_buffer.contains("avg revision: r2"));
         assert!(wide_buffer.contains("Enter opens the session head."));
         assert!(wide_buffer.contains("return here."));
+        assert!(!wide_buffer.contains("Pomodoro"));
         assert!(!wide_buffer.contains("Keys"));
 
         let narrow_buffer = render_buffer(&mut populated, 80, 20);
@@ -1008,8 +1055,24 @@ mod tests {
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
         assert!(empty_buffer.contains("h = help"));
+        assert!(!empty_buffer.contains("Pomodoro"));
         assert!(!empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_shows_active_pomodoro_footer() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        database
+            .start_pomodoro(None, PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&mut screen, 120, 24);
+        assert!(rendered.contains("Pomodoro"));
+        assert!(rendered.contains("SHORT BREAK"));
+        assert!(rendered.contains("No linked todo"));
     }
 
     #[test]

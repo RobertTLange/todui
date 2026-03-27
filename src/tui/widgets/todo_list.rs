@@ -396,7 +396,7 @@ mod tests {
         let done = todo(22, TodoStatus::Done, 2, 121, 181, Some(240));
         let focus_run = PomodoroRun {
             id: 1,
-            session_id: 1,
+            session_id: None,
             todo_id: Some(21),
             kind: PomodoroKind::Focus,
             state: PomodoroState::Running,
@@ -427,7 +427,7 @@ mod tests {
         let done = todo(32, TodoStatus::Done, 2, 121, 181, Some(240));
         let focus_run = PomodoroRun {
             id: 1,
-            session_id: 1,
+            session_id: None,
             todo_id: Some(31),
             kind: PomodoroKind::Focus,
             state: PomodoroState::Running,
