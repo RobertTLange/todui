@@ -454,7 +454,6 @@ mod tests {
             .expect("todo");
         let run = database
             .start_pomodoro(
-                &reading.slug,
                 Some(todo.id),
                 crate::domain::pomodoro::PomodoroKind::Focus,
                 1_500,
@@ -466,7 +465,9 @@ mod tests {
         assert_eq!(deleted.slug, reading.slug);
         assert!(database.get_session_by_slug(&reading.slug).is_err());
         assert!(database.get_todo(todo.id).is_err());
-        assert!(database.get_pomodoro_run(run.id).is_err());
+        let run = database.get_pomodoro_run(run.id).expect("run");
+        assert_eq!(run.todo_id, None);
+        assert_eq!(run.session_id, None);
         assert_eq!(
             database.resolve_session_slug(None).expect("recent"),
             writing.slug

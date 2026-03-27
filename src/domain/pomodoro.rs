@@ -16,7 +16,7 @@ pub enum PomodoroState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PomodoroRun {
     pub id: i64,
-    pub session_id: i64,
+    pub session_id: Option<i64>,
     pub todo_id: Option<i64>,
     pub kind: PomodoroKind,
     pub state: PomodoroState,
@@ -26,12 +26,6 @@ pub struct PomodoroRun {
     pub accumulated_pause: i64,
     pub ended_at: Option<i64>,
     pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PomodoroSummary {
-    pub completed_focus_runs: i64,
-    pub total_focus_seconds: i64,
 }
 
 impl PomodoroKind {
@@ -92,7 +86,7 @@ mod tests {
     fn computes_remaining_seconds_for_running_and_paused_runs() {
         let running = PomodoroRun {
             id: 1,
-            session_id: 1,
+            session_id: None,
             todo_id: None,
             kind: PomodoroKind::Focus,
             state: PomodoroState::Running,
