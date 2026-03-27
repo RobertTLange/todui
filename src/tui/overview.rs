@@ -78,6 +78,7 @@ struct OverviewScreen {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverviewOverlay {
     SessionEditor,
+    DeleteSession { slug: String, name: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -116,14 +117,24 @@ impl OverviewScreen {
             return Ok(Some(OverviewExit::Quit));
         }
 
-        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor)) {
-            return self.handle_session_editor_key(database, key);
+        match self.overlay {
+            Some(OverviewOverlay::SessionEditor) => {
+                return self.handle_session_editor_key(database, key);
+            }
+            Some(OverviewOverlay::DeleteSession { .. }) => {
+                return self.handle_delete_key(database, key);
+            }
+            None => {}
         }
 
         let exit = match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(OverviewExit::Quit),
             KeyCode::Char('n') => {
                 self.open_session_editor();
+                None
+            }
+            KeyCode::Char('D') => {
+                self.open_delete_session();
                 None
             }
             KeyCode::Up | KeyCode::Char('k')
@@ -192,6 +203,30 @@ impl OverviewScreen {
         }
     }
 
+    fn handle_delete_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<OverviewExit>> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlay = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let slug = match &self.overlay {
+                    Some(OverviewOverlay::DeleteSession { slug, .. }) => slug.clone(),
+                    _ => return Ok(None),
+                };
+                database.delete_session(&slug)?;
+                self.reload(database)?;
+                self.overlay = None;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<OverviewExit> {
         if self.overlay.is_some() {
             return None;
@@ -251,6 +286,11 @@ impl OverviewScreen {
             let area = centered_rect(frame.area(), 54, 8);
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(), area);
+        }
+        if let Some(OverviewOverlay::DeleteSession { slug, name }) = &self.overlay {
+            let area = centered_rect(frame.area(), 58, 9);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.delete_session_modal(slug, name), area);
         }
     }
 
@@ -318,7 +358,7 @@ impl OverviewScreen {
     }
 
     fn footer(&self) -> Paragraph<'static> {
-        Paragraph::new("j/k move  n new  Enter open  q quit")
+        Paragraph::new("j/k move  n new  D delete  Enter open  q quit")
             .block(Block::default().borders(Borders::ALL).title("Keys"))
             .style(self.theme.block_style())
     }
@@ -337,6 +377,15 @@ impl OverviewScreen {
                 footer_hint: "Enter create  Esc cancel",
             },
         )
+    }
+
+    fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
+        Paragraph::new(format!(
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+        ))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
+        .style(self.theme.block_style())
     }
 
     fn selected_session_slug(&self) -> Option<String> {
@@ -405,6 +454,16 @@ impl OverviewScreen {
     fn open_session_editor(&mut self) {
         self.overlay = Some(OverviewOverlay::SessionEditor);
         self.session_editor = SessionEditorState::default();
+    }
+
+    fn open_delete_session(&mut self) {
+        let Some(session) = self.sessions.get(self.selected_index) else {
+            return;
+        };
+        self.overlay = Some(OverviewOverlay::DeleteSession {
+            slug: session.slug.clone(),
+            name: session.name.clone(),
+        });
     }
 
     fn close_session_editor(&mut self) {
@@ -586,6 +645,44 @@ mod tests {
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
+    }
+
+    #[test]
+    fn overview_confirms_and_deletes_selected_session() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        assert!(render_buffer(&mut screen, 120, 24).contains("Delete Session"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(exit.is_none());
+        assert!(database.get_session_by_slug("reading-sprint").is_err());
+        assert_eq!(
+            screen.selected_session_slug().as_deref(),
+            Some("writing-sprint")
+        );
+    }
+
+    #[test]
+    fn overview_cancel_keeps_selected_session() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+
+        assert_eq!(
+            screen.selected_session_slug().as_deref(),
+            Some("reading-sprint")
+        );
+        assert!(database.get_session_by_slug("reading-sprint").is_ok());
     }
 
     #[test]

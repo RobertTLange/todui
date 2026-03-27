@@ -98,6 +98,8 @@ enum Overlay {
     History,
     Details,
     TodoEditor,
+    DeleteTodo { id: i64, title: String },
+    DeleteSession { slug: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +211,9 @@ impl SessionScreen {
                 return Ok(None);
             }
             Some(Overlay::TodoEditor) => return self.handle_todo_editor_key(database, key),
+            Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. }) => {
+                return self.handle_delete_key(database, key);
+            }
             Some(Overlay::Details) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.overlay = None;
@@ -277,6 +282,14 @@ impl SessionScreen {
             }
             KeyCode::Char('e') => {
                 self.open_selected_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Char('d') => {
+                self.open_delete_todo();
+                Ok(None)
+            }
+            KeyCode::Char('D') => {
+                self.open_delete_session();
                 Ok(None)
             }
             KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
@@ -386,19 +399,57 @@ impl SessionScreen {
         Ok(None)
     }
 
+    fn handle_delete_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlay = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let overlay = self.overlay.clone();
+                match overlay {
+                    Some(Overlay::DeleteTodo { id, .. }) => {
+                        database.delete_todo(id, Some(&self.session_slug), now_utc_timestamp())?;
+                        self.reload(database)?;
+                        self.overlay = None;
+                        self.set_toast(String::from("Todo deleted"));
+                        Ok(None)
+                    }
+                    Some(Overlay::DeleteSession { slug, .. }) => {
+                        database.delete_session(&slug)?;
+                        self.overlay = None;
+                        Ok(Some(SessionExit::Overview))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn handle_mouse(
         &mut self,
         database: &mut Database,
         area: Rect,
         mouse: MouseEvent,
     ) -> Result<()> {
+        if matches!(
+            self.overlay,
+            Some(Overlay::TodoEditor | Overlay::Help | Overlay::Details)
+        ) || matches!(
+            self.overlay,
+            Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. })
+        ) {
+            return Ok(());
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1, self.visible_rows()),
             MouseEventKind::ScrollDown => self.move_selection(1, self.visible_rows()),
             MouseEventKind::Down(MouseButton::Left) => {
-                if matches!(self.overlay, Some(Overlay::TodoEditor)) {
-                    return Ok(());
-                }
                 if matches!(self.overlay, Some(Overlay::History)) {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
@@ -564,6 +615,16 @@ impl SessionScreen {
             frame.render_widget(Clear, area);
             frame.render_widget(self.todo_editor_modal(), area);
         }
+        if let Some(Overlay::DeleteTodo { title, .. }) = &self.overlay {
+            let area = centered_rect(frame.area(), 60, 8);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.delete_todo_modal(title), area);
+        }
+        if let Some(Overlay::DeleteSession { slug, name }) = &self.overlay {
+            let area = centered_rect(frame.area(), 60, 9);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.delete_session_modal(slug, name), area);
+        }
         if let Some(toast) = &self.toast {
             let area = centered_rect(frame.area(), 50, 3);
             frame.render_widget(Clear, area);
@@ -698,13 +759,13 @@ impl SessionScreen {
         } else {
             match layout_mode {
                 LayoutMode::Wide => {
-                    "j/k move  n new  e edit  space toggle  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Medium => {
-                    "j/k move  n new  e edit  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  n new  e edit  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
                 }
             }
         };
@@ -715,7 +776,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -736,6 +797,24 @@ impl SessionScreen {
                 footer_hint: self.todo_editor_footer_hint(),
             },
         )
+    }
+
+    fn delete_todo_modal(&self, title: &str) -> Paragraph<'static> {
+        Paragraph::new(format!(
+            "Delete todo?\n\n{title}\n\nEnter delete  Esc cancel"
+        ))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Delete Todo"))
+        .style(self.theme.block_style())
+    }
+
+    fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
+        Paragraph::new(format!(
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+        ))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
+        .style(self.theme.block_style())
     }
 
     fn history_overlay(&self) -> List<'static> {
@@ -885,6 +964,32 @@ impl SessionScreen {
             error: None,
         };
         self.overlay = Some(Overlay::TodoEditor);
+    }
+
+    fn open_delete_todo(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        let Some(todo) = self.current_todo() else {
+            return;
+        };
+        self.overlay = Some(Overlay::DeleteTodo {
+            id: todo.todo_id,
+            title: todo.title.clone(),
+        });
+    }
+
+    fn open_delete_session(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        let session = &self.snapshot().session;
+        self.overlay = Some(Overlay::DeleteSession {
+            slug: session.slug.clone(),
+            name: session.name.clone(),
+        });
     }
 
     fn close_todo_editor(&mut self) {
@@ -1359,6 +1464,71 @@ mod tests {
             screen.snapshot().mode,
             RevisionMode::Historical(_)
         ));
+    }
+
+    #[test]
+    fn screen_confirms_and_deletes_selected_todo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('d')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Delete Todo"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos.len(), 1);
+        assert_eq!(screen.snapshot().todos[0].title, "Review bindings");
+        assert!(
+            screen
+                .toast
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("Todo deleted")
+        );
+    }
+
+    #[test]
+    fn screen_confirms_and_deletes_current_session() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Delete Session"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(exit, Some(SessionExit::Overview));
+        assert!(database.get_session_by_slug("writing-sprint").is_err());
+    }
+
+    #[test]
+    fn screen_blocks_delete_in_read_only_revision() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('d')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
     }
 
     #[test]
