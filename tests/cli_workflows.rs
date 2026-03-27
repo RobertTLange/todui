@@ -207,3 +207,93 @@ fn cli_edit_rejects_conflicting_note_flags() {
         .failure()
         .stderr(predicate::str::contains("cannot be used with"));
 }
+
+#[test]
+fn cli_delete_removes_todo_and_compacts_export() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["add", "Draft design spec", "--session", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1\n"));
+
+    env.command()
+        .args(["add", "Review bindings", "--session", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2\n"));
+
+    env.command()
+        .args(["delete", "1", "--session", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1\tdeleted\n"));
+
+    env.command()
+        .args(["session", "history", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("todo deleted"));
+
+    env.command()
+        .args(["export", "md", "writing-sprint", "--timestamps", "none"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Review bindings"))
+        .stdout(predicate::str::contains("Draft design spec").not());
+}
+
+#[test]
+fn cli_delete_rejects_wrong_session() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+    env.command()
+        .args(["session", "new", "Reading Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["add", "Draft design spec", "--session", "writing-sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["delete", "1", "--session", "reading-sprint"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "todo 1 does not belong to session reading-sprint",
+        ));
+}
+
+#[test]
+fn cli_session_delete_removes_recent_session_and_clears_recent_pointer() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["session", "delete"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("writing-sprint\tdeleted\n"));
+
+    env.command()
+        .args(["add", "Orphan todo"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no recent session"));
+}

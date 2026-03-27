@@ -114,6 +114,26 @@ impl Database {
         self.get_session_by_slug(slug)
     }
 
+    pub fn delete_session(&mut self, slug: &str) -> Result<Session> {
+        let transaction = self.connection.transaction()?;
+        let session = transaction
+            .query_row(
+                "SELECT id, slug, name, created_at, updated_at, last_opened_at, current_revision
+                 FROM sessions
+                 WHERE slug = ?1",
+                [slug],
+                map_session,
+            )
+            .optional()?
+            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+
+        transaction.execute("DELETE FROM sessions WHERE id = ?1", [session.id])?;
+        sync_last_session_slug(&transaction)?;
+        transaction.commit()?;
+
+        Ok(session)
+    }
+
     pub fn current_revision_summary(&self, session_id: i64) -> Result<RevisionSummary> {
         self.connection
             .query_row(
@@ -194,6 +214,27 @@ fn set_last_session_slug(transaction: &Transaction<'_>, slug: &str) -> Result<()
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [slug],
     )?;
+
+    Ok(())
+}
+
+fn sync_last_session_slug(transaction: &Transaction<'_>) -> Result<()> {
+    let most_recent_slug: Option<String> = transaction
+        .query_row(
+            "SELECT slug
+             FROM sessions
+             ORDER BY last_opened_at DESC, id DESC
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(slug) = most_recent_slug {
+        set_last_session_slug(transaction, &slug)?;
+    } else {
+        transaction.execute("DELETE FROM app_state WHERE key = 'last_session_slug'", [])?;
+    }
 
     Ok(())
 }
@@ -318,5 +359,57 @@ mod tests {
         assert_eq!(overview[0].todo_count, 2);
         assert_eq!(overview[0].done_count, 1);
         assert_eq!(overview[1].slug, reading.slug);
+    }
+
+    #[test]
+    fn deleting_session_cascades_and_updates_recent_pointer() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let writing = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        database
+            .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
+            .expect("todo");
+
+        let reading = database
+            .create_session("Reading Sprint", None, 1_711_275_700)
+            .expect("session");
+        let todo = database
+            .add_todo(&reading.slug, "Review paper", "", 1_711_275_750)
+            .expect("todo");
+        let run = database
+            .start_pomodoro(
+                &reading.slug,
+                Some(todo.id),
+                crate::domain::pomodoro::PomodoroKind::Focus,
+                1_500,
+                1_711_275_760,
+            )
+            .expect("run");
+
+        let deleted = database.delete_session(&reading.slug).expect("delete");
+        assert_eq!(deleted.slug, reading.slug);
+        assert!(database.get_session_by_slug(&reading.slug).is_err());
+        assert!(database.get_todo(todo.id).is_err());
+        assert!(database.get_pomodoro_run(run.id).is_err());
+        assert_eq!(
+            database.resolve_session_slug(None).expect("recent"),
+            writing.slug
+        );
+    }
+
+    #[test]
+    fn deleting_last_session_clears_recent_pointer() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+
+        database.delete_session(&session.slug).expect("delete");
+
+        assert!(matches!(
+            database.resolve_session_slug(None),
+            Err(crate::error::AppError::NoRecentSession)
+        ));
     }
 }
