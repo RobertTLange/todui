@@ -13,11 +13,36 @@ use crate::export::markdown::{self, MarkdownOptions};
 use crate::timestamp::{format_export_local, now_utc_timestamp};
 use crate::tui;
 
+const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\"`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  `session list` prints tab-separated rows.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md` for CLI inspection or `resume` for the TUI.";
+
+const SESSION_LONG_ABOUT: &str = "Create, list, tag, delete, and inspect revision history for sessions.\n\nUse `todui session list` to discover available session slugs before calling `add`, `resume`, or `export md`.";
+
+const SESSION_LONG_HELP: &str = "Examples:\n  todui session list\n  todui session new \"Writing Sprint\" --tag work\n  todui session history writing-sprint\n  todui session tag writing-sprint --set private";
+
+const SESSION_LIST_LONG_ABOUT: &str = "Print one session per line in a tab-separated format for scripts and agents.\n\nColumns:\n  <slug>\\t<display-name>\\t<tag-or->\\t<last-opened-local-time>\\tr<current-revision>";
+
+const SESSION_HISTORY_LONG_ABOUT: &str = "Print one revision per line in a tab-separated format for scripts and agents.\n\nColumns:\n  r<revision-number>\\t<created-at-local-time>\\t<reason>\\t<todo-count>\\t<done-count>";
+
+const ADD_LONG_ABOUT: &str = "Create a new todo in a session.\n\nIf `--session` is omitted, todui resolves the most recently opened session. On success, stdout contains the new todo id as a single integer.";
+
+const ADD_LONG_HELP: &str = "Examples:\n  todui add \"Draft spec\" --session writing-sprint\n  todui add \"Review keybindings\" --session writing-sprint --note \"Ghostty + mouse\"";
+
+const EDIT_LONG_ABOUT: &str = "Update the title and/or note for an existing todo.\n\nPass at least one of `--title`, `--note`, or `--clear-note`. On success, stdout prints `<todo-id>\\tedited`.";
+
+const EDIT_LONG_HELP: &str = "Examples:\n  todui edit 7 --session writing-sprint --title \"Draft final spec\"\n  todui edit 7 --session writing-sprint --note \"cover CLI and TUI\"\n  todui edit 7 --session writing-sprint --clear-note";
+
+const RESUME_LONG_ABOUT: &str = "Open a session in the full-screen TUI.\n\nWithout arguments, todui resumes the most recently opened session head. `--revision` opens a historical snapshot in read-only mode.";
+
+const EXPORT_MD_LONG_ABOUT: &str = "Render the live head or a historical revision as markdown.\n\nUse this command when an agent needs todo titles or note bodies from the CLI. `--include-notes` includes note text, `--open-only` filters out completed todos, and `--revision` exports a read-only historical snapshot.";
+
+const EXPORT_MD_LONG_HELP: &str = "Examples:\n  todui export md writing-sprint --include-notes\n  todui export md writing-sprint --revision 3 --timestamps full\n  todui export md writing-sprint --output sprint.md --open-only";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "todui",
     version,
-    about = "Terminal todo sessions with revisions"
+    about = "Terminal todo sessions with revisions",
+    long_about = CLI_LONG_ABOUT
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -26,48 +51,93 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(
+        about = "Manage sessions, tags, and revision history",
+        long_about = SESSION_LONG_ABOUT,
+        after_long_help = SESSION_LONG_HELP
+    )]
     Session {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    #[command(
+        about = "Add a todo to a session",
+        long_about = ADD_LONG_ABOUT,
+        after_long_help = ADD_LONG_HELP
+    )]
     Add {
+        #[arg(help = "Todo title to create")]
         title: String,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Session slug. Defaults to the most recently opened session"
+        )]
         session: Option<String>,
-        #[arg(long = "note")]
+        #[arg(long = "note", help = "Optional note text stored on the todo")]
         note: Option<String>,
     },
+    #[command(about = "Delete a todo from a session")]
     Delete {
+        #[arg(help = "Todo id to delete")]
         todo_id: i64,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Session slug. Defaults to the most recently opened session"
+        )]
         session: Option<String>,
     },
+    #[command(
+        about = "Edit a todo title and/or note",
+        long_about = EDIT_LONG_ABOUT,
+        after_long_help = EDIT_LONG_HELP
+    )]
     Edit {
+        #[arg(help = "Todo id to edit")]
         todo_id: i64,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Session slug. Defaults to the most recently opened session"
+        )]
         session: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Replace the todo title")]
         title: Option<String>,
-        #[arg(long = "note", conflicts_with = "clear_note")]
+        #[arg(
+            long = "note",
+            conflicts_with = "clear_note",
+            help = "Replace the todo note"
+        )]
         note: Option<String>,
-        #[arg(long = "clear-note")]
+        #[arg(long = "clear-note", help = "Remove the todo note")]
         clear_note: bool,
     },
+    #[command(about = "Mark a todo as done")]
     Done {
+        #[arg(help = "Todo id to mark done")]
         todo_id: i64,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Session slug. Defaults to the most recently opened session"
+        )]
         session: Option<String>,
     },
+    #[command(about = "Mark a todo as open again")]
     Undone {
+        #[arg(help = "Todo id to mark open")]
         todo_id: i64,
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Session slug. Defaults to the most recently opened session"
+        )]
         session: Option<String>,
     },
+    #[command(about = "Open a session in the TUI", long_about = RESUME_LONG_ABOUT)]
     Resume {
+        #[arg(help = "Session slug. Defaults to the most recently opened session")]
         session: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Open a specific revision read-only")]
         revision: Option<u32>,
     },
+    #[command(about = "Export a session snapshot as markdown")]
     Export {
         #[command(subcommand)]
         command: ExportCommand,
@@ -76,44 +146,69 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
+    #[command(about = "Create a new session")]
     New {
+        #[arg(help = "Human-readable session name")]
         name: String,
-        #[arg(long)]
+        #[arg(long, help = "Override the generated slug")]
         slug: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Optional grouping tag stored on the session")]
         tag: Option<String>,
     },
+    #[command(about = "Delete a session and all of its data")]
     Delete {
+        #[arg(help = "Session slug. Defaults to the most recently opened session")]
         session: Option<String>,
     },
+    #[command(
+        about = "List sessions with tags, timestamps, and revision numbers",
+        long_about = SESSION_LIST_LONG_ABOUT
+    )]
     List,
+    #[command(
+        about = "Print the session revision history",
+        long_about = SESSION_HISTORY_LONG_ABOUT
+    )]
     History {
+        #[arg(help = "Session slug. Defaults to the most recently opened session")]
         session: Option<String>,
     },
+    #[command(about = "Set or clear the grouping tag for a session")]
     Tag {
+        #[arg(help = "Session slug. Defaults to the most recently opened session")]
         session: Option<String>,
-        #[arg(long, conflicts_with = "clear")]
+        #[arg(long, conflicts_with = "clear", help = "Assign a new tag value")]
         set: Option<String>,
-        #[arg(long, conflicts_with = "set")]
+        #[arg(long, conflicts_with = "set", help = "Remove the current tag")]
         clear: bool,
     },
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ExportCommand {
+    #[command(
+        about = "Render a session snapshot as markdown",
+        long_about = EXPORT_MD_LONG_ABOUT,
+        after_long_help = EXPORT_MD_LONG_HELP
+    )]
     Md {
+        #[arg(help = "Session slug. Defaults to the most recently opened session")]
         session: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Export a specific revision instead of the live head")]
         revision: Option<u32>,
-        #[arg(long)]
+        #[arg(long, help = "Write output to a file instead of stdout")]
         output: Option<PathBuf>,
-        #[arg(long, default_value_t = ExportFormat::Gfm)]
+        #[arg(long, default_value_t = ExportFormat::Gfm, help = "Markdown flavor to emit")]
         format: ExportFormat,
-        #[arg(long, default_value_t = TimestampMode::Compact)]
+        #[arg(
+            long,
+            default_value_t = TimestampMode::Compact,
+            help = "Timestamp detail level"
+        )]
         timestamps: TimestampMode,
-        #[arg(long)]
+        #[arg(long, help = "Include todo notes in the export")]
         include_notes: bool,
-        #[arg(long)]
+        #[arg(long, help = "Include only open todos in the export")]
         open_only: bool,
     },
 }
