@@ -8,15 +8,18 @@ use crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
 use crate::domain::session::SessionOverview;
 use crate::error::Result;
 use crate::timestamp::format_full_local;
+use crate::timestamp::now_utc_timestamp;
+use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
+use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 
 const EVENT_POLL_MS: u64 = 250;
 
@@ -68,6 +71,19 @@ struct OverviewScreen {
     theme: Theme,
     config: Config,
     last_area: Rect,
+    overlay: Option<OverviewOverlay>,
+    session_editor: SessionEditorState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverviewOverlay {
+    SessionEditor,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SessionEditorState {
+    name: String,
+    error: Option<String>,
 }
 
 impl OverviewScreen {
@@ -79,6 +95,8 @@ impl OverviewScreen {
             theme: Theme::from_config(&config),
             config,
             last_area: Rect::default(),
+            overlay: None,
+            session_editor: SessionEditorState::default(),
         }
     }
 
@@ -89,13 +107,25 @@ impl OverviewScreen {
         Ok(())
     }
 
-    fn handle_key(&mut self, _database: &Database, key: KeyEvent) -> Result<Option<OverviewExit>> {
+    fn handle_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<OverviewExit>> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             return Ok(Some(OverviewExit::Quit));
         }
 
+        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor)) {
+            return self.handle_session_editor_key(database, key);
+        }
+
         let exit = match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(OverviewExit::Quit),
+            KeyCode::Char('n') => {
+                self.open_session_editor();
+                None
+            }
             KeyCode::Up | KeyCode::Char('k')
                 if matches!(key.code, KeyCode::Up)
                     || key_matches_binding(&key, &self.config.keys.up) =>
@@ -137,7 +167,35 @@ impl OverviewScreen {
         Ok(exit)
     }
 
+    fn handle_session_editor_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<OverviewExit>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_session_editor();
+                Ok(None)
+            }
+            KeyCode::Enter => self.submit_session_editor(database),
+            KeyCode::Backspace => {
+                self.session_editor.name.pop();
+                self.session_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.session_editor.name.push(character);
+                self.session_editor.error = None;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<OverviewExit> {
+        if self.overlay.is_some() {
+            return None;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1),
             MouseEventKind::ScrollDown => self.move_selection(1),
@@ -188,6 +246,12 @@ impl OverviewScreen {
         }
 
         frame.render_widget(self.footer(), chunks[2]);
+
+        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor)) {
+            let area = centered_rect(frame.area(), 54, 8);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.session_editor_modal(), area);
+        }
     }
 
     fn top_bar(&self) -> Paragraph<'static> {
@@ -247,18 +311,32 @@ impl OverviewScreen {
     }
 
     fn empty_state(&self) -> Paragraph<'static> {
-        Paragraph::new(
-            "No sessions yet.\n\nCreate one with:\n  todui session new \"Writing Sprint\"",
-        )
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Sessions"))
-        .style(self.theme.block_style())
+        Paragraph::new("No sessions yet.\n\nPress n to create one from the TUI.")
+            .wrap(Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title("Sessions"))
+            .style(self.theme.block_style())
     }
 
     fn footer(&self) -> Paragraph<'static> {
-        Paragraph::new("j/k move  Enter open  q quit")
+        Paragraph::new("j/k move  n new  Enter open  q quit")
             .block(Block::default().borders(Borders::ALL).title("Keys"))
             .style(self.theme.block_style())
+    }
+
+    fn session_editor_modal(&self) -> Paragraph<'_> {
+        render_editor(
+            &self.theme,
+            EditorView {
+                title: "New Session",
+                primary_label: "Name",
+                primary_value: &self.session_editor.name,
+                secondary_label: None,
+                secondary_value: None,
+                focused_field: EditorField::Primary,
+                error: self.session_editor.error.as_deref(),
+                footer_hint: "Enter create  Esc cancel",
+            },
+        )
     }
 
     fn selected_session_slug(&self) -> Option<String> {
@@ -323,6 +401,36 @@ impl OverviewScreen {
             body
         }
     }
+
+    fn open_session_editor(&mut self) {
+        self.overlay = Some(OverviewOverlay::SessionEditor);
+        self.session_editor = SessionEditorState::default();
+    }
+
+    fn close_session_editor(&mut self) {
+        self.overlay = None;
+        self.session_editor = SessionEditorState::default();
+    }
+
+    fn submit_session_editor(&mut self, database: &mut Database) -> Result<Option<OverviewExit>> {
+        let name = self.session_editor.name.trim();
+        if name.is_empty() {
+            self.session_editor.error = Some(String::from("Session name is required"));
+            return Ok(None);
+        }
+
+        match database.create_session(name, None, now_utc_timestamp()) {
+            Ok(session) => {
+                self.reload(database)?;
+                self.close_session_editor();
+                Ok(Some(OverviewExit::OpenSession(session.slug)))
+            }
+            Err(error) => {
+                self.session_editor.error = Some(error.to_string());
+                Ok(None)
+            }
+        }
+    }
 }
 
 fn session_row(session: &SessionOverview) -> String {
@@ -373,7 +481,7 @@ mod tests {
 
     #[test]
     fn overview_screen_handles_navigation_and_open() {
-        let (_directory, database, mut screen) = seeded_overview_screen();
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
 
         assert_eq!(
@@ -381,17 +489,71 @@ mod tests {
             Some("reading-sprint")
         );
 
-        screen.handle_key(&database, key(KeyCode::Down)).unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
         assert_eq!(
             screen.selected_session_slug().as_deref(),
             Some("writing-sprint")
         );
 
-        let exit = screen.handle_key(&database, key(KeyCode::Enter)).unwrap();
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
         assert_eq!(
             exit,
             Some(OverviewExit::OpenSession(String::from("writing-sprint")))
         );
+    }
+
+    #[test]
+    fn overview_creates_session_from_modal_and_opens_it() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        assert!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Char('n')))
+                .unwrap()
+                .is_none()
+        );
+        assert!(render_buffer(&mut screen, 120, 24).contains("New Session"));
+
+        for character in "Inbox".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(exit, Some(OverviewExit::OpenSession(String::from("inbox"))));
+        assert_eq!(
+            database
+                .get_session_by_slug("inbox")
+                .expect("new session")
+                .name,
+            "Inbox"
+        );
+    }
+
+    #[test]
+    fn overview_blocks_blank_session_name() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert!(exit.is_none());
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("Session name is required"));
+        assert!(database.get_session_by_slug("inbox").is_err());
     }
 
     #[test]
@@ -423,7 +585,7 @@ mod tests {
         empty.reload(&database).expect("reload");
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
-        assert!(empty_buffer.contains("todui session new"));
+        assert!(empty_buffer.contains("Press n to create one"));
     }
 
     #[test]

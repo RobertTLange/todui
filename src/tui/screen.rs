@@ -22,6 +22,7 @@ use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestam
 use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
+use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 
 const EVENT_POLL_MS: u64 = 250;
 
@@ -96,12 +97,21 @@ enum Overlay {
     Help,
     History,
     Details,
+    TodoEditor,
 }
 
 #[derive(Debug, Clone)]
 struct ToastState {
     message: String,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TodoEditorState {
+    title: String,
+    notes: String,
+    focused_field: EditorField,
+    error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -117,6 +127,7 @@ struct SessionScreen {
     history_index: usize,
     medium_drawer_open: bool,
     overlay: Option<Overlay>,
+    todo_editor: TodoEditorState,
     toast: Option<ToastState>,
     theme: Theme,
     config: Config,
@@ -139,6 +150,7 @@ impl SessionScreen {
             history_index: 0,
             medium_drawer_open: true,
             overlay: None,
+            todo_editor: TodoEditorState::default(),
             toast: None,
             theme: Theme::from_config(&config),
             config,
@@ -186,6 +198,7 @@ impl SessionScreen {
                 }
                 return Ok(None);
             }
+            Some(Overlay::TodoEditor) => return self.handle_todo_editor_key(database, key),
             Some(Overlay::Details) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.overlay = None;
@@ -248,6 +261,10 @@ impl SessionScreen {
                 self.toggle_selected_todo(database)?;
                 Ok(None)
             }
+            KeyCode::Char('n') => {
+                self.open_todo_editor();
+                Ok(None)
+            }
             KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
                 self.overlay = Some(Overlay::History);
                 Ok(None)
@@ -284,6 +301,43 @@ impl SessionScreen {
                 ) {
                     self.overlay = Some(Overlay::Details);
                 }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_todo_editor_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Tab => {
+                self.todo_editor.focused_field = match self.todo_editor.focused_field {
+                    EditorField::Primary => EditorField::Secondary,
+                    EditorField::Secondary => EditorField::Primary,
+                };
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                self.submit_todo_editor(database)?;
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                let field = self.focused_todo_field();
+                field.pop();
+                self.todo_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let field = self.focused_todo_field();
+                field.push(character);
+                self.todo_editor.error = None;
                 Ok(None)
             }
             _ => Ok(None),
@@ -328,6 +382,9 @@ impl SessionScreen {
             MouseEventKind::ScrollUp => self.move_selection(-1, self.visible_rows()),
             MouseEventKind::ScrollDown => self.move_selection(1, self.visible_rows()),
             MouseEventKind::Down(MouseButton::Left) => {
+                if matches!(self.overlay, Some(Overlay::TodoEditor)) {
+                    return Ok(());
+                }
                 if matches!(self.overlay, Some(Overlay::History)) {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
@@ -488,6 +545,11 @@ impl SessionScreen {
             frame.render_widget(Clear, area);
             frame.render_stateful_widget(self.history_overlay(), area, &mut self.history_state());
         }
+        if matches!(self.overlay, Some(Overlay::TodoEditor)) {
+            let area = centered_rect(frame.area(), 60, 10);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.todo_editor_modal(), area);
+        }
         if let Some(toast) = &self.toast {
             let area = centered_rect(frame.area(), 50, 3);
             frame.render_widget(Clear, area);
@@ -622,13 +684,13 @@ impl SessionScreen {
         } else {
             match layout_mode {
                 LayoutMode::Wide => {
-                    "j/k move  space toggle  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  space toggle  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Medium => {
-                    "j/k move  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
                 }
             }
         };
@@ -639,11 +701,27 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
         .style(self.theme.block_style())
+    }
+
+    fn todo_editor_modal(&self) -> Paragraph<'_> {
+        render_editor(
+            &self.theme,
+            EditorView {
+                title: "New Todo",
+                primary_label: "Title",
+                primary_value: &self.todo_editor.title,
+                secondary_label: Some("Notes"),
+                secondary_value: Some(&self.todo_editor.notes),
+                focused_field: self.todo_editor.focused_field,
+                error: self.todo_editor.error.as_deref(),
+                footer_hint: "Tab next field  Enter create  Esc cancel",
+            },
+        )
     }
 
     fn history_overlay(&self) -> List<'static> {
@@ -757,6 +835,57 @@ impl SessionScreen {
             .is_some_and(|toast| Instant::now() >= toast.expires_at)
         {
             self.toast = None;
+        }
+    }
+
+    fn open_todo_editor(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        self.todo_editor = TodoEditorState {
+            focused_field: EditorField::Primary,
+            ..TodoEditorState::default()
+        };
+        self.overlay = Some(Overlay::TodoEditor);
+    }
+
+    fn close_todo_editor(&mut self) {
+        self.overlay = None;
+        self.todo_editor = TodoEditorState::default();
+    }
+
+    fn submit_todo_editor(&mut self, database: &mut Database) -> Result<()> {
+        let title = self.todo_editor.title.trim();
+        if title.is_empty() {
+            self.todo_editor.error = Some(String::from("Todo title is required"));
+            return Ok(());
+        }
+
+        let created = match database.add_todo(
+            &self.session_slug,
+            title,
+            self.todo_editor.notes.trim(),
+            now_utc_timestamp(),
+        ) {
+            Ok(todo) => todo,
+            Err(error) => {
+                self.todo_editor.error = Some(error.to_string());
+                return Ok(());
+            }
+        };
+
+        self.reload(database)?;
+        self.reselect(Some(created.id));
+        self.close_todo_editor();
+        self.set_toast(String::from("Todo added"));
+        Ok(())
+    }
+
+    fn focused_todo_field(&mut self) -> &mut String {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => &mut self.todo_editor.title,
+            EditorField::Secondary => &mut self.todo_editor.notes,
         }
     }
 }
@@ -957,10 +1086,38 @@ mod tests {
             .unwrap();
 
         screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("New Todo"));
+        for character in "Outline modal flow".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "include notes".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos.len(), 3);
+        assert_eq!(
+            screen.current_todo().expect("selected").title,
+            "Outline modal flow"
+        );
+        assert_eq!(
+            screen.current_todo().expect("selected").notes,
+            "include notes"
+        );
+
+        screen
             .handle_key(&mut database, key(KeyCode::Char('x')))
             .unwrap();
         assert_eq!(
-            screen.snapshot().todos[0].status,
+            screen.snapshot().todos[2].status,
             crate::domain::todo::TodoStatus::Done
         );
 
@@ -995,6 +1152,42 @@ mod tests {
                 .unwrap(),
             Some(SessionExit::Overview)
         );
+    }
+
+    #[test]
+    fn screen_blocks_blank_todo_title_and_read_only_creation() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Todo title is required"));
+        assert_eq!(screen.snapshot().todos.len(), 2);
+
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(matches!(
+            screen.snapshot().mode,
+            RevisionMode::Historical(_)
+        ));
+        let revision_todo_count = screen.snapshot().todos.len();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+        assert_eq!(screen.snapshot().todos.len(), revision_todo_count);
     }
 
     #[test]
@@ -1110,6 +1303,11 @@ mod tests {
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
         assert!(help.contains("Overview: o"));
+
+        screen.overlay = Some(Overlay::TodoEditor);
+        let editor = render_buffer(&screen, 120, 24);
+        assert!(editor.contains("New Todo"));
+        assert!(editor.contains("Title"));
 
         screen.toast = Some(super::ToastState {
             message: String::from("hello"),
