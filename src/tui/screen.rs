@@ -20,7 +20,7 @@ use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
-use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
+use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
@@ -149,7 +149,6 @@ struct SessionScreen {
     open_scroll_offset: usize,
     completed_scroll_offset: usize,
     history_index: usize,
-    medium_drawer_open: bool,
     overlay: Option<Overlay>,
     todo_editor: TodoEditorState,
     toast: Option<ToastState>,
@@ -176,7 +175,6 @@ impl SessionScreen {
             open_scroll_offset: 0,
             completed_scroll_offset: 0,
             history_index: 0,
-            medium_drawer_open: true,
             overlay: None,
             todo_editor: TodoEditorState::default(),
             toast: None,
@@ -246,7 +244,10 @@ impl SessionScreen {
                 return self.handle_delete_key(database, key);
             }
             Some(Overlay::Details) => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Left
+                ) {
                     self.overlay = None;
                 }
                 return Ok(None);
@@ -257,6 +258,10 @@ impl SessionScreen {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Ok(Some(SessionExit::Quit)),
             KeyCode::Left | KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
+            KeyCode::Right | KeyCode::Char('i') => {
+                self.open_details();
+                Ok(None)
+            }
             KeyCode::Char('h') => {
                 self.overlay = Some(Overlay::Help);
                 Ok(None)
@@ -350,16 +355,7 @@ impl SessionScreen {
                 self.cancel_active_pomodoro(database)?;
                 Ok(None)
             }
-            KeyCode::Tab => {
-                self.medium_drawer_open = !self.medium_drawer_open;
-                Ok(None)
-            }
-            KeyCode::Enter => {
-                if matches!(self.layout_for_area(area).mode, LayoutMode::Narrow) {
-                    self.overlay = Some(Overlay::Details);
-                }
-                Ok(None)
-            }
+            KeyCode::Enter => Ok(None),
             _ => Ok(None),
         }
     }
@@ -655,22 +651,17 @@ impl SessionScreen {
             list_areas.completed,
             &mut self.completed_list_state(),
         );
-        if let Some(details_area) = layout.details {
-            frame.render_widget(self.details_panel(snapshot), details_area);
-        }
         if let Some(pomodoro_area) = layout.pomodoro {
             frame.render_widget(self.pomodoro_panel(snapshot), pomodoro_area);
         }
 
-        if matches!(layout.mode, LayoutMode::Narrow)
-            && matches!(self.overlay, Some(Overlay::Details))
-        {
-            let area = centered_rect(frame.area(), 52, 12);
+        if matches!(self.overlay, Some(Overlay::Details)) {
+            let area = centered_rect(frame.area(), 60, 12);
             frame.render_widget(Clear, area);
             frame.render_widget(self.details_panel(snapshot), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
-            let area = centered_rect(frame.area(), 54, 12);
+            let area = centered_rect(frame.area(), 60, 14);
             frame.render_widget(Clear, area);
             frame.render_widget(self.help_overlay(), area);
         }
@@ -749,7 +740,6 @@ impl SessionScreen {
     fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
         split_screen(
             area,
-            self.medium_drawer_open,
             self.top_bar_height(),
             self.pomodoro_panel_height(self.snapshot()),
         )
@@ -834,7 +824,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1111,6 +1101,10 @@ impl SessionScreen {
             slug: session.slug.clone(),
             name: session.name.clone(),
         });
+    }
+
+    fn open_details(&mut self) {
+        self.overlay = Some(Overlay::Details);
     }
 
     fn close_todo_editor(&mut self) {
@@ -1583,8 +1577,35 @@ mod tests {
     }
 
     #[test]
-    fn screen_left_arrow_returns_to_overview_without_overriding_overlays() {
+    fn session_details_keys_open_close_and_fall_back_to_overview() {
         let (_directory, mut database, mut screen) = seeded_screen();
+
+        assert!(screen.overlay.is_none());
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .unwrap();
+        assert!(matches!(screen.overlay, Some(Overlay::Details)));
+
+        assert!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap()
+                .is_none()
+        );
+        assert!(screen.overlay.is_none());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Right))
+            .unwrap();
+        assert!(matches!(screen.overlay, Some(Overlay::Details)));
+
+        assert!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap()
+                .is_none()
+        );
+        assert!(screen.overlay.is_none());
 
         assert_eq!(
             screen
@@ -1877,24 +1898,24 @@ mod tests {
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
         assert!(wide.contains("Pomodoro"));
-        assert!(wide.contains("Status"));
-        assert!(wide.contains("Last Update"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(!wide.contains("Details"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Open"));
         assert!(wide.contains("h = help"));
         assert!(!wide.contains("Keys"));
 
-        screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
+        assert!(medium.contains("Pomodoro"));
+        assert!(!medium.contains("Details"));
         assert!(!medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
-        let narrow = render_buffer(&screen, 49, 24);
-        assert!(narrow.contains("Details"));
+        let details = render_buffer(&screen, 120, 24);
+        assert!(details.contains("Details"));
 
         screen.overlay = Some(Overlay::History);
         let history = render_buffer(&screen, 120, 24);
@@ -1904,6 +1925,7 @@ mod tests {
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
         assert!(help.contains("Overview: Left or o"));
+        assert!(help.contains("Details: i or Right"));
         assert!(help.contains("Help: h"));
 
         screen.overlay = Some(Overlay::TodoEditor);
@@ -1920,11 +1942,11 @@ mod tests {
     }
 
     #[test]
-    fn stacked_layout_keeps_details_and_pomodoro_visible_at_sixty_columns() {
+    fn stacked_layout_hides_inline_details_and_keeps_pomodoro_at_sixty_columns() {
         let (_directory, _database, screen) = seeded_screen();
 
         let stacked = render_buffer(&screen, 60, 24);
-        assert!(stacked.contains("Details"));
+        assert!(!stacked.contains("Details"));
         assert!(stacked.contains("Pomodoro"));
     }
 
@@ -1942,27 +1964,31 @@ mod tests {
     }
 
     #[test]
-    fn enter_uses_real_viewport_width_for_details_overlay() {
+    fn details_shortcuts_open_overlay_without_viewport_guard() {
         let (_directory, mut database, mut screen) = seeded_screen();
 
         screen
-            .handle_key_in_area(&mut database, key(KeyCode::Enter), Rect::new(0, 0, 60, 24))
+            .handle_key_in_area(&mut database, key(KeyCode::Right), Rect::new(0, 0, 60, 24))
             .unwrap();
-        assert!(screen.overlay.is_none());
+        assert!(matches!(screen.overlay, Some(Overlay::Details)));
 
+        screen.overlay = None;
         screen
-            .handle_key_in_area(&mut database, key(KeyCode::Enter), Rect::new(0, 0, 49, 24))
+            .handle_key_in_area(
+                &mut database,
+                key(KeyCode::Char('i')),
+                Rect::new(0, 0, 49, 24),
+            )
             .unwrap();
         assert!(matches!(screen.overlay, Some(Overlay::Details)));
     }
 
     #[test]
     fn idle_pomodoro_panel_has_no_blank_row_before_bottom_border() {
-        let (_directory, _database, mut screen) = seeded_screen();
+        let (_directory, _database, screen) = seeded_screen();
         let wide_buffer = render_test_buffer(&screen, 120, 24);
         let wide_layout = split_screen(
             Rect::new(0, 0, 120, 24),
-            screen.medium_drawer_open,
             screen.top_bar_height(),
             screen.pomodoro_panel_height(screen.snapshot()),
         );
@@ -1977,11 +2003,9 @@ mod tests {
             "─"
         );
 
-        screen.medium_drawer_open = true;
         let medium_buffer = render_test_buffer(&screen, 80, 24);
         let medium_layout = split_screen(
             Rect::new(0, 0, 80, 24),
-            screen.medium_drawer_open,
             screen.top_bar_height(),
             screen.pomodoro_panel_height(screen.snapshot()),
         );
