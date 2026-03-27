@@ -164,6 +164,60 @@ impl Database {
         self.get_todo(todo_id)
     }
 
+    pub fn delete_todo(
+        &mut self,
+        todo_id: i64,
+        session_slug: Option<&str>,
+        now: i64,
+    ) -> Result<Todo> {
+        let transaction = self.connection.transaction()?;
+        let todo = transaction
+            .query_row(
+                "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
+                 FROM todos
+                 WHERE id = ?1",
+                [todo_id],
+                map_todo,
+            )
+            .optional()?
+            .ok_or(AppError::TodoNotFound(todo_id))?;
+
+        if let Some(expected_session_slug) = session_slug {
+            let actual_slug: String = transaction.query_row(
+                "SELECT slug FROM sessions WHERE id = ?1",
+                [todo.session_id],
+                |row| row.get(0),
+            )?;
+            if actual_slug != expected_session_slug {
+                return Err(AppError::TodoSessionMismatch {
+                    todo_id,
+                    session: expected_session_slug.to_string(),
+                });
+            }
+        }
+
+        transaction.execute("DELETE FROM todos WHERE id = ?1", [todo_id])?;
+        transaction.execute(
+            "UPDATE todos
+             SET position = position - 1
+             WHERE session_id = ?1 AND position > ?2",
+            params![todo.session_id, todo.position],
+        )?;
+        transaction.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now, todo.session_id],
+        )?;
+        let revision =
+            create_revision_snapshot(&transaction, todo.session_id, "todo deleted", now)?;
+        transaction.execute(
+            "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
+            params![revision.revision_number, todo.session_id],
+        )?;
+        transaction.commit()?;
+
+        Ok(todo)
+    }
+
     pub fn get_live_todos(&self, session_id: i64) -> Result<Vec<Todo>> {
         let mut statement = self.connection.prepare(
             "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
@@ -304,5 +358,69 @@ mod tests {
                 .current_revision,
             3
         );
+    }
+
+    #[test]
+    fn deletes_todo_reorders_positions_and_tracks_revision() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        let first = database
+            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
+            .expect("todo");
+        let second = database
+            .add_todo(&session.slug, "Review bindings", "", 1_711_275_800)
+            .expect("todo");
+        let third = database
+            .add_todo(&session.slug, "Ship release", "", 1_711_275_900)
+            .expect("todo");
+
+        let deleted = database
+            .delete_todo(first.id, Some(&session.slug), 1_711_276_000)
+            .expect("delete todo");
+        assert_eq!(deleted.id, first.id);
+
+        let todos = database.get_live_todos(session.id).expect("todos");
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0].id, second.id);
+        assert_eq!(todos[0].position, 1);
+        assert_eq!(todos[1].id, third.id);
+        assert_eq!(todos[1].position, 2);
+        assert!(database.get_todo(first.id).is_err());
+        assert_eq!(
+            database
+                .get_session_by_slug(&session.slug)
+                .expect("session")
+                .current_revision,
+            5
+        );
+    }
+
+    #[test]
+    fn deleting_todo_clears_pomodoro_link() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        let todo = database
+            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
+            .expect("todo");
+        let run = database
+            .start_pomodoro(
+                &session.slug,
+                Some(todo.id),
+                crate::domain::pomodoro::PomodoroKind::Focus,
+                1_500,
+                1_711_275_800,
+            )
+            .expect("run");
+
+        database
+            .delete_todo(todo.id, Some(&session.slug), 1_711_275_900)
+            .expect("delete todo");
+
+        let run = database.get_pomodoro_run(run.id).expect("run");
+        assert_eq!(run.todo_id, None);
     }
 }

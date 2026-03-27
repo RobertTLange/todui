@@ -37,6 +37,11 @@ pub enum Command {
         #[arg(long = "note")]
         note: Option<String>,
     },
+    Delete {
+        todo_id: i64,
+        #[arg(long)]
+        session: Option<String>,
+    },
     Edit {
         todo_id: i64,
         #[arg(long)]
@@ -75,6 +80,9 @@ pub enum SessionCommand {
         name: String,
         #[arg(long)]
         slug: Option<String>,
+    },
+    Delete {
+        session: Option<String>,
     },
     List,
     History {
@@ -189,6 +197,11 @@ fn execute_with_runner<W: Write>(
             writeln!(writer, "{}", todo.id)?;
             Ok(())
         }
+        Some(Command::Delete { todo_id, session }) => {
+            let todo = database.delete_todo(todo_id, session.as_deref(), now_utc_timestamp())?;
+            writeln!(writer, "{}\tdeleted", todo.id)?;
+            Ok(())
+        }
         Some(Command::Edit {
             todo_id,
             session,
@@ -263,6 +276,12 @@ fn handle_session_command<W: Write>(
         SessionCommand::New { name, slug } => {
             let session = database.create_session(&name, slug.as_deref(), now_utc_timestamp())?;
             writeln!(writer, "{}", session.slug)?;
+            Ok(())
+        }
+        SessionCommand::Delete { session } => {
+            let session_slug = database.resolve_session_slug(session.as_deref())?;
+            let deleted = database.delete_session(&session_slug)?;
+            writeln!(writer, "{}\tdeleted", deleted.slug)?;
             Ok(())
         }
         SessionCommand::List => {
@@ -488,7 +507,7 @@ fn handle_export_command<W: Write>(
 
 #[cfg(test)]
 mod execute_tests {
-    use crate::cli::{Cli, Command, execute, parse_from};
+    use crate::cli::{Cli, Command, SessionCommand, execute, parse_from};
     use crate::config::Config;
     use crate::db::Database;
 
@@ -588,6 +607,82 @@ mod execute_tests {
         assert_eq!(todo.title, "Draft final spec");
         assert!(todo.notes.is_empty());
     }
+
+    #[test]
+    fn deletes_todo_from_cli() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut output = Vec::new();
+
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut output,
+            parse_from(["todui", "session", "new", "Writing Sprint"]),
+        )
+        .expect("create session");
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut output,
+            parse_from(["todui", "add", "Draft spec", "--session", "writing-sprint"]),
+        )
+        .expect("add todo");
+
+        let mut delete_output = Vec::new();
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut delete_output,
+            Cli {
+                command: Some(Command::Delete {
+                    todo_id: 1,
+                    session: Some(String::from("writing-sprint")),
+                }),
+            },
+        )
+        .expect("delete todo");
+
+        assert_eq!(
+            String::from_utf8(delete_output).expect("utf8"),
+            "1\tdeleted\n"
+        );
+        assert!(database.get_todo(1).is_err());
+    }
+
+    #[test]
+    fn deletes_session_from_cli() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let mut output = Vec::new();
+
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut output,
+            parse_from(["todui", "session", "new", "Writing Sprint"]),
+        )
+        .expect("create session");
+
+        let mut delete_output = Vec::new();
+        execute(
+            &mut database,
+            &Config::default(),
+            &mut delete_output,
+            Cli {
+                command: Some(Command::Session {
+                    command: SessionCommand::Delete {
+                        session: Some(String::from("writing-sprint")),
+                    },
+                }),
+            },
+        )
+        .expect("delete session");
+
+        assert_eq!(
+            String::from_utf8(delete_output).expect("utf8"),
+            "writing-sprint\tdeleted\n"
+        );
+        assert!(database.get_session_by_slug("writing-sprint").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -669,6 +764,33 @@ mod tests {
                 assert_eq!(title.as_deref(), Some("Draft final spec"));
                 assert_eq!(note.as_deref(), Some("cover TUI"));
                 assert!(!clear_note);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_delete_command() {
+        let cli = parse_from(["todui", "delete", "7", "--session", "writing-sprint"]);
+
+        match cli.command.expect("command") {
+            Command::Delete { todo_id, session } => {
+                assert_eq!(todo_id, 7);
+                assert_eq!(session.as_deref(), Some("writing-sprint"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_session_delete_command() {
+        let cli = parse_from(["todui", "session", "delete", "writing-sprint"]);
+
+        match cli.command.expect("command") {
+            Command::Session {
+                command: SessionCommand::Delete { session },
+            } => {
+                assert_eq!(session.as_deref(), Some("writing-sprint"));
             }
             other => panic!("unexpected command: {other:?}"),
         }
