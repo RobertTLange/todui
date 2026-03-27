@@ -15,18 +15,22 @@ fn top_level_help_describes_main_commands() {
             "List sessions: `todui session list`",
         ))
         .stdout(predicate::str::contains(
-            "Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\"`",
+            "Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`",
+        ))
+        .stdout(predicate::str::contains(
+            "Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`",
         ))
         .stdout(predicate::str::contains(
             "Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`",
         ))
         .stdout(predicate::str::contains(
-            "There is no dedicated `todo show <id>` command; use `export md` for CLI inspection or `resume` for the TUI.",
+            "There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.",
         ))
         .stdout(predicate::str::contains(
             "Manage sessions, tags, and revision history",
         ))
         .stdout(predicate::str::contains("Add a todo to a session"))
+        .stdout(predicate::str::contains("List todos associated with a GitHub repo"))
         .stdout(predicate::str::contains("Open a session in the TUI"))
         .stdout(predicate::str::contains(
             "Export a session snapshot as markdown",
@@ -41,7 +45,7 @@ fn session_help_describes_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Use `todui session list` to discover available session slugs before calling `add`, `resume`, or `export md`.",
+            "Use `todui session list` to discover available session slugs before calling `add`, `resume`, `repo`, or `export md`.",
         ))
         .stdout(predicate::str::contains("Create a new session"))
         .stdout(predicate::str::contains(
@@ -55,6 +59,9 @@ fn session_help_describes_subcommands() {
         ))
         .stdout(predicate::str::contains(
             "Set or clear the grouping tag for a session",
+        ))
+        .stdout(predicate::str::contains(
+            "Set or clear the default GitHub repo for a session",
         ));
 }
 
@@ -85,6 +92,27 @@ fn add_help_explains_stdout_and_kwargs() {
         ))
         .stdout(predicate::str::contains(
             "todui add \"Review keybindings\" --session writing-sprint --note \"Ghostty + mouse\"",
+        ))
+        .stdout(predicate::str::contains(
+            "Optional GitHub repo for this todo. Accepts URL, @owner/repo, or owner/repo",
+        ));
+}
+
+#[test]
+fn repo_help_explains_search_output_and_inputs() {
+    Command::cargo_bin("todui")
+        .expect("binary")
+        .args(["repo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "List todos associated with a GitHub repository.",
+        ))
+        .stdout(predicate::str::contains(
+            "<todo-id>\\t<session-slug>\\t<title>\\t<status>\\t<effective-repo>\\t<source>",
+        ))
+        .stdout(predicate::str::contains(
+            "todui repo @exampleorg/todui-keymove",
         ));
 }
 
