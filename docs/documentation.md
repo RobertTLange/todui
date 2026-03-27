@@ -52,6 +52,7 @@ Primary references:
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
+  - CLI help text now includes agent-readable recipes, output shapes, recent-session defaults, and an explicit note that CLI todo inspection flows through `export md` rather than a dedicated `todo show` command
   - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag, and `n` in a live session creates a todo with title + notes
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
   - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
