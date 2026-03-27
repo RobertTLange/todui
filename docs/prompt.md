@@ -9,7 +9,7 @@ Source spec: [spec.md](spec.md)
 - Ship a CLI for session create/list/history, to-do add/toggle, resume, and markdown export.
 - Persist all app state in one local SQLite database file.
 - Support immutable per-session revision history and read-only revision browsing.
-- Support optional Pomodoro runs inside the session view.
+- Support optional global Pomodoro runs with an active footer in overview and live session views.
 - Keep the app keyboard-first, with mouse support as an additive layer.
 
 ## Non-Goals
@@ -76,7 +76,7 @@ Source spec: [spec.md](spec.md)
   - `todui export md [<session>] [--revision <n>] [--output <file>] [--format gfm|plain] [--timestamps full|compact|none] [--include-notes] [--open-only]`
 - TUI session view with top bar, todo list, details overlay, footer, overlays/modals, timestamps, semantic theme tokens, keyboard + mouse support.
 - Revision history overlay and read-only historical revision mode.
-- Pomodoro card inside session view with start/pause/resume/cancel and summary behavior in historical mode.
+- Shared active Pomodoro footer in overview and live session views with start/pause/resume/cancel from the session view.
 - Markdown export for head and historical revisions.
 - Tests for domain logic, repositories, CLI flows, and core TUI behavior.
 - Project docs:

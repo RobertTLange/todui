@@ -18,7 +18,7 @@ Primary references:
   - Milestone 1: SQLite schema, session/todo CLI flows, live markdown export, revision snapshots under the hood
   - Milestone 2: head TUI session view, navigation, mouse hitbox behavior, terminal cleanup
   - Milestone 3: revision history CLI/TUI flow, read-only revision mode, return-to-head behavior
-  - Milestone 4: Pomodoro persistence, state machine, session card, active-run uniqueness
+  - Milestone 4: Pomodoro persistence, state machine, active footer, active-run uniqueness
   - Milestone 5: config-driven theme/durations, export option matrix, expanded tests
 - Next:
   - optional UX refinement only; plan scope is complete
@@ -34,7 +34,7 @@ Primary references:
   - session-centric model
   - immutable full-snapshot revisions
   - read-only historical mode
-  - Pomodoro embedded in session view
+  - global Pomodoro active footer in overview and live session views
   - GFM default export
   - keyboard-first plus additive mouse support
 - Milestone 0 implementation choices:
@@ -51,6 +51,8 @@ Primary references:
   - the overview is browse-first for session opening, but tag editing now also lives there: `t` edits the selected session tag without entering the session
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
+  - Pomodoro ownership is now global rather than session-scoped: runs may be unlinked or linked to one todo, the idle box is hidden by default, and the active footer appears in overview plus live session views
+  - historical revisions no longer render Pomodoro UI
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
   - CLI help text now includes agent-readable recipes, output shapes, recent-session defaults, and an explicit note that CLI todo inspection flows through `export md` rather than a dedicated `todo show` command
   - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag, and `n` in a live session creates a todo with title + notes
