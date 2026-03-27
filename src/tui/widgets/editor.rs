@@ -9,6 +9,7 @@ pub enum EditorField {
     #[default]
     Primary,
     Secondary,
+    Tertiary,
 }
 
 pub struct EditorView<'a> {
@@ -17,6 +18,8 @@ pub struct EditorView<'a> {
     pub primary_value: &'a str,
     pub secondary_label: Option<&'a str>,
     pub secondary_value: Option<&'a str>,
+    pub tertiary_label: Option<&'a str>,
+    pub tertiary_value: Option<&'a str>,
     pub focused_field: EditorField,
     pub error: Option<&'a str>,
     pub footer_hint: &'a str,
@@ -38,6 +41,15 @@ pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
             "{}: {}",
             label,
             display_field(value, matches!(view.focused_field, EditorField::Secondary))
+        )));
+    }
+
+    if let (Some(label), Some(value)) = (view.tertiary_label, view.tertiary_value) {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(format!(
+            "{}: {}",
+            label,
+            display_field(value, matches!(view.focused_field, EditorField::Tertiary))
         )));
     }
 
@@ -93,7 +105,9 @@ mod tests {
                             primary_value: "Draft spec",
                             secondary_label: Some("Notes"),
                             secondary_value: Some("cover TUI"),
-                            focused_field: EditorField::Secondary,
+                            tertiary_label: Some("Repo"),
+                            tertiary_value: Some("@exampleorg/todui-keymove"),
+                            focused_field: EditorField::Tertiary,
                             error: Some("Todo title is required"),
                             footer_hint: "Enter save  Esc cancel",
                         },
@@ -105,7 +119,8 @@ mod tests {
 
         let text = buffer_to_string(terminal.backend().buffer());
         assert!(text.contains("Title: Draft spec"));
-        assert!(text.contains("Notes: cover TUI|"));
+        assert!(text.contains("Notes: cover TUI"));
+        assert!(text.contains("Repo: @exampleorg/todui-keymove|"));
         assert!(text.contains("Todo title is required"));
     }
 
