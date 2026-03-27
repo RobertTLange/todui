@@ -6,22 +6,25 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
 use crate::error::Result;
-use crate::timestamp::format_full_local;
 use crate::timestamp::now_utc_timestamp;
+use crate::timestamp::{format_full_local, format_month_day_local};
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
+const SUMMARY_PANEL_PERCENT: u16 = 15;
+const SUMMARY_PANEL_MIN_HEIGHT: u16 = 8;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -53,6 +56,8 @@ pub(crate) fn run_in_terminal(
                 Event::Resize(_, _) => {}
                 _ => {}
             }
+        } else {
+            screen.handle_tick(database)?;
         }
     }
 }
@@ -66,6 +71,7 @@ pub(crate) enum OverviewExit {
 #[derive(Debug)]
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
+    active_run: Option<PomodoroRun>,
     selected_index: usize,
     scroll_offset: usize,
     theme: Theme,
@@ -77,20 +83,43 @@ struct OverviewScreen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverviewOverlay {
-    SessionEditor,
+    Help,
+    SessionEditor(SessionEditorMode),
     DeleteSession { slug: String, name: String },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEditorMode {
+    Create,
+    EditMetadata { slug: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionEditorState {
     name: String,
+    tag: String,
+    repo: String,
+    focused_field: EditorField,
     error: Option<String>,
+}
+
+impl Default for SessionEditorState {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            tag: String::new(),
+            repo: String::new(),
+            focused_field: EditorField::Primary,
+            error: None,
+        }
+    }
 }
 
 impl OverviewScreen {
     fn new(config: Config) -> Self {
         Self {
             sessions: Vec::new(),
+            active_run: None,
             selected_index: 0,
             scroll_offset: 0,
             theme: Theme::from_config(&config),
@@ -103,9 +132,20 @@ impl OverviewScreen {
 
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.sessions = database.list_session_overview()?;
+        self.active_run = database.get_active_pomodoro()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
+    }
+
+    fn handle_tick(&mut self, database: &mut Database) -> Result<()> {
+        if let Some(run) = self.active_run.clone()
+            && matches!(run.state, PomodoroState::Running)
+            && remaining_seconds(&run, now_utc_timestamp()) == 0
+        {
+            database.complete_pomodoro(run.id, now_utc_timestamp())?;
+        }
+        self.reload(database)
     }
 
     fn handle_key(
@@ -118,7 +158,16 @@ impl OverviewScreen {
         }
 
         match self.overlay {
-            Some(OverviewOverlay::SessionEditor) => {
+            Some(OverviewOverlay::Help) => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h')
+                ) {
+                    self.overlay = None;
+                }
+                return Ok(None);
+            }
+            Some(OverviewOverlay::SessionEditor(_)) => {
                 return self.handle_session_editor_key(database, key);
             }
             Some(OverviewOverlay::DeleteSession { .. }) => {
@@ -129,12 +178,38 @@ impl OverviewScreen {
 
         let exit = match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(OverviewExit::Quit),
+            KeyCode::Char('h') => {
+                self.overlay = Some(OverviewOverlay::Help);
+                None
+            }
             KeyCode::Char('n') => {
                 self.open_session_editor();
                 None
             }
+            KeyCode::Char('t') => {
+                self.open_session_metadata_editor();
+                None
+            }
             KeyCode::Char('D') => {
                 self.open_delete_session();
+                None
+            }
+            _ if matches!(key.code, KeyCode::Char('p'))
+                || key_matches_binding(&key, &self.config.keys.pomodoro) =>
+            {
+                self.handle_pomodoro(database, PomodoroKind::Focus)?;
+                None
+            }
+            KeyCode::Char('b') => {
+                self.handle_pomodoro(database, PomodoroKind::ShortBreak)?;
+                None
+            }
+            KeyCode::Char('B') => {
+                self.handle_pomodoro(database, PomodoroKind::LongBreak)?;
+                None
+            }
+            KeyCode::Char('c') => {
+                self.cancel_active_pomodoro(database)?;
                 None
             }
             KeyCode::Up | KeyCode::Char('k')
@@ -178,6 +253,35 @@ impl OverviewScreen {
         Ok(exit)
     }
 
+    fn handle_pomodoro(&mut self, database: &mut Database, kind: PomodoroKind) -> Result<()> {
+        if let Some(run) = self.active_run.clone() {
+            match run.state {
+                PomodoroState::Running if matches!(kind, PomodoroKind::Focus) => {
+                    database.pause_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                PomodoroState::Paused if matches!(kind, PomodoroKind::Focus) => {
+                    database.resume_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                _ => {}
+            }
+        } else {
+            database.start_pomodoro(
+                kind,
+                pomodoro_seconds(&self.config, kind),
+                now_utc_timestamp(),
+            )?;
+        }
+        self.reload(database)
+    }
+
+    fn cancel_active_pomodoro(&mut self, database: &mut Database) -> Result<()> {
+        if let Some(run) = self.active_run.clone() {
+            database.cancel_pomodoro(run.id, now_utc_timestamp())?;
+            self.reload(database)?;
+        }
+        Ok(())
+    }
+
     fn handle_session_editor_key(
         &mut self,
         database: &mut Database,
@@ -188,14 +292,33 @@ impl OverviewScreen {
                 self.close_session_editor();
                 Ok(None)
             }
+            KeyCode::Tab => {
+                self.session_editor.focused_field = match self.overlay {
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => {
+                        match self.session_editor.focused_field {
+                            EditorField::Primary => EditorField::Secondary,
+                            EditorField::Secondary => EditorField::Tertiary,
+                            EditorField::Tertiary => EditorField::Primary,
+                        }
+                    }
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
+                        ..
+                    })) => match self.session_editor.focused_field {
+                        EditorField::Primary => EditorField::Secondary,
+                        EditorField::Secondary | EditorField::Tertiary => EditorField::Primary,
+                    },
+                    _ => self.session_editor.focused_field,
+                };
+                Ok(None)
+            }
             KeyCode::Enter => self.submit_session_editor(database),
             KeyCode::Backspace => {
-                self.session_editor.name.pop();
+                self.current_editor_field_mut().pop();
                 self.session_editor.error = None;
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.session_editor.name.push(character);
+                self.current_editor_field_mut().push(character);
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -250,40 +373,42 @@ impl OverviewScreen {
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         self.last_area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(frame.area());
+        let chunks = self.root_chunks(frame.area());
+        frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
         frame.render_widget(self.top_bar(), chunks[0]);
 
         if self.sessions.is_empty() {
             frame.render_widget(self.empty_state(), chunks[1]);
         } else {
-            let body = if chunks[1].width >= 90 {
-                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(chunks[1])
-            } else {
-                Layout::horizontal([Constraint::Percentage(100)]).split(chunks[1])
-            };
-
-            let list_area = body[0];
+            let (list_area, summary_area, details_area) = self.body_areas(chunks[1]);
             frame.render_stateful_widget(
                 self.session_list(list_area.height),
                 list_area,
                 &mut self.list_state(),
             );
-            if let Some(details_area) = body.get(1).copied() {
+            frame.render_widget(self.summary_panel(), summary_area);
+            if let Some(details_area) = details_area {
                 frame.render_widget(self.details_panel(), details_area);
             }
         }
 
-        frame.render_widget(self.footer(), chunks[2]);
+        if let Some(run) = self.active_run.as_ref()
+            && let Some(footer_area) = chunks.get(2).copied()
+        {
+            frame.render_widget(
+                active_footer(&self.theme, run, now_utc_timestamp()),
+                footer_area,
+            );
+        }
 
-        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor)) {
-            let area = centered_rect(frame.area(), 54, 8);
+        if matches!(self.overlay, Some(OverviewOverlay::Help)) {
+            let area = centered_rect(frame.area(), 58, 11);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.help_overlay(), area);
+        }
+        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
+            let area = centered_rect(frame.area(), 60, 11);
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(), area);
         }
@@ -305,26 +430,62 @@ impl OverviewScreen {
         };
 
         Paragraph::new(vec![
-            Line::from("todui | session overview"),
+            Line::from("todui | session overview | h = help"),
             Line::from(subtitle),
         ])
-        .block(Block::default().borders(Borders::ALL).title("Overview"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Overview")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn session_list(&self, height: u16) -> List<'static> {
+    fn session_list(&self, height: u16) -> Table<'static> {
         let visible_rows = self.visible_rows_for_height(height);
-        let items = self
+        let rows = self
             .sessions
             .iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(|session| ListItem::new(session_row(session)))
+            .map(|session| session_table_row(session, &self.theme))
             .collect::<Vec<_>>();
 
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Sessions"))
-            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Fill(1),
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Length(11),
+            ],
+        )
+        .header(
+            Row::new([
+                Cell::from("Tag"),
+                Cell::from("Slug"),
+                Cell::from("Rev"),
+                Cell::from("Open"),
+                Cell::from("Done"),
+                Cell::from("Last Opened"),
+            ])
+            .style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Sessions")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
+        .column_spacing(1)
+        .row_highlight_style(self.theme.selection_style(SelectionTone::Open))
     }
 
     fn details_panel(&self) -> Paragraph<'static> {
@@ -333,9 +494,11 @@ impl OverviewScreen {
             .get(self.selected_index)
             .map(|session| {
                 format!(
-                    "name: {}\nslug: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
+                    "name: {}\nslug: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
                     session.name,
                     session.slug,
+                    session.tag.as_deref().unwrap_or("untagged"),
+                    session.repo.as_deref().unwrap_or("-"),
                     format_full_local(session.last_opened_at),
                     session.current_revision,
                     session.todo_count - session.done_count,
@@ -346,46 +509,140 @@ impl OverviewScreen {
 
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Details"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Details")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
+    }
+
+    fn summary_panel(&self) -> Paragraph<'static> {
+        let stats = self.summary_stats();
+        let text = format!(
+            "total sessions: {} | tagged: {} | untagged: {}\ntotal todos: {} | open: {} | completed: {}\ncompletion rate: {}%\nnewest opened: {}\noldest opened: {}\navg revision: r{}",
+            stats.total_sessions,
+            stats.tagged_sessions,
+            stats.untagged_sessions,
+            stats.total_todos,
+            stats.open_todos,
+            stats.done_todos,
+            stats.completion_rate,
+            format_month_day_local(stats.newest_last_opened_at),
+            format_month_day_local(stats.oldest_last_opened_at),
+            stats.average_revision
+        );
+
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Summary")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn empty_state(&self) -> Paragraph<'static> {
         Paragraph::new("No sessions yet.\n\nPress n to create one from the TUI.")
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Sessions"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Sessions")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn footer(&self) -> Paragraph<'static> {
-        Paragraph::new("j/k move  n new  D delete  Enter open  q quit")
-            .block(Block::default().borders(Borders::ALL).title("Keys"))
-            .style(self.theme.block_style())
+    fn help_overlay(&self) -> Paragraph<'static> {
+        Paragraph::new(
+            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit repo/tag: t\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
+        )
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Help")
+                .style(self.theme.surface_style(SurfaceTone::Overlay))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
     fn session_editor_modal(&self) -> Paragraph<'_> {
+        let (
+            title,
+            primary_label,
+            primary_value,
+            secondary_label,
+            secondary_value,
+            tertiary_label,
+            tertiary_value,
+            footer_hint,
+        ) = match &self.overlay {
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => (
+                "New Session",
+                "Name",
+                self.session_editor.name.as_str(),
+                Some("Tag"),
+                Some(self.session_editor.tag.as_str()),
+                Some("Repo"),
+                Some(self.session_editor.repo.as_str()),
+                "Tab switch  Enter create  Esc cancel",
+            ),
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata { .. })) => (
+                "Edit Session Metadata",
+                "Tag",
+                self.session_editor.tag.as_str(),
+                Some("Repo"),
+                Some(self.session_editor.repo.as_str()),
+                None,
+                None,
+                "Empty clears  Enter save  Esc cancel",
+            ),
+            _ => ("Session", "Value", "", None, None, None, None, "Esc cancel"),
+        };
         render_editor(
             &self.theme,
             EditorView {
-                title: "New Session",
-                primary_label: "Name",
-                primary_value: &self.session_editor.name,
-                secondary_label: None,
-                secondary_value: None,
-                focused_field: EditorField::Primary,
+                title,
+                primary_label,
+                primary_value,
+                secondary_label,
+                secondary_value,
+                tertiary_label,
+                tertiary_value,
+                focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
-                footer_hint: "Enter create  Esc cancel",
+                footer_hint,
             },
         )
     }
 
     fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
-            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Delete Session")
+                .style(self.theme.surface_style(SurfaceTone::Danger))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Danger))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Danger)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
     fn selected_session_slug(&self) -> Option<String> {
@@ -399,7 +656,7 @@ impl OverviewScreen {
     }
 
     fn visible_rows_for_height(&self, height: u16) -> usize {
-        height.saturating_sub(2).max(1) as usize
+        height.saturating_sub(3).max(1) as usize
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -428,8 +685,8 @@ impl OverviewScreen {
         }
     }
 
-    fn list_state(&self) -> ListState {
-        let mut state = ListState::default();
+    fn list_state(&self) -> TableState {
+        let mut state = TableState::default();
         if !self.sessions.is_empty() {
             state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
         }
@@ -437,23 +694,124 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
-        let body = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(area)[1];
+        self.body_areas(self.root_chunks(area)[1]).0
+    }
+
+    fn body_areas(&self, body: Rect) -> (Rect, Rect, Option<Rect>) {
         if body.width >= 90 {
-            Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(body)
-                [0]
+            let columns =
+                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(body);
+            let left_column =
+                Layout::vertical(self.summary_split(columns[0].height)).split(columns[0]);
+            (left_column[0], left_column[1], Some(columns[1]))
         } else {
-            body
+            let stacked = Layout::vertical(self.summary_split(body.height)).split(body);
+            (stacked[0], stacked[1], None)
+        }
+    }
+
+    fn root_chunks(&self, area: Rect) -> Vec<Rect> {
+        let mut constraints = vec![Constraint::Length(3), Constraint::Min(8)];
+        if self.active_run.is_some() {
+            constraints.push(Constraint::Length(active_footer_height()));
+        }
+        Layout::vertical(constraints).split(area).to_vec()
+    }
+
+    fn summary_split(&self, total_height: u16) -> [Constraint; 2] {
+        let proportional_height =
+            ((u32::from(total_height) * u32::from(SUMMARY_PANEL_PERCENT)).div_ceil(100)) as u16;
+        let summary_height = proportional_height.max(SUMMARY_PANEL_MIN_HEIGHT);
+        let list_height = total_height.saturating_sub(summary_height).max(1);
+        [
+            Constraint::Length(list_height),
+            Constraint::Length(summary_height),
+        ]
+    }
+
+    fn summary_stats(&self) -> OverviewSummaryStats {
+        let total_sessions = self.sessions.len();
+        let tagged_sessions = self
+            .sessions
+            .iter()
+            .filter(|session| session.tag.is_some())
+            .count();
+        let total_todos = self
+            .sessions
+            .iter()
+            .map(|session| session.todo_count)
+            .sum::<i64>();
+        let done_todos = self
+            .sessions
+            .iter()
+            .map(|session| session.done_count)
+            .sum::<i64>();
+        let open_todos = total_todos - done_todos;
+        let completion_rate = if total_todos == 0 {
+            0
+        } else {
+            ((done_todos * 100) + (total_todos / 2)) / total_todos
+        };
+        let newest_last_opened_at = self
+            .sessions
+            .iter()
+            .map(|session| session.last_opened_at)
+            .max()
+            .unwrap_or(0);
+        let oldest_last_opened_at = self
+            .sessions
+            .iter()
+            .map(|session| session.last_opened_at)
+            .min()
+            .unwrap_or(0);
+        let total_revisions = self
+            .sessions
+            .iter()
+            .map(|session| u64::from(session.current_revision))
+            .sum::<u64>();
+        let average_revision = if total_sessions == 0 {
+            0
+        } else {
+            ((total_revisions + (total_sessions as u64 / 2)) / total_sessions as u64) as u32
+        };
+
+        OverviewSummaryStats {
+            total_sessions,
+            tagged_sessions,
+            untagged_sessions: total_sessions.saturating_sub(tagged_sessions),
+            total_todos,
+            open_todos,
+            done_todos,
+            completion_rate,
+            newest_last_opened_at,
+            oldest_last_opened_at,
+            average_revision,
         }
     }
 
     fn open_session_editor(&mut self) {
-        self.overlay = Some(OverviewOverlay::SessionEditor);
+        self.overlay = Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create));
         self.session_editor = SessionEditorState::default();
+    }
+
+    fn open_session_metadata_editor(&mut self) {
+        let Some(session) = self.sessions.get(self.selected_index) else {
+            return;
+        };
+        self.overlay = Some(OverviewOverlay::SessionEditor(
+            SessionEditorMode::EditMetadata {
+                slug: session.slug.clone(),
+                name: session.name.clone(),
+            },
+        ));
+        self.session_editor = SessionEditorState {
+            name: String::new(),
+            tag: session.tag.clone().unwrap_or_default(),
+            repo: session.repo.clone().unwrap_or_default(),
+            focused_field: EditorField::Primary,
+            error: None,
+        };
     }
 
     fn open_delete_session(&mut self) {
@@ -472,35 +830,123 @@ impl OverviewScreen {
     }
 
     fn submit_session_editor(&mut self, database: &mut Database) -> Result<Option<OverviewExit>> {
-        let name = self.session_editor.name.trim();
-        if name.is_empty() {
-            self.session_editor.error = Some(String::from("Session name is required"));
-            return Ok(None);
-        }
+        match &self.overlay {
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => {
+                let name = self.session_editor.name.trim();
+                if name.is_empty() {
+                    self.session_editor.error = Some(String::from("Session name is required"));
+                    return Ok(None);
+                }
 
-        match database.create_session(name, None, now_utc_timestamp()) {
-            Ok(session) => {
-                self.reload(database)?;
-                self.close_session_editor();
-                Ok(Some(OverviewExit::OpenSession(session.slug)))
+                match database.create_session(
+                    name,
+                    None,
+                    Some(self.session_editor.tag.as_str()),
+                    Some(self.session_editor.repo.as_str()),
+                    now_utc_timestamp(),
+                ) {
+                    Ok(session) => {
+                        self.reload(database)?;
+                        self.close_session_editor();
+                        Ok(Some(OverviewExit::OpenSession(session.slug)))
+                    }
+                    Err(error) => {
+                        self.session_editor.error = Some(error.to_string());
+                        Ok(None)
+                    }
+                }
             }
-            Err(error) => {
-                self.session_editor.error = Some(error.to_string());
-                Ok(None)
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
+                slug, ..
+            })) => {
+                match database.update_session_metadata(
+                    slug,
+                    Some(self.session_editor.tag.as_str()),
+                    Some(self.session_editor.repo.as_str()),
+                    now_utc_timestamp(),
+                ) {
+                    Ok(_) => {
+                        self.reload(database)?;
+                        self.close_session_editor();
+                        Ok(None)
+                    }
+                    Err(error) => {
+                        self.session_editor.error = Some(error.to_string());
+                        Ok(None)
+                    }
+                }
             }
+            _ => Ok(None),
+        }
+    }
+
+    fn current_editor_field_mut(&mut self) -> &mut String {
+        match self.session_editor.focused_field {
+            EditorField::Primary => {
+                if matches!(
+                    self.overlay,
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+                ) {
+                    &mut self.session_editor.name
+                } else {
+                    &mut self.session_editor.tag
+                }
+            }
+            EditorField::Secondary => {
+                if matches!(
+                    self.overlay,
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+                ) {
+                    &mut self.session_editor.tag
+                } else {
+                    &mut self.session_editor.repo
+                }
+            }
+            EditorField::Tertiary => &mut self.session_editor.repo,
         }
     }
 }
 
-fn session_row(session: &SessionOverview) -> String {
-    format!(
-        "{} ({})  r{}  open:{} done:{}",
-        session.name,
-        session.slug,
-        session.current_revision,
-        session.todo_count - session.done_count,
-        session.done_count
-    )
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverviewSummaryStats {
+    total_sessions: usize,
+    tagged_sessions: usize,
+    untagged_sessions: usize,
+    total_todos: i64,
+    open_todos: i64,
+    done_todos: i64,
+    completion_rate: i64,
+    newest_last_opened_at: i64,
+    oldest_last_opened_at: i64,
+    average_revision: u32,
+}
+
+fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
+    Row::new([
+        Cell::from(session.tag.clone().unwrap_or_else(|| String::from("-"))).style(
+            if session.tag.is_some() {
+                theme.text_style(TextTone::Tag)
+            } else {
+                theme.text_style(TextTone::Muted)
+            },
+        ),
+        Cell::from(session.slug.clone()),
+        Cell::from(format!("r{}", session.current_revision))
+            .style(theme.text_style(TextTone::Meta)),
+        Cell::from((session.todo_count - session.done_count).to_string())
+            .style(theme.text_style(TextTone::Open)),
+        Cell::from(session.done_count.to_string()).style(theme.text_style(TextTone::Completed)),
+        Cell::from(format_month_day_local(session.last_opened_at))
+            .style(theme.text_style(TextTone::Muted)),
+    ])
+}
+
+fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
+    match kind {
+        PomodoroKind::Focus => i64::from(config.pomodoro.focus_minutes) * 60,
+        PomodoroKind::ShortBreak => i64::from(config.pomodoro.short_break_minutes) * 60,
+        PomodoroKind::LongBreak => i64::from(config.pomodoro.long_break_minutes) * 60,
+    }
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -516,11 +962,11 @@ fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
 
 fn list_row_index(list_area: Rect, scroll_offset: usize, y: u16) -> Option<usize> {
     let inner_y = list_area.y.saturating_add(1);
-    if y < inner_y || y >= list_area.bottom().saturating_sub(1) {
+    if y <= inner_y || y >= list_area.bottom().saturating_sub(1) {
         return None;
     }
 
-    Some(scroll_offset + usize::from(y.saturating_sub(inner_y)))
+    Some(scroll_offset + usize::from(y.saturating_sub(inner_y + 1)))
 }
 
 #[cfg(test)]
@@ -537,6 +983,7 @@ mod tests {
     use super::{OverviewExit, OverviewScreen, list_row_index};
     use crate::config::Config;
     use crate::db::Database;
+    use crate::domain::pomodoro::PomodoroKind;
 
     #[test]
     fn overview_screen_handles_navigation_and_open() {
@@ -554,6 +1001,14 @@ mod tests {
         assert_eq!(
             screen.selected_session_slug().as_deref(),
             Some("writing-sprint")
+        );
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Right))
+            .unwrap();
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession(String::from("writing-sprint")))
         );
 
         let exit = screen
@@ -583,11 +1038,25 @@ mod tests {
                 .handle_key(&mut database, key(KeyCode::Char(character)))
                 .unwrap();
         }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "Private".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
 
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert_eq!(exit, Some(OverviewExit::OpenSession(String::from("inbox"))));
+        assert_eq!(
+            database
+                .get_session_by_slug("inbox")
+                .expect("new session")
+                .tag
+                .as_deref(),
+            Some("private")
+        );
         assert_eq!(
             database
                 .get_session_by_slug("inbox")
@@ -620,7 +1089,7 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
         let list_area = screen.list_area(screen.last_area);
-        let row = list_area.y + 2;
+        let row = list_area.y + 3;
 
         let exit = screen.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, row));
         assert!(exit.is_none());
@@ -633,11 +1102,34 @@ mod tests {
     #[test]
     fn overview_render_covers_populated_and_empty_states() {
         let (_directory, _database, mut populated) = seeded_overview_screen();
-        let populated_buffer = render_buffer(&mut populated, 120, 24);
-        assert!(populated_buffer.contains("session overview"));
-        assert!(populated_buffer.contains("Writing Sprint"));
-        assert!(populated_buffer.contains("Enter opens the session head."));
-        assert!(populated_buffer.contains("return here."));
+        let wide_buffer = render_buffer(&mut populated, 120, 24);
+        assert!(wide_buffer.contains("session overview"));
+        assert!(wide_buffer.contains("h = help"));
+        assert!(wide_buffer.contains("Tag"));
+        assert!(wide_buffer.contains("Slug"));
+        assert!(wide_buffer.contains("Last Opened"));
+        assert!(wide_buffer.contains("private"));
+        assert!(wide_buffer.contains("writing-sprint"));
+        assert!(wide_buffer.contains("Summary"));
+        assert!(wide_buffer.contains("total sessions: 2"));
+        assert!(wide_buffer.contains("tagged: 2"));
+        assert!(wide_buffer.contains("untagged: 0"));
+        assert!(wide_buffer.contains("total todos: 1"));
+        assert!(wide_buffer.contains("open: 1"));
+        assert!(wide_buffer.contains("completed: 0"));
+        assert!(wide_buffer.contains("completion rate: 0%"));
+        assert!(wide_buffer.contains("newest opened:"));
+        assert!(wide_buffer.contains("oldest opened:"));
+        assert!(wide_buffer.contains("avg revision: r2"));
+        assert!(wide_buffer.contains("Enter opens the session head."));
+        assert!(wide_buffer.contains("return here."));
+        assert!(!wide_buffer.contains("Pomodoro"));
+        assert!(!wide_buffer.contains("Keys"));
+
+        let narrow_buffer = render_buffer(&mut populated, 80, 20);
+        assert!(narrow_buffer.contains("Sessions"));
+        assert!(narrow_buffer.contains("Summary"));
+        assert!(!narrow_buffer.contains("Details"));
 
         let (_directory, database) = Database::open_temp().expect("database");
         let mut empty = OverviewScreen::new(Config::default());
@@ -645,6 +1137,136 @@ mod tests {
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
+        assert!(empty_buffer.contains("h = help"));
+        assert!(!empty_buffer.contains("Pomodoro"));
+        assert!(!empty_buffer.contains("Summary"));
+        assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_shows_active_pomodoro_footer() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        database
+            .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&mut screen, 120, 24);
+        assert!(rendered.contains("Pomodoro"));
+        assert!(rendered.contains("SHORT BREAK"));
+        assert!(!rendered.contains("Linked:"));
+        assert!(!rendered.contains("No linked todo"));
+    }
+
+    #[test]
+    fn overview_handles_pomodoro_shortcuts() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::Focus)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.state),
+            Some(crate::domain::pomodoro::PomodoroState::Paused)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.state),
+            Some(crate::domain::pomodoro::PomodoroState::Running)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('c')))
+            .unwrap();
+        assert!(screen.active_run.is_none());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('b')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::ShortBreak)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('c')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('B')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::LongBreak)
+        ));
+    }
+
+    #[test]
+    fn overview_honors_custom_pomodoro_keybinding() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .expect("session");
+        database
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .expect("todo");
+
+        let mut config = Config::default();
+        config.keys.pomodoro = vec![String::from("x")];
+        let mut screen = OverviewScreen::new(config);
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::Focus)
+        ));
+    }
+
+    #[test]
+    fn overview_summary_stats_include_activity_mix() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let stats = screen.summary_stats();
+
+        assert_eq!(stats.total_sessions, 2);
+        assert_eq!(stats.tagged_sessions, 2);
+        assert_eq!(stats.untagged_sessions, 0);
+        assert_eq!(stats.total_todos, 1);
+        assert_eq!(stats.open_todos, 1);
+        assert_eq!(stats.done_todos, 0);
+        assert_eq!(stats.completion_rate, 0);
+        assert_eq!(stats.newest_last_opened_at, 1_711_275_800);
+        assert_eq!(stats.oldest_last_opened_at, 1_711_275_600);
+        assert_eq!(stats.average_revision, 2);
+    }
+
+    #[test]
+    fn overview_opens_help_overlay_with_h() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('h')))
+            .unwrap();
+        assert!(render_buffer(&mut screen, 120, 24).contains("Help"));
+        assert!(render_buffer(&mut screen, 120, 24).contains("Open session"));
+
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+        assert!(!render_buffer(&mut screen, 120, 24).contains("Open session"));
     }
 
     #[test]
@@ -686,23 +1308,72 @@ mod tests {
     }
 
     #[test]
+    fn overview_edits_selected_session_metadata() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('t')))
+            .unwrap();
+        assert!(render_buffer(&mut screen, 120, 24).contains("Edit Session Metadata"));
+        for _ in 0..7 {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "Deep Work".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "@SakanaAI/todui-keymove".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(
+            database
+                .get_session_by_slug("reading-sprint")
+                .expect("session")
+                .tag
+                .as_deref(),
+            Some("deep-work")
+        );
+        assert_eq!(
+            database
+                .get_session_by_slug("reading-sprint")
+                .expect("session")
+                .repo
+                .as_deref(),
+            Some("sakanaai/todui-keymove")
+        );
+    }
+
+    #[test]
     fn list_row_index_uses_inner_rows_only() {
         let area = Rect::new(0, 0, 40, 10);
         assert_eq!(list_row_index(area, 0, 0), None);
-        assert_eq!(list_row_index(area, 0, 1), Some(0));
-        assert_eq!(list_row_index(area, 2, 2), Some(3));
+        assert_eq!(list_row_index(area, 0, 1), None);
+        assert_eq!(list_row_index(area, 0, 2), Some(0));
+        assert_eq!(list_row_index(area, 0, 3), Some(1));
+        assert_eq!(list_row_index(area, 2, 4), Some(4));
     }
 
     fn seeded_overview_screen() -> (tempfile::TempDir, Database, OverviewScreen) {
         let (directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
+            .add_todo(&writing.slug, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
         let reading = database
-            .create_session("Reading Sprint", None, 1_711_275_700)
+            .create_session("Reading Sprint", None, Some("private"), None, 1_711_275_700)
             .expect("session");
         database
             .mark_session_opened(&reading.slug, 1_711_275_800)

@@ -10,7 +10,7 @@ Build a local-first terminal app named todui with:
 	•	a full-screen TUI for browsing and editing to-do sessions
 	•	a CLI for creating sessions, resuming sessions, adding/editing todos, inspecting history, and exporting markdown
 	•	session-specific revision history
-	•	optional Pomodoro support embedded inside the session view
+	•	optional Pomodoro support with a shared active footer in overview and live session views
 	•	mouse and keyboard navigation
 	•	Vim-style navigation aliases in addition to arrows
 	•	clickable checkboxes for toggling done state
@@ -30,10 +30,10 @@ Examples:
 
 A session has:
 	•	identity: slug + display name
+	•	optional tag for overview grouping and CLI metadata
 	•	current live head
 	•	immutable revision history
 	•	zero or more todos
-	•	zero or more Pomodoro runs
 
 2.2 Revision
 
@@ -58,7 +58,7 @@ A todo has:
 
 2.4 Pomodoro run
 
-A Pomodoro run is a timer event attached to a session and optionally attached to one todo.
+A Pomodoro run is a global timer event and may optionally be attached to one todo.
 
 A run is one of:
 	•	focus
@@ -81,10 +81,11 @@ The app shall:
 	•	edit todo title and notes from CLI and TUI
 	•	delete todos from CLI and TUI
 	•	delete sessions from CLI and TUI
+	•	assign or clear an optional session tag from CLI and TUI overview
 	•	toggle todo completion from CLI and TUI
 	•	display timestamps in the TUI
 	•	export a markdown text version of a session
-	•	show Pomodoro status inside the session view
+	•	show active Pomodoro status in overview and live session views
 
 3.2 UX goals
 
@@ -103,7 +104,6 @@ Do not implement these in v1:
 	•	cloud sync
 	•	multi-user collaboration
 	•	due dates
-	•	tags
 	•	recurring tasks
 	•	task dependencies
 	•	natural-language parsing
@@ -187,10 +187,11 @@ Binary name: todui
 8.1 Command summary
 
 todui
-todui session new <name> [--slug <slug>]
+todui session new <name> [--slug <slug>] [--tag <tag>]
 todui session delete [<session>]
 todui session list
 todui session history [<session>]
+todui session tag [<session>] [--set <tag> | --clear]
 
 todui add <title> [--session <session>] [--note <text>]
 todui delete <todo-id> [--session <session>]
@@ -231,6 +232,12 @@ todui session delete
 	•	with <session>: deletes that session
 	•	no args: deletes the most recently opened session
 	•	deletes the live session plus todos, revision snapshots, and Pomodoro runs
+
+todui session tag
+	•	with <session>: updates that session tag
+	•	no args: updates the most recently opened session
+	•	`--set` normalizes the tag to slug-style text
+	•	`--clear` removes the tag and returns the session to the `untagged` overview section
 
 todui export md
 	•	defaults to most recent session head
@@ -288,7 +295,7 @@ Shows:
 	•	current revision
 	•	open/done counts
 
-Enter opens the selected session head.
+Enter or Right opens the selected session head.
 
 9.2.2 Session view
 
@@ -297,7 +304,7 @@ Shows live head or a historical revision of one session.
 Layout:
 	•	top bar
 	•	main list pane
-	•	right detail pane
+	•	Pomodoro pane when width allows
 	•	footer
 
 9.2.3 Revision history overlay
@@ -350,21 +357,18 @@ Row examples:
 [x] Review CLI commands            done 10:05
 [ ] Write markdown exporter   FOCUS created 10:12
 
-Right pane
-
-Two stacked cards:
-	1.	Todo details card
+Details overlay
 	•	title
 	•	status
 	•	notes
 	•	created / updated / completed timestamps
 	•	internal todo id
-	2.	Pomodoro card
+
+Pomodoro footer
 	•	phase label: FOCUS, SHORT BREAK, LONG BREAK
 	•	remaining time
 	•	progress bar
-	•	linked todo title or session-only
-	•	controls: Start / Pause / Resume / Cancel
+	•	controls live in help text: Start / Pause / Resume / Cancel
 
 Footer
 
@@ -382,26 +386,23 @@ Shows key hints:
 9.4 Narrow terminal behavior
 
 Width >= 100 columns
-	•	two-column layout
-	•	list left, details+Pomodoro right
+	•	list takes the main pane
+	•	Pomodoro stays visible below the list
 
-Width 70–99 columns
+Width 50–99 columns
 	•	list takes full width
-	•	right pane becomes bottom drawer
-	•	toggle drawer with Tab
+	•	Pomodoro stays visible below the list
 
-Width < 70 columns
+Width < 50 columns
 	•	single-pane list
-	•	Enter opens detail modal
+	•	i or Right opens detail modal
 	•	Pomodoro badge remains in top bar
-	•	Pomodoro controls open in modal
 
 9.5 Keyboard bindings
 
 Global
 	•	q quit screen / close overlay / quit app
 	•	Esc close modal or overlay
-	•	Tab switch focused pane
 	•	? help overlay
 	•	Ctrl-c hard exit
 
@@ -419,18 +420,18 @@ Session actions
 	•	d delete selected todo after confirmation
 	•	D delete current session after confirmation
 	•	Space / x toggle done
-	•	Enter open details
+	•	i or Right open details
 	•	H open revision history
-	•	o return to the session overview
+	•	Left closes details first, otherwise returns to the session overview
 	•	r when in revision mode, return to head
-	•	p open or trigger Pomodoro action on selected todo/session
+	•	p open or trigger Pomodoro action
 
 Pomodoro actions
 	•	p start focus if idle
 	•	p pause if running
 	•	p resume if paused
-	•	b start short break from Pomodoro card
-	•	B start long break from Pomodoro card
+	•	b start short break
+	•	B start long break
 	•	c cancel current run
 
 9.6 Mouse behavior
@@ -438,7 +439,6 @@ Pomodoro actions
 If mouse reporting is available:
 	•	left click checkbox → toggle todo completion
 	•	left click row → select todo
-	•	left click Pomodoro button → trigger action
 	•	mouse wheel → scroll focused pane
 	•	click history entry → select revision
 	•	double-click behavior: not used
@@ -452,7 +452,7 @@ When viewing a historical revision:
 	•	footer replaces mutating hints with r return to head
 	•	clicking a checkbox shows toast: Historical revisions are read-only
 	•	delete actions show toast: Historical revisions are read-only
-	•	Pomodoro card becomes a summary card, not a control card
+	•	no Pomodoro UI is shown
 
 Revision banner:
 
@@ -516,7 +516,7 @@ pomodoro runs
 
 Render rules
 	•	list rows show compact local-time timestamps
-	•	details pane shows full local datetime
+	•	details overlay shows full local datetime
 	•	CLI markdown export uses ISO-like human-readable text
 	•	database never stores localtime strings
 
@@ -611,7 +611,7 @@ CREATE INDEX idx_revision_todos_position
 
 CREATE TABLE pomodoro_runs (
   id                  INTEGER PRIMARY KEY,
-  session_id          INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  session_id          INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
   todo_id             INTEGER REFERENCES todos(id) ON DELETE SET NULL,
   kind                TEXT NOT NULL CHECK (kind IN ('focus', 'short_break', 'long_break')),
   state               TEXT NOT NULL CHECK (state IN ('running', 'paused', 'completed', 'cancelled')),
@@ -622,9 +622,6 @@ CREATE TABLE pomodoro_runs (
   ended_at            INTEGER,
   updated_at          INTEGER NOT NULL
 ) STRICT;
-
-CREATE INDEX idx_pomodoro_session_started
-  ON pomodoro_runs(session_id, started_at DESC);
 
 /* Enforce only one active or paused timer globally */
 CREATE UNIQUE INDEX idx_one_active_pomodoro
@@ -757,17 +754,20 @@ Deletion:
 
 17.1 Placement
 
-Pomodoro visualization lives only inside the session view.
+Pomodoro has no dedicated app-global screen.
 
-There is no app-global timer screen.
+The active footer appears:
+	•	at the bottom of the overview when a run is active or paused
+	•	at the bottom of a live session view when a run is active or paused
+	•	nowhere in historical revision mode
 
 17.2 Attach model
 
-A Pomodoro run always belongs to a session and may optionally belong to a selected todo.
+A Pomodoro run is session-agnostic and not attached to any specific todo.
 
 Behavior:
-	•	if a todo is selected when starting focus, attach to that todo
-	•	if no todo is selected, attach to session only
+	•	start runs globally from either overview or live session view
+	•	selected todo does not affect Pomodoro state
 
 17.3 State machine
 
@@ -821,13 +821,11 @@ Rule:
 	•	timer ticks must not write to the database every second
 	•	DB writes occur only on start / pause / resume / cancel / complete
 
-17.6 Pomodoro card UI
+17.6 Pomodoro footer UI
 
 Idle:
 
-Pomodoro
-No active run
-[Start Focus] [Short Break] [Long Break]
+No Pomodoro box is shown by default.
 
 Running:
 
@@ -835,21 +833,16 @@ Pomodoro
 FOCUS · 12:41 remaining
 ██████████░░░░░░░░░░ 51%
 Linked: Draft design spec
-[Pause] [Cancel]
 
 Paused:
 
 Pomodoro
-FOCUS · paused at 12:41
+FOCUS · paused · 12:41 remaining
 Linked: Draft design spec
-[Resume] [Cancel]
 
 Historical revision mode:
 
-Pomodoro
-Historical view
-Focus runs up to this revision: 3
-Total focus time: 75m
+No Pomodoro UI is shown.
 
 18. Markdown export spec
 
@@ -1013,7 +1006,7 @@ enum Action {
     OpenHistory,
     SelectRevision { revision: u32 },
 
-    StartPomodoro { kind: PomodoroKind, todo_id: Option<i64> },
+    StartPomodoro { kind: PomodoroKind },
     PausePomodoro,
     ResumePomodoro,
     CancelPomodoro,
@@ -1110,7 +1103,7 @@ get_revision_todos(session_id, revision_number) -> Vec<RevisionTodo>
 list_revisions(session_id) -> Vec<RevisionSummary>
 create_revision_snapshot(session_id, reason, now) -> RevisionSummary
 
-start_pomodoro(session_id, todo_id, kind, planned_seconds, now)
+start_pomodoro(kind, planned_seconds, now)
 pause_pomodoro(run_id, now)
 resume_pomodoro(run_id, now)
 cancel_pomodoro(run_id, now)
@@ -1190,6 +1183,7 @@ accent = "cyan"
 focus_minutes = 25
 short_break_minutes = 5
 long_break_minutes = 15
+notify_on_complete = true
 
 [keys]
 up = ["up", "k"]
@@ -1201,6 +1195,7 @@ pomodoro = ["p"]
 v1 only needs:
 	•	theme mode
 	•	Pomodoro durations
+	•	optional Pomodoro completion bell toggle
 	•	optional key overrides
 
 25. Testing plan
@@ -1259,9 +1254,9 @@ Milestone 2
 	•	open read-only revision
 
 Milestone 3
-	•	Pomodoro card
+	•	Pomodoro footer
 	•	start/pause/resume/cancel
-	•	session-linked and todo-linked runs
+	•	unlinked and todo-linked runs
 
 Milestone 4
 	•	config file
@@ -1276,7 +1271,7 @@ These should not be re-debated during implementation:
 	•	old revisions are viewable through --revision and history UI
 	•	revisions are immutable and read-only
 	•	markdown export defaults to GFM
-	•	Pomodoro lives inside the session view
+	•	Pomodoro uses a shared active footer in overview and live session views
 	•	keyboard-first, mouse-complete
 	•	modeless navigation with Vim aliases
 	•	SQLite + WAL + foreign keys on + STRICT tables

@@ -1,0 +1,16 @@
+[theme]
+mode = "dark"
+accent = "cyan"
+
+[pomodoro]
+focus_minutes = 25
+short_break_minutes = 5
+long_break_minutes = 15
+notify_on_complete = true
+
+[keys]
+up = ["up", "k"]
+down = ["down", "j"]
+toggle_done = ["space", "x"]
+history = ["H"]
+pomodoro = ["p"]

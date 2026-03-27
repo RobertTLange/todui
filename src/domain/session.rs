@@ -5,6 +5,8 @@ pub struct Session {
     pub id: i64,
     pub slug: String,
     pub name: String,
+    pub tag: Option<String>,
+    pub repo: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_opened_at: i64,
@@ -15,6 +17,8 @@ pub struct Session {
 pub struct SessionSummary {
     pub slug: String,
     pub name: String,
+    pub tag: Option<String>,
+    pub repo: Option<String>,
     pub last_opened_at: i64,
     pub current_revision: u32,
 }
@@ -29,6 +33,8 @@ pub struct SessionHeadToken {
 pub struct SessionOverview {
     pub slug: String,
     pub name: String,
+    pub tag: Option<String>,
+    pub repo: Option<String>,
     pub last_opened_at: i64,
     pub current_revision: u32,
     pub todo_count: i64,
@@ -59,23 +65,47 @@ pub fn slugify(name: &str) -> String {
 }
 
 pub fn validate_slug(slug: &str) -> Result<()> {
-    let is_valid = !slug.is_empty()
-        && slug.chars().all(|character| {
+    validate_slug_like(slug, true)
+}
+
+pub fn normalize_tag(tag: Option<&str>) -> Result<Option<String>> {
+    let Some(raw_tag) = tag.map(str::trim) else {
+        return Ok(None);
+    };
+    if raw_tag.is_empty() {
+        return Ok(None);
+    }
+
+    let normalized = slugify(raw_tag);
+    if validate_slug_like(&normalized, false).is_ok() {
+        Ok(Some(normalized))
+    } else {
+        Err(AppError::InvalidTag(raw_tag.to_string()))
+    }
+}
+
+fn validate_slug_like(value: &str, is_slug: bool) -> Result<()> {
+    let is_valid = !value.is_empty()
+        && value.chars().all(|character| {
             character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
         })
-        && !slug.starts_with('-')
-        && !slug.ends_with('-');
+        && !value.starts_with('-')
+        && !value.ends_with('-');
 
     if is_valid {
         Ok(())
     } else {
-        Err(AppError::InvalidSlug(slug.to_string()))
+        if is_slug {
+            Err(AppError::InvalidSlug(value.to_string()))
+        } else {
+            Err(AppError::InvalidTag(value.to_string()))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{slugify, validate_slug};
+    use super::{normalize_tag, slugify, validate_slug};
 
     #[test]
     fn slugifies_names() {
@@ -88,5 +118,15 @@ mod tests {
         assert!(validate_slug("writing-sprint").is_ok());
         assert!(validate_slug("Writing-Sprint").is_err());
         assert!(validate_slug("writing_sprint").is_err());
+    }
+
+    #[test]
+    fn normalizes_optional_tags() {
+        assert_eq!(
+            normalize_tag(Some("Private Projects")).unwrap(),
+            Some(String::from("private-projects"))
+        );
+        assert_eq!(normalize_tag(Some("   ")).unwrap(), None);
+        assert!(normalize_tag(Some("!!!")).is_err());
     }
 }

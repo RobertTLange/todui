@@ -9,14 +9,14 @@ Source spec: [spec.md](spec.md)
 - Ship a CLI for session create/list/history, to-do add/toggle, resume, and markdown export.
 - Persist all app state in one local SQLite database file.
 - Support immutable per-session revision history and read-only revision browsing.
-- Support optional Pomodoro runs inside the session view.
+- Support optional global Pomodoro runs with an active footer in overview and live session views.
 - Keep the app keyboard-first, with mouse support as an additive layer.
 
 ## Non-Goals
 
 - No cloud sync.
 - No multi-user collaboration.
-- No due dates, tags, recurring tasks, deletion, dependencies, or NL parsing.
+- No due dates, recurring tasks, deletion, dependencies, or NL parsing.
 - No writable historical revisions.
 - No separate app-global timer screen.
 - No event-sourced history model in v1.
@@ -65,17 +65,18 @@ Source spec: [spec.md](spec.md)
 - Rust crate building a `todui` binary.
 - SQLite schema + migrations for sessions, todos, revisions, Pomodoro runs, and app state.
 - CLI commands:
-  - `todui session new <name> [--slug <slug>]`
+  - `todui session new <name> [--slug <slug>] [--tag <tag>]`
   - `todui session list`
   - `todui session history [<session>]`
+  - `todui session tag [<session>] [--set <tag> | --clear]`
   - `todui add <title> [--session <session>] [--note <text>]`
   - `todui done <todo-id> [--session <session>]`
   - `todui undone <todo-id> [--session <session>]`
   - `todui resume [<session>] [--revision <n>]`
   - `todui export md [<session>] [--revision <n>] [--output <file>] [--format gfm|plain] [--timestamps full|compact|none] [--include-notes] [--open-only]`
-- TUI session view with top bar, todo list, detail pane, footer, overlays/modals, timestamps, semantic theme tokens, keyboard + mouse support.
+- TUI session view with top bar, todo list, details overlay, footer, overlays/modals, timestamps, semantic theme tokens, keyboard + mouse support.
 - Revision history overlay and read-only historical revision mode.
-- Pomodoro card inside session view with start/pause/resume/cancel and summary behavior in historical mode.
+- Shared active Pomodoro footer in overview and live session views with start/pause/resume/cancel from the session view.
 - Markdown export for head and historical revisions.
 - Tests for domain logic, repositories, CLI flows, and core TUI behavior.
 - Project docs:
@@ -96,7 +97,7 @@ Source spec: [spec.md](spec.md)
 ### Demo Flow
 
 1. Create session:
-   `todui session new "Writing Sprint"`
+   `todui session new "Writing Sprint" --tag work`
 2. Add todos:
    `todui add "Draft design spec" --session writing-sprint`
 3. Open TUI at head:

@@ -101,34 +101,42 @@ todui export md writing-sprint --revision 1 --timestamps full --include-notes
 
 ## Config
 
-Minimal example:
+An example config lives in [`config.example.toml`](config.example.toml).
 
-```toml
-[theme]
-mode = "dark"
-accent = "cyan"
+Create the config directory and copy it into place:
 
-[pomodoro]
-focus_minutes = 25
-short_break_minutes = 5
-long_break_minutes = 15
-
-[keys]
-up = ["up", "k"]
-down = ["down", "j"]
-toggle_done = ["space", "x"]
-history = ["H"]
-pomodoro = ["p"]
+```bash
+mkdir -p ~/.config/todui
+cp config.example.toml ~/.config/todui/config.toml
 ```
 
 ## TUI Keys
 
-- `j` / `k`, arrows: move
+Movement:
+
+- `j` / `k`, arrows: move selection up and down
+- `PageUp` / `PageDown`: jump by a page
+- `g` / `Home`: jump to the first row
+- `G` / `End`: jump to the last row
+- `Enter`, `Right`, `l`: open the selected session from overview
+- `Left`, `o`: return from a session to overview
+- `i`, `Right`: open todo details inside a session
+
+Session actions:
+
 - `space` / `x`: toggle done
-- `H`: history
+- `n`: create a session or todo, depending on the current screen
+- `e`: edit the selected todo
+- `t`: edit the selected session tag/repo from overview
+- `d`: delete selected todo
+- `D`: delete selected session
+- `H`: open revision history
 - `r`: return from revision to head
 - `p`: focus start / pause / resume
 - `b`: short break
 - `B`: long break
 - `c`: cancel timer
+- `h`: help overlay
 - `q` / `Esc`: quit or close overlay
+
+Pomodoro completion emits a terminal bell by default while the TUI is open.

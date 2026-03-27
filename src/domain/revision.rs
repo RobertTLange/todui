@@ -19,6 +19,7 @@ pub struct RevisionTodo {
     pub todo_id: i64,
     pub title: String,
     pub notes: String,
+    pub repo: Option<String>,
     pub status: crate::domain::todo::TodoStatus,
     pub position: i64,
     pub created_at: i64,

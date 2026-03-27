@@ -34,7 +34,7 @@ Primary references:
   - session primary object
   - read-only historical revisions
   - full-snapshot revisioning
-  - Pomodoro inside session view
+  - global Pomodoro with active footer in overview and live session views
   - keyboard-first, mouse-complete, modeless navigation
 
 ### Update Documentation Continuously

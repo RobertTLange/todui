@@ -34,7 +34,7 @@ fn session_todo_history_and_export_flow() {
     let env = TestEnv::new();
 
     env.command()
-        .args(["session", "new", "Writing Sprint"])
+        .args(["session", "new", "Writing Sprint", "--tag", "work"])
         .assert()
         .success()
         .stdout(predicate::str::contains("writing-sprint\n"));
@@ -80,10 +80,49 @@ fn session_todo_history_and_export_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("# Session: writing-sprint"))
+        .stdout(predicate::str::contains("- tag: work"))
         .stdout(predicate::str::contains("- [x] Draft design spec"))
         .stdout(predicate::str::contains(
             "notes: cover CLI, TUI, DB, pomodoro",
         ));
+}
+
+#[test]
+fn cli_session_tag_updates_and_lists_tag_column() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args([
+            "session",
+            "tag",
+            "writing-sprint",
+            "--set",
+            "Private Projects",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "writing-sprint\tprivate-projects\n",
+        ));
+
+    env.command()
+        .args(["session", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "writing-sprint\tWriting Sprint\tprivate-projects\t",
+        ));
+
+    env.command()
+        .args(["session", "tag", "writing-sprint", "--clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("writing-sprint\t-\n"));
 }
 
 #[test]
@@ -193,7 +232,7 @@ fn cli_edit_requires_at_least_one_change_flag() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "edit requires --title, --note, or --clear-note",
+            "edit requires --title, --note, --clear-note, --repo, or --clear-repo",
         ));
 }
 
@@ -296,4 +335,86 @@ fn cli_session_delete_removes_recent_session_and_clears_recent_pointer() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no recent session"));
+}
+
+#[test]
+fn cli_repo_search_and_repo_edit_flow() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args([
+            "session",
+            "new",
+            "Writing Sprint",
+            "--repo",
+            "https://github.com/SakanaAI/todui-keymove",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("writing-sprint\n"));
+
+    env.command()
+        .args(["add", "Draft spec", "--session", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1\n"));
+
+    env.command()
+        .args([
+            "add",
+            "Review CLI",
+            "--session",
+            "writing-sprint",
+            "--repo",
+            "@OpenAI/codex",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2\n"));
+
+    env.command()
+        .args(["repo", "sakanaai/todui-keymove"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "1\twriting-sprint\tDraft spec\topen\tsakanaai/todui-keymove\tsession",
+        ))
+        .stdout(predicate::str::contains("Review CLI").not());
+
+    env.command()
+        .args(["repo", "https://github.com/openai/codex"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "2\twriting-sprint\tReview CLI\topen\topenai/codex\ttodo",
+        ));
+
+    env.command()
+        .args(["edit", "2", "--session", "writing-sprint", "--clear-repo"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2\tedited\n"));
+
+    env.command()
+        .args(["repo", "@sakanaai/todui-keymove"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "1\twriting-sprint\tDraft spec\topen\tsakanaai/todui-keymove\tsession",
+        ))
+        .stdout(predicate::str::contains(
+            "2\twriting-sprint\tReview CLI\topen\tsakanaai/todui-keymove\tsession",
+        ));
+
+    env.command()
+        .args(["session", "repo", "writing-sprint", "--clear"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("writing-sprint\t-\n"));
+
+    env.command()
+        .args(["repo", "sakanaai/todui-keymove"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
 }
