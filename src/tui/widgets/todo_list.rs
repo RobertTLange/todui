@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
-use crate::domain::pomodoro::{PomodoroKind, PomodoroRun};
+use crate::domain::pomodoro::PomodoroRun;
 use crate::domain::revision::RevisionTodo;
 use crate::domain::todo::TodoStatus;
 use crate::timestamp::format_month_day_local;
@@ -207,16 +207,10 @@ pub fn todo_click_target(
     })
 }
 
-pub fn todo_status_label(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> &'static str {
-    if run.is_some_and(|active| {
-        active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
-    }) {
-        "FOCUS"
-    } else {
-        match todo.status {
-            TodoStatus::Open => "open",
-            TodoStatus::Done => "done",
-        }
+pub fn todo_status_label(todo: &RevisionTodo, _run: Option<&PomodoroRun>) -> &'static str {
+    match todo.status {
+        TodoStatus::Open => "open",
+        TodoStatus::Done => "done",
     }
 }
 
@@ -298,13 +292,7 @@ fn todo_title_style(theme: &Theme, todo: &RevisionTodo) -> Style {
     }
 }
 
-fn todo_status_style(theme: &Theme, todo: &RevisionTodo, run: Option<&PomodoroRun>) -> Style {
-    if run.is_some_and(|active| {
-        active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
-    }) {
-        return theme.text_style(TextTone::Focus);
-    }
-
+fn todo_status_style(theme: &Theme, todo: &RevisionTodo, _run: Option<&PomodoroRun>) -> Style {
     match todo.status {
         TodoStatus::Open => theme.text_style(TextTone::Open),
         TodoStatus::Done => theme.text_style(TextTone::Completed),
@@ -397,7 +385,7 @@ mod tests {
         let focus_run = PomodoroRun {
             id: 1,
             session_id: None,
-            todo_id: Some(21),
+            todo_id: None,
             kind: PomodoroKind::Focus,
             state: PomodoroState::Running,
             planned_seconds: 100,
@@ -408,7 +396,7 @@ mod tests {
             updated_at: 0,
         };
 
-        assert_eq!(todo_status_label(&open, Some(&focus_run)), "FOCUS");
+        assert_eq!(todo_status_label(&open, Some(&focus_run)), "open");
         assert_eq!(
             todo_time_label(&open),
             crate::timestamp::format_month_day_local(120)
@@ -428,7 +416,7 @@ mod tests {
         let focus_run = PomodoroRun {
             id: 1,
             session_id: None,
-            todo_id: Some(31),
+            todo_id: None,
             kind: PomodoroKind::Focus,
             state: PomodoroState::Running,
             planned_seconds: 100,

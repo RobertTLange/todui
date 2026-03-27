@@ -454,7 +454,6 @@ mod tests {
             .expect("todo");
         let run = database
             .start_pomodoro(
-                Some(todo.id),
                 crate::domain::pomodoro::PomodoroKind::Focus,
                 1_500,
                 1_711_275_760,

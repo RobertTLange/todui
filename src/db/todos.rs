@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_todo_clears_pomodoro_link() {
+    fn deleting_todo_does_not_affect_global_pomodoro() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
             .create_session("Writing Sprint", None, None, 1_711_275_600)
@@ -408,7 +408,6 @@ mod tests {
             .expect("todo");
         let run = database
             .start_pomodoro(
-                Some(todo.id),
                 crate::domain::pomodoro::PomodoroKind::Focus,
                 1_500,
                 1_711_275_800,
@@ -421,5 +420,9 @@ mod tests {
 
         let run = database.get_pomodoro_run(run.id).expect("run");
         assert_eq!(run.todo_id, None);
+        assert!(matches!(
+            run.state,
+            crate::domain::pomodoro::PomodoroState::Running
+        ));
     }
 }
