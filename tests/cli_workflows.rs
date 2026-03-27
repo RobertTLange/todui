@@ -123,3 +123,87 @@ fn export_to_file_and_no_recent_session_error() {
     let exported = fs::read_to_string(output_path).expect("read export");
     assert!(exported.contains("Draft design spec"));
 }
+
+#[test]
+fn cli_edit_updates_title_and_notes() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args([
+            "add",
+            "Draft design spec",
+            "--session",
+            "writing-sprint",
+            "--note",
+            "cover CLI and TUI",
+        ])
+        .assert()
+        .success();
+
+    env.command()
+        .args([
+            "edit",
+            "1",
+            "--session",
+            "writing-sprint",
+            "--title",
+            "Draft final design spec",
+            "--clear-note",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1\tedited\n"));
+
+    env.command()
+        .args([
+            "export",
+            "md",
+            "writing-sprint",
+            "--include-notes",
+            "--timestamps",
+            "none",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Draft final design spec"))
+        .stdout(predicate::str::contains("cover CLI and TUI").not());
+}
+
+#[test]
+fn cli_edit_requires_at_least_one_change_flag() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["add", "Draft design spec", "--session", "writing-sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["edit", "1", "--session", "writing-sprint"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "edit requires --title, --note, or --clear-note",
+        ));
+}
+
+#[test]
+fn cli_edit_rejects_conflicting_note_flags() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["edit", "1", "--note", "cover CLI and TUI", "--clear-note"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}

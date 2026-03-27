@@ -36,6 +36,8 @@ pub enum AppError {
     RevisionNotFound { session: String, revision: u32 },
     #[error("no recent session")]
     NoRecentSession,
+    #[error("invalid command usage: {0}")]
+    InvalidCommandUsage(&'static str),
     #[error("todo not found: {0}")]
     TodoNotFound(i64),
     #[error("todo {todo_id} does not belong to session {session}")]

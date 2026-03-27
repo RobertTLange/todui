@@ -110,6 +110,60 @@ impl Database {
         self.get_todo(todo_id)
     }
 
+    pub fn update_todo(
+        &mut self,
+        todo_id: i64,
+        session_slug: Option<&str>,
+        title: &str,
+        notes: &str,
+        now: i64,
+    ) -> Result<Todo> {
+        let transaction = self.connection.transaction()?;
+        let (session_id, current_title, current_notes): (i64, String, String) = transaction
+            .query_row(
+                "SELECT session_id, title, notes FROM todos WHERE id = ?1",
+                [todo_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(AppError::TodoNotFound(todo_id))?;
+
+        if let Some(expected_session_slug) = session_slug {
+            let actual_slug: String = transaction.query_row(
+                "SELECT slug FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )?;
+            if actual_slug != expected_session_slug {
+                return Err(AppError::TodoSessionMismatch {
+                    todo_id,
+                    session: expected_session_slug.to_string(),
+                });
+            }
+        }
+
+        if current_title != title || current_notes != notes {
+            transaction.execute(
+                "UPDATE todos
+                 SET title = ?1, notes = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![title, notes, now, todo_id],
+            )?;
+            transaction.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, session_id],
+            )?;
+            let revision = create_revision_snapshot(&transaction, session_id, "todo edited", now)?;
+            transaction.execute(
+                "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
+                params![revision.revision_number, session_id],
+            )?;
+        }
+
+        transaction.commit()?;
+        self.get_todo(todo_id)
+    }
+
     pub fn get_live_todos(&self, session_id: i64) -> Result<Vec<Todo>> {
         let mut statement = self.connection.prepare(
             "SELECT id, session_id, title, notes, status, position, created_at, updated_at, completed_at
@@ -218,5 +272,37 @@ mod tests {
             .expect("open");
         assert_eq!(reopened.status, TodoStatus::Open);
         assert_eq!(reopened.completed_at, None);
+    }
+
+    #[test]
+    fn edits_todo_title_and_notes_and_tracks_revision() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("session");
+        let todo = database
+            .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
+            .expect("todo");
+
+        let edited = database
+            .update_todo(
+                todo.id,
+                Some(&session.slug),
+                "Draft final spec",
+                "",
+                1_711_275_800,
+            )
+            .expect("edited");
+
+        assert_eq!(edited.title, "Draft final spec");
+        assert_eq!(edited.notes, "");
+        assert_eq!(edited.updated_at, 1_711_275_800);
+        assert_eq!(
+            database
+                .get_session_by_slug(&session.slug)
+                .expect("session")
+                .current_revision,
+            3
+        );
     }
 }
