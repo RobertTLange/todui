@@ -112,6 +112,7 @@ accent = "cyan"
 focus_minutes = 25
 short_break_minutes = 5
 long_break_minutes = 15
+notify_on_complete = true
 
 [keys]
 up = ["up", "k"]
@@ -132,3 +133,5 @@ pomodoro = ["p"]
 - `B`: long break
 - `c`: cancel timer
 - `q` / `Esc`: quit or close overlay
+
+Pomodoro completion emits a terminal bell by default while the TUI is open.
