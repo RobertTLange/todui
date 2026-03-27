@@ -7,13 +7,11 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::domain::pomodoro::{
-    PomodoroKind, PomodoroRun, PomodoroState, PomodoroSummary, progress_ratio, remaining_seconds,
-};
+use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
@@ -23,6 +21,7 @@ use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
     GroupedTodos, TodoClickTarget, TodoSection, section_state, section_visible_rows,
     split_todo_list_area, todo_click_target, todo_section_table,
@@ -149,8 +148,8 @@ struct SessionScreen {
     revision: Option<u32>,
     snapshot: Option<SessionSnapshot>,
     revisions: Vec<RevisionSummary>,
-    pomodoro_summary: PomodoroSummary,
     active_run: Option<PomodoroRun>,
+    active_run_title: Option<String>,
     head_token: Option<SessionHeadToken>,
     selected_index: usize,
     open_scroll_offset: usize,
@@ -172,11 +171,8 @@ impl SessionScreen {
             revision,
             snapshot: None,
             revisions: Vec::new(),
-            pomodoro_summary: PomodoroSummary {
-                completed_focus_runs: 0,
-                total_focus_seconds: 0,
-            },
             active_run: None,
+            active_run_title: None,
             head_token: None,
             selected_index: 0,
             open_scroll_offset: 0,
@@ -196,11 +192,16 @@ impl SessionScreen {
         let selected_todo_id = self.current_todo().map(|todo| todo.todo_id);
         let snapshot = database.load_snapshot(&self.session_slug, self.revision)?;
         self.revisions = database.list_revisions(&self.session_slug)?;
-        self.pomodoro_summary = database.pomodoro_summary_for_session(
-            snapshot.session.id,
-            self.revision.map(|_| snapshot.revision.created_at),
-        )?;
-        self.active_run = database.get_active_pomodoro()?;
+        if self.is_read_only_snapshot(&snapshot) {
+            self.active_run = None;
+            self.active_run_title = None;
+        } else if let Some((run, title)) = database.get_active_pomodoro_with_link()? {
+            self.active_run = Some(run);
+            self.active_run_title = title;
+        } else {
+            self.active_run = None;
+            self.active_run_title = None;
+        }
         self.head_token = Some(database.session_head_token(&self.session_slug)?);
         self.snapshot = Some(snapshot);
         self.reselect(selected_todo_id);
@@ -596,13 +597,6 @@ impl SessionScreen {
             return Ok(());
         }
         if let Some(run) = self.active_run.clone() {
-            if run.session_id != self.snapshot().session.id {
-                self.set_toast(
-                    String::from("Another session already has an active timer"),
-                    ToastTone::Warning,
-                );
-                return Ok(());
-            }
             match run.state {
                 PomodoroState::Running if matches!(kind, PomodoroKind::Focus) => {
                     database.pause_pomodoro(run.id, now_utc_timestamp())?;
@@ -615,7 +609,6 @@ impl SessionScreen {
         } else {
             let todo_id = self.current_todo().map(|todo| todo.todo_id);
             database.start_pomodoro(
-                &self.session_slug,
                 todo_id,
                 kind,
                 pomodoro_seconds(&self.config, kind),
@@ -633,7 +626,7 @@ impl SessionScreen {
             );
             return Ok(());
         }
-        if let Some(run) = self.current_session_run().cloned() {
+        if let Some(run) = self.active_run.clone() {
             database.cancel_pomodoro(run.id, now_utc_timestamp())?;
             self.reload(database)?;
         }
@@ -654,7 +647,7 @@ impl SessionScreen {
                 grouped.open(),
                 self.open_scroll_offset,
                 section_visible_rows(list_areas.open),
-                self.current_session_run(),
+                self.active_run.as_ref(),
                 &self.theme,
             ),
             list_areas.open,
@@ -667,14 +660,24 @@ impl SessionScreen {
                 grouped.completed(),
                 self.completed_scroll_offset,
                 section_visible_rows(list_areas.completed),
-                self.current_session_run(),
+                self.active_run.as_ref(),
                 &self.theme,
             ),
             list_areas.completed,
             &mut self.completed_list_state(),
         );
-        if let Some(pomodoro_area) = layout.pomodoro {
-            frame.render_widget(self.pomodoro_panel(snapshot), pomodoro_area);
+        if let Some(footer_area) = layout.footer
+            && let Some(run) = self.active_run.as_ref()
+        {
+            frame.render_widget(
+                active_footer(
+                    &self.theme,
+                    run,
+                    self.active_run_title.as_deref(),
+                    now_utc_timestamp(),
+                ),
+                footer_area,
+            );
         }
 
         if matches!(self.overlay, Some(Overlay::Details)) {
@@ -683,7 +686,7 @@ impl SessionScreen {
             frame.render_widget(self.details_panel(snapshot), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
-            let area = centered_rect(frame.area(), 60, 14);
+            let area = centered_rect(frame.area(), 60, 16);
             frame.render_widget(Clear, area);
             frame.render_widget(self.help_overlay(), area);
         }
@@ -760,20 +763,6 @@ impl SessionScreen {
                 ),
                 self.theme.text_style(TextTone::Danger),
             ));
-        } else if let Some(run) = self.current_session_run() {
-            let tone = if matches!(run.kind, PomodoroKind::Focus) {
-                TextTone::Focus
-            } else {
-                TextTone::Break
-            };
-            lines.push(Line::styled(
-                format!(
-                    "{} · {} remaining",
-                    run.kind.label(),
-                    format_duration(remaining_seconds(run, now_utc_timestamp()))
-                ),
-                self.theme.text_style(tone),
-            ));
         }
 
         Paragraph::new(lines)
@@ -789,19 +778,11 @@ impl SessionScreen {
     }
 
     fn top_bar_height(&self) -> u16 {
-        if self.is_read_only() || self.current_session_run().is_some() {
-            4
-        } else {
-            3
-        }
+        if self.is_read_only() { 4 } else { 3 }
     }
 
     fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
-        split_screen(
-            area,
-            self.top_bar_height(),
-            self.pomodoro_panel_height(self.snapshot()),
-        )
+        split_screen(area, self.top_bar_height(), self.active_footer_height())
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
@@ -843,96 +824,9 @@ impl SessionScreen {
             .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn pomodoro_panel_height(&self, snapshot: &SessionSnapshot) -> u16 {
-        self.pomodoro_lines(snapshot).len() as u16 + 2
-    }
-
-    fn pomodoro_lines(&self, snapshot: &SessionSnapshot) -> Vec<Line<'static>> {
-        let run = self.current_session_run();
-        let mut lines = Vec::new();
-        if self.is_read_only() {
-            lines.push(Line::styled(
-                format!(
-                    "Focus runs up to this revision: {}",
-                    self.pomodoro_summary.completed_focus_runs
-                ),
-                self.theme.text_style(TextTone::Muted),
-            ));
-            lines.push(Line::styled(
-                format!(
-                    "Total focus time: {}",
-                    format_duration(self.pomodoro_summary.total_focus_seconds)
-                ),
-                self.theme.text_style(TextTone::Meta),
-            ));
-        } else if let Some(run) = run {
-            let tone = if matches!(run.kind, PomodoroKind::Focus) {
-                TextTone::Focus
-            } else {
-                TextTone::Break
-            };
-            lines.push(Line::styled(
-                format!(
-                    "{} · {} remaining",
-                    run.kind.label(),
-                    format_duration(remaining_seconds(run, now_utc_timestamp()))
-                ),
-                self.theme.text_style(tone),
-            ));
-            lines.push(Line::styled(
-                progress_bar(run, now_utc_timestamp()),
-                self.theme.text_style(tone),
-            ));
-            lines.push(Line::styled(
-                format!("Linked: {}", linked_title(run, snapshot)),
-                self.theme.text_style(TextTone::Meta),
-            ));
-            lines.push(Line::styled(
-                "[p pause/resume] [c cancel]",
-                self.theme.text_style(TextTone::Muted),
-            ));
-        } else if self.active_run.is_some() {
-            lines.push(Line::styled(
-                "Another session has an active timer",
-                self.theme.text_style(TextTone::Warning),
-            ));
-        } else {
-            lines.push(Line::styled(
-                "No active run",
-                self.theme.text_style(TextTone::Muted),
-            ));
-            lines.push(Line::styled(
-                "[p focus] [b short break] [B long break]",
-                self.theme.text_style(TextTone::Meta),
-            ));
-        }
-        lines
-    }
-
-    fn pomodoro_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
-        let _ = Gauge::default();
-        let tone = match self.current_session_run().map(|run| run.kind) {
-            Some(PomodoroKind::Focus) => SurfaceTone::Focus,
-            Some(PomodoroKind::ShortBreak | PomodoroKind::LongBreak) => SurfaceTone::Break,
-            None if self.active_run.is_some() => SurfaceTone::Notice,
-            None => SurfaceTone::Focus,
-        };
-
-        Paragraph::new(self.pomodoro_lines(snapshot))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Pomodoro")
-                    .style(self.theme.surface_style(SurfaceTone::Neutral))
-                    .border_style(self.theme.surface_border_style(tone))
-                    .title_style(self.theme.surface_title_style(tone)),
-            )
-            .style(self.theme.surface_style(SurfaceTone::Neutral))
-    }
-
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -980,7 +874,7 @@ impl SessionScreen {
 
     fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
-            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
         .block(
@@ -1026,12 +920,6 @@ impl SessionScreen {
         GroupedTodos::new(&snapshot.todos).todo_at_flat_index(self.selected_index)
     }
 
-    fn current_session_run(&self) -> Option<&PomodoroRun> {
-        self.active_run
-            .as_ref()
-            .filter(|run| run.session_id == self.snapshot().session.id)
-    }
-
     fn grouped_todos(&self) -> GroupedTodos<'_> {
         GroupedTodos::new(&self.snapshot().todos)
     }
@@ -1042,6 +930,14 @@ impl SessionScreen {
 
     fn is_read_only(&self) -> bool {
         matches!(self.snapshot().mode, RevisionMode::Historical(_))
+    }
+
+    fn is_read_only_snapshot(&self, snapshot: &SessionSnapshot) -> bool {
+        matches!(snapshot.mode, RevisionMode::Historical(_))
+    }
+
+    fn active_footer_height(&self) -> Option<u16> {
+        self.active_run.as_ref().map(|_| active_footer_height())
     }
 
     fn reselect(&mut self, todo_id: Option<i64>) {
@@ -1333,22 +1229,6 @@ fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
     }
 }
 
-fn format_duration(seconds: i64) -> String {
-    format!("{:02}:{:02}", seconds / 60, seconds % 60)
-}
-
-fn linked_title(run: &PomodoroRun, snapshot: &SessionSnapshot) -> String {
-    run.todo_id
-        .and_then(|todo_id| {
-            snapshot
-                .todos
-                .iter()
-                .find(|todo| todo.todo_id == todo_id)
-                .map(|todo| todo.title.clone())
-        })
-        .unwrap_or_else(|| String::from("session-only"))
-}
-
 fn clamp_scroll_offset(offset: usize, total_rows: usize, visible_rows: usize) -> usize {
     total_rows.saturating_sub(visible_rows).min(offset)
 }
@@ -1365,18 +1245,6 @@ fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
     })
 }
 
-fn progress_bar(run: &PomodoroRun, now: i64) -> String {
-    let ratio = progress_ratio(run, now);
-    let filled = (ratio * 20.0).round() as usize;
-    let empty = 20_usize.saturating_sub(filled);
-    format!(
-        "{}{} {:>3}%",
-        "█".repeat(filled),
-        "░".repeat(empty),
-        (ratio * 100.0) as u32
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1391,15 +1259,12 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{
-        Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding, progress_bar,
-    };
+    use super::{Overlay, SessionExit, SessionScreen, key_matches_binding};
     use crate::config::Config;
     use crate::db::Database;
     use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
     use crate::domain::revision::RevisionMode;
     use crate::domain::todo::TodoStatus;
-    use crate::tui::layout::split_screen;
     use crate::tui::widgets::todo_list::{
         TodoClickTarget, TodoSection, split_todo_list_area, todo_click_target, todo_status_label,
         todo_time_label,
@@ -1426,11 +1291,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_duration_mm_ss() {
-        assert_eq!(format_duration(65), "01:05");
-    }
-
-    #[test]
     fn key_binding_matches_defaults_and_custom_values() {
         let key = key(KeyCode::Char('x'));
         assert!(key_matches_binding(
@@ -1438,24 +1298,6 @@ mod tests {
             &[String::from("space"), String::from("x")]
         ));
         assert!(!key_matches_binding(&key, &[String::from("p")]));
-    }
-
-    #[test]
-    fn progress_bar_renders_percentage() {
-        let run = crate::domain::pomodoro::PomodoroRun {
-            id: 1,
-            session_id: 1,
-            todo_id: None,
-            kind: PomodoroKind::Focus,
-            state: PomodoroState::Running,
-            planned_seconds: 100,
-            started_at: 0,
-            paused_at: None,
-            accumulated_pause: 0,
-            ended_at: None,
-            updated_at: 0,
-        };
-        assert!(progress_bar(&run, 50).contains("50%"));
     }
 
     #[test]
@@ -1826,13 +1668,13 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Char('p')))
             .unwrap();
-        assert!(screen.current_session_run().is_some());
+        assert!(screen.active_run.is_some());
 
         screen
             .handle_key(&mut database, key(KeyCode::Char('p')))
             .unwrap();
         assert!(matches!(
-            screen.current_session_run().unwrap().state,
+            screen.active_run.as_ref().unwrap().state,
             PomodoroState::Paused
         ));
 
@@ -1840,14 +1682,14 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('p')))
             .unwrap();
         assert!(matches!(
-            screen.current_session_run().unwrap().state,
+            screen.active_run.as_ref().unwrap().state,
             PomodoroState::Running
         ));
 
         screen
             .handle_key(&mut database, key(KeyCode::Char('c')))
             .unwrap();
-        assert!(screen.current_session_run().is_none());
+        assert!(screen.active_run.is_none());
 
         screen.overlay = Some(Overlay::History);
         screen
@@ -1932,7 +1774,7 @@ mod tests {
     fn screen_tick_completes_timer_and_toast_expires() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
-            .start_pomodoro(&screen.session_slug, None, PomodoroKind::Focus, 1, 0)
+            .start_pomodoro(None, PomodoroKind::Focus, 1, 0)
             .expect("run");
         database.complete_pomodoro(run.id, 1).expect("complete");
         screen.reload(&database).unwrap();
@@ -1958,7 +1800,7 @@ mod tests {
         screen.config.pomodoro.notify_on_complete = false;
 
         let run = database
-            .start_pomodoro(&screen.session_slug, None, PomodoroKind::ShortBreak, 1, 0)
+            .start_pomodoro(None, PomodoroKind::ShortBreak, 1, 0)
             .expect("run");
         database.complete_pomodoro(run.id, 1).expect("complete");
         screen.reload(&database).unwrap();
@@ -2046,7 +1888,6 @@ mod tests {
 
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
-        assert!(wide.contains("Pomodoro"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
         assert!(!wide.contains("Details"));
@@ -2058,7 +1899,6 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
-        assert!(medium.contains("Pomodoro"));
         assert!(!medium.contains("Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2076,6 +1916,7 @@ mod tests {
         assert!(help.contains("Overview: Left or o"));
         assert!(help.contains("Details: i or Right"));
         assert!(help.contains("Help: h"));
+        assert!(help.contains("Cancel timer: c"));
 
         screen.overlay = Some(Overlay::TodoEditor);
         let editor = render_buffer(&screen, 120, 24);
@@ -2097,7 +1938,7 @@ mod tests {
 
         let stacked = render_buffer(&screen, 60, 24);
         assert!(!stacked.contains("Details"));
-        assert!(stacked.contains("Pomodoro"));
+        assert!(!stacked.contains("Pomodoro"));
     }
 
     #[test]
@@ -2111,6 +1952,19 @@ mod tests {
         screen.overlay = Some(Overlay::Details);
         let details = render_buffer(&screen, 49, 24);
         assert!(details.contains("Details"));
+    }
+
+    #[test]
+    fn active_footer_renders_in_narrow_session_layout() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let tiny = render_buffer(&screen, 49, 24);
+        assert!(tiny.contains("Pomodoro"));
+        assert!(tiny.contains("FOCUS"));
     }
 
     #[test]
@@ -2134,41 +1988,73 @@ mod tests {
     }
 
     #[test]
-    fn idle_pomodoro_panel_has_no_blank_row_before_bottom_border() {
+    fn idle_screen_hides_pomodoro_footer() {
         let (_directory, _database, screen) = seeded_screen();
-        let wide_buffer = render_test_buffer(&screen, 120, 24);
-        let wide_layout = split_screen(
-            Rect::new(0, 0, 120, 24),
-            screen.top_bar_height(),
-            screen.pomodoro_panel_height(screen.snapshot()),
-        );
-        let wide_pomodoro = wide_layout.pomodoro.expect("wide pomodoro");
-        assert_eq!(wide_pomodoro.height, 4);
-        assert_eq!(
-            wide_buffer[(
-                wide_pomodoro.x + 1,
-                wide_pomodoro.y + wide_pomodoro.height - 1
-            )]
-                .symbol(),
-            "─"
-        );
+        let wide = render_buffer(&screen, 120, 24);
+        let medium = render_buffer(&screen, 80, 24);
+        assert!(!wide.contains("Pomodoro"));
+        assert!(!medium.contains("Pomodoro"));
+    }
 
-        let medium_buffer = render_test_buffer(&screen, 80, 24);
-        let medium_layout = split_screen(
-            Rect::new(0, 0, 80, 24),
-            screen.top_bar_height(),
-            screen.pomodoro_panel_height(screen.snapshot()),
-        );
-        let medium_pomodoro = medium_layout.pomodoro.expect("medium pomodoro");
-        assert_eq!(medium_pomodoro.height, 4);
+    #[test]
+    fn active_focus_footer_renders_without_session_link() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let run = database
+            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("Pomodoro"));
+        assert!(rendered.contains("FOCUS"));
+        assert!(rendered.contains("No linked todo"));
         assert_eq!(
-            medium_buffer[(
-                medium_pomodoro.x + 1,
-                medium_pomodoro.y + medium_pomodoro.height - 1
-            )]
-                .symbol(),
-            "─"
+            screen.active_run.as_ref().map(|active| active.id),
+            Some(run.id)
         );
+    }
+
+    #[test]
+    fn active_break_footer_renders_in_session_view() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .start_pomodoro(None, PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("Pomodoro"));
+        assert!(rendered.contains("SHORT BREAK"));
+    }
+
+    #[test]
+    fn historical_revision_hides_pomodoro_ui() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(!rendered.contains("Pomodoro"));
+        assert!(!rendered.contains("Focus runs up to this revision"));
+    }
+
+    #[test]
+    fn help_overlay_lists_pause_and_cancel_controls() {
+        let (_directory, _database, mut screen) = seeded_screen();
+
+        screen.overlay = Some(Overlay::Help);
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("Pomodoro: p start/pause/resume focus"));
+        assert!(rendered.contains("Cancel timer: c"));
     }
 
     #[test]
