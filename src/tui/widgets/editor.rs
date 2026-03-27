@@ -2,7 +2,7 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SurfaceTone, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorField {
@@ -50,7 +50,14 @@ pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(view.title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(view.title)
+                .style(theme.surface_style(SurfaceTone::Overlay))
+                .border_style(theme.surface_border_style(SurfaceTone::Overlay))
+                .title_style(theme.surface_title_style(SurfaceTone::Overlay)),
+        )
         .style(Style::default().fg(theme.fg_default).bg(theme.bg_overlay))
 }
 

@@ -1,14 +1,14 @@
 use std::cmp::Ordering;
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun};
 use crate::domain::revision::RevisionTodo;
 use crate::domain::todo::TodoStatus;
 use crate::timestamp::format_month_day_local;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TodoSection {
@@ -137,6 +137,7 @@ pub fn section_visible_rows(area: Rect) -> usize {
 
 pub fn todo_section_table(
     title: &'static str,
+    section: TodoSection,
     todos: &[&RevisionTodo],
     scroll_offset: usize,
     visible_rows: usize,
@@ -147,8 +148,10 @@ pub fn todo_section_table(
         .iter()
         .skip(scroll_offset)
         .take(visible_rows)
-        .map(|todo| todo_table_row(todo, run))
+        .map(|todo| todo_table_row(todo, run, theme))
         .collect::<Vec<_>>();
+
+    let tone = section_surface_tone(section);
 
     Table::new(
         rows,
@@ -166,11 +169,18 @@ pub fn todo_section_table(
             Cell::from("Status"),
             Cell::from("Last Update"),
         ])
-        .style(theme.block_style().add_modifier(Modifier::BOLD)),
+        .style(theme.surface_title_style(tone)),
     )
-    .block(Block::default().borders(Borders::ALL).title(title))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(theme.surface_style(SurfaceTone::Neutral))
+            .border_style(theme.surface_border_style(tone))
+            .title_style(theme.surface_title_style(tone)),
+    )
     .column_spacing(1)
-    .row_highlight_style(theme.selected_style().add_modifier(Modifier::BOLD))
+    .row_highlight_style(section_highlight_style(theme, section).add_modifier(Modifier::BOLD))
 }
 
 pub fn section_state(selected_row: Option<usize>) -> TableState {
@@ -251,13 +261,61 @@ fn section_click_target(
     }
 }
 
-fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> Row<'static> {
+fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>, theme: &Theme) -> Row<'static> {
     Row::new([
-        Cell::from(todo_checkbox(todo)),
-        Cell::from(todo.title.clone()),
-        Cell::from(todo_status_label(todo, run)),
-        Cell::from(todo_time_label(todo)),
+        Cell::from(todo_checkbox(todo)).style(todo_checkbox_style(theme, todo)),
+        Cell::from(todo.title.clone()).style(todo_title_style(theme, todo)),
+        Cell::from(todo_status_label(todo, run)).style(todo_status_style(theme, todo, run)),
+        Cell::from(todo_time_label(todo)).style(todo_timestamp_style(theme, todo)),
     ])
+}
+
+fn section_surface_tone(section: TodoSection) -> SurfaceTone {
+    match section {
+        TodoSection::Open => SurfaceTone::Open,
+        TodoSection::Completed => SurfaceTone::Completed,
+    }
+}
+
+fn section_highlight_style(theme: &Theme, section: TodoSection) -> Style {
+    match section {
+        TodoSection::Open => theme.selection_style(SelectionTone::Open),
+        TodoSection::Completed => theme.selection_style(SelectionTone::Completed),
+    }
+}
+
+fn todo_checkbox_style(theme: &Theme, todo: &RevisionTodo) -> Style {
+    match todo.status {
+        TodoStatus::Open => theme.text_style(TextTone::Open),
+        TodoStatus::Done => theme.text_style(TextTone::Completed),
+    }
+}
+
+fn todo_title_style(theme: &Theme, todo: &RevisionTodo) -> Style {
+    match todo.status {
+        TodoStatus::Open => theme.text_style(TextTone::Default),
+        TodoStatus::Done => theme.text_style(TextTone::Muted),
+    }
+}
+
+fn todo_status_style(theme: &Theme, todo: &RevisionTodo, run: Option<&PomodoroRun>) -> Style {
+    if run.is_some_and(|active| {
+        active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
+    }) {
+        return theme.text_style(TextTone::Focus);
+    }
+
+    match todo.status {
+        TodoStatus::Open => theme.text_style(TextTone::Open),
+        TodoStatus::Done => theme.text_style(TextTone::Completed),
+    }
+}
+
+fn todo_timestamp_style(theme: &Theme, todo: &RevisionTodo) -> Style {
+    match todo.status {
+        TodoStatus::Open => theme.text_style(TextTone::Muted),
+        TodoStatus::Done => theme.text_style(TextTone::Meta),
+    }
 }
 
 fn todo_checkbox(todo: &RevisionTodo) -> &'static str {
@@ -269,15 +327,19 @@ fn todo_checkbox(todo: &RevisionTodo) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
+
     use ratatui::layout::Rect;
 
     use super::{
-        GroupedTodos, TodoClickTarget, TodoSection, todo_click_target, todo_status_label,
-        todo_time_label,
+        GroupedTodos, TodoClickTarget, TodoSection, section_highlight_style, todo_checkbox_style,
+        todo_click_target, todo_status_label, todo_status_style, todo_time_label,
+        todo_timestamp_style,
     };
     use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState};
     use crate::domain::revision::RevisionTodo;
     use crate::domain::todo::TodoStatus;
+    use crate::tui::theme::Theme;
 
     #[test]
     fn groups_open_and_completed_todos_with_recent_completions_first() {
@@ -355,6 +417,47 @@ mod tests {
         assert_eq!(
             todo_time_label(&done),
             crate::timestamp::format_month_day_local(240)
+        );
+    }
+
+    #[test]
+    fn styling_helpers_separate_open_focus_completed_and_timestamps() {
+        let theme = Theme::default();
+        let open = todo(31, TodoStatus::Open, 1, 120, 180, None);
+        let done = todo(32, TodoStatus::Done, 2, 121, 181, Some(240));
+        let focus_run = PomodoroRun {
+            id: 1,
+            session_id: 1,
+            todo_id: Some(31),
+            kind: PomodoroKind::Focus,
+            state: PomodoroState::Running,
+            planned_seconds: 100,
+            started_at: 0,
+            paused_at: None,
+            accumulated_pause: 0,
+            ended_at: None,
+            updated_at: 0,
+        };
+
+        assert_eq!(
+            section_highlight_style(&theme, TodoSection::Open).bg,
+            Some(Color::Rgb(24, 60, 110))
+        );
+        assert_eq!(
+            section_highlight_style(&theme, TodoSection::Completed).bg,
+            Some(Color::Rgb(74, 23, 29))
+        );
+        assert_ne!(
+            todo_checkbox_style(&theme, &open).fg,
+            todo_checkbox_style(&theme, &done).fg
+        );
+        assert_ne!(
+            todo_status_style(&theme, &open, Some(&focus_run)).fg,
+            todo_status_style(&theme, &done, None).fg
+        );
+        assert_ne!(
+            todo_timestamp_style(&theme, &open).fg,
+            todo_timestamp_style(&theme, &done).fg
         );
     }
 
