@@ -393,12 +393,12 @@ Width >= 100 columns
 	•	two-column layout
 	•	list left, details+Pomodoro right
 
-Width 70–99 columns
+Width 50–99 columns
 	•	list takes full width
 	•	right pane becomes bottom drawer
 	•	toggle drawer with Tab
 
-Width < 70 columns
+Width < 50 columns
 	•	single-pane list
 	•	Enter opens detail modal
 	•	Pomodoro badge remains in top bar

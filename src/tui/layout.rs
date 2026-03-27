@@ -20,8 +20,8 @@ pub struct ScreenLayout {
 
 pub fn layout_mode(width: u16) -> LayoutMode {
     match width {
-        0..=69 => LayoutMode::Narrow,
-        70..=99 => LayoutMode::Medium,
+        0..=49 => LayoutMode::Narrow,
+        50..=99 => LayoutMode::Medium,
         _ => LayoutMode::Wide,
     }
 }
@@ -118,7 +118,9 @@ mod tests {
 
     #[test]
     fn selects_expected_layout_modes() {
-        assert_eq!(layout_mode(60), LayoutMode::Narrow);
+        assert_eq!(layout_mode(49), LayoutMode::Narrow);
+        assert_eq!(layout_mode(50), LayoutMode::Medium);
+        assert_eq!(layout_mode(60), LayoutMode::Medium);
         assert_eq!(layout_mode(80), LayoutMode::Medium);
         assert_eq!(layout_mode(120), LayoutMode::Wide);
     }
