@@ -661,7 +661,6 @@ impl SessionScreen {
         if let Some(pomodoro_area) = layout.pomodoro {
             frame.render_widget(self.pomodoro_panel(snapshot), pomodoro_area);
         }
-        frame.render_widget(self.footer(layout.mode), layout.footer);
 
         if matches!(layout.mode, LayoutMode::Narrow)
             && matches!(self.overlay, Some(Overlay::Details))
@@ -830,27 +829,6 @@ impl SessionScreen {
 
         Paragraph::new(self.pomodoro_lines(snapshot))
             .block(Block::default().borders(Borders::ALL).title("Pomodoro"))
-            .style(self.theme.block_style())
-    }
-
-    fn footer(&self, layout_mode: LayoutMode) -> Paragraph<'static> {
-        let text = if self.is_read_only() {
-            "j/k move  H history  r return to head  Left/o overview  q quit"
-        } else {
-            match layout_mode {
-                LayoutMode::Wide => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  H history  p pomodoro  Left/o overview  q quit"
-                }
-                LayoutMode::Medium => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Tab drawer  H history  p pomodoro  Left/o overview  q quit"
-                }
-                LayoutMode::Narrow => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Enter details  H history  p pomodoro  Left/o overview  q quit"
-                }
-            }
-        };
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Keys"))
             .style(self.theme.block_style())
     }
 
@@ -1531,7 +1509,7 @@ mod tests {
         }
 
         screen.reload(&database).expect("reload");
-        let area = Rect::new(0, 0, 120, 14);
+        let area = Rect::new(0, 0, 120, 10);
 
         screen
             .handle_key_in_area(&mut database, key(KeyCode::Home), area)
@@ -1882,12 +1860,11 @@ mod tests {
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Open"));
-        assert!(wide.contains("e edit"));
-        assert!(wide.contains("Left/o overview"));
+        assert!(!wide.contains("Keys"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
-        assert!(medium.contains("Keys"));
+        assert!(!medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
         let narrow = render_buffer(&screen, 49, 24);
