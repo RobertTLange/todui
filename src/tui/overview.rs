@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::domain::pomodoro::{PomodoroRun, PomodoroState, remaining_seconds};
+use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
@@ -72,7 +72,6 @@ pub(crate) enum OverviewExit {
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
     active_run: Option<PomodoroRun>,
-    active_run_title: Option<String>,
     selected_index: usize,
     scroll_offset: usize,
     theme: Theme,
@@ -119,7 +118,6 @@ impl OverviewScreen {
         Self {
             sessions: Vec::new(),
             active_run: None,
-            active_run_title: None,
             selected_index: 0,
             scroll_offset: 0,
             theme: Theme::from_config(&config),
@@ -132,13 +130,7 @@ impl OverviewScreen {
 
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.sessions = database.list_session_overview()?;
-        if let Some((run, title)) = database.get_active_pomodoro_with_link()? {
-            self.active_run = Some(run);
-            self.active_run_title = title;
-        } else {
-            self.active_run = None;
-            self.active_run_title = None;
-        }
+        self.active_run = database.get_active_pomodoro()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
@@ -200,6 +192,24 @@ impl OverviewScreen {
                 self.open_delete_session();
                 None
             }
+            _ if matches!(key.code, KeyCode::Char('p'))
+                || key_matches_binding(&key, &self.config.keys.pomodoro) =>
+            {
+                self.handle_pomodoro(database, PomodoroKind::Focus)?;
+                None
+            }
+            KeyCode::Char('b') => {
+                self.handle_pomodoro(database, PomodoroKind::ShortBreak)?;
+                None
+            }
+            KeyCode::Char('B') => {
+                self.handle_pomodoro(database, PomodoroKind::LongBreak)?;
+                None
+            }
+            KeyCode::Char('c') => {
+                self.cancel_active_pomodoro(database)?;
+                None
+            }
             KeyCode::Up | KeyCode::Char('k')
                 if matches!(key.code, KeyCode::Up)
                     || key_matches_binding(&key, &self.config.keys.up) =>
@@ -239,6 +249,35 @@ impl OverviewScreen {
         };
 
         Ok(exit)
+    }
+
+    fn handle_pomodoro(&mut self, database: &mut Database, kind: PomodoroKind) -> Result<()> {
+        if let Some(run) = self.active_run.clone() {
+            match run.state {
+                PomodoroState::Running if matches!(kind, PomodoroKind::Focus) => {
+                    database.pause_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                PomodoroState::Paused if matches!(kind, PomodoroKind::Focus) => {
+                    database.resume_pomodoro(run.id, now_utc_timestamp())?;
+                }
+                _ => {}
+            }
+        } else {
+            database.start_pomodoro(
+                kind,
+                pomodoro_seconds(&self.config, kind),
+                now_utc_timestamp(),
+            )?;
+        }
+        self.reload(database)
+    }
+
+    fn cancel_active_pomodoro(&mut self, database: &mut Database) -> Result<()> {
+        if let Some(run) = self.active_run.clone() {
+            database.cancel_pomodoro(run.id, now_utc_timestamp())?;
+            self.reload(database)?;
+        }
+        Ok(())
     }
 
     fn handle_session_editor_key(
@@ -349,12 +388,7 @@ impl OverviewScreen {
             && let Some(footer_area) = chunks.get(2).copied()
         {
             frame.render_widget(
-                active_footer(
-                    &self.theme,
-                    run,
-                    self.active_run_title.as_deref(),
-                    now_utc_timestamp(),
-                ),
+                active_footer(&self.theme, run, now_utc_timestamp()),
                 footer_area,
             );
         }
@@ -521,7 +555,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nActive timer: shown in footer\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -866,6 +900,14 @@ fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
     ])
 }
 
+fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
+    match kind {
+        PomodoroKind::Focus => i64::from(config.pomodoro.focus_minutes) * 60,
+        PomodoroKind::ShortBreak => i64::from(config.pomodoro.short_break_minutes) * 60,
+        PomodoroKind::LongBreak => i64::from(config.pomodoro.long_break_minutes) * 60,
+    }
+}
+
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
     bindings.iter().any(|binding| match binding.as_str() {
         "up" => matches!(key.code, KeyCode::Up),
@@ -1065,14 +1107,93 @@ mod tests {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
 
         database
-            .start_pomodoro(None, PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
             .expect("run");
         screen.reload(&database).expect("reload");
 
         let rendered = render_buffer(&mut screen, 120, 24);
         assert!(rendered.contains("Pomodoro"));
         assert!(rendered.contains("SHORT BREAK"));
-        assert!(rendered.contains("No linked todo"));
+        assert!(!rendered.contains("Linked:"));
+        assert!(!rendered.contains("No linked todo"));
+    }
+
+    #[test]
+    fn overview_handles_pomodoro_shortcuts() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::Focus)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.state),
+            Some(crate::domain::pomodoro::PomodoroState::Paused)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('p')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.state),
+            Some(crate::domain::pomodoro::PomodoroState::Running)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('c')))
+            .unwrap();
+        assert!(screen.active_run.is_none());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('b')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::ShortBreak)
+        ));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('c')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('B')))
+            .unwrap();
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::LongBreak)
+        ));
+    }
+
+    #[test]
+    fn overview_honors_custom_pomodoro_keybinding() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
+            .expect("session");
+        database
+            .add_todo(&session.slug, "Draft spec", "", 1_711_275_650)
+            .expect("todo");
+
+        let mut config = Config::default();
+        config.keys.pomodoro = vec![String::from("x")];
+        let mut screen = OverviewScreen::new(config);
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+
+        assert!(matches!(
+            screen.active_run.as_ref().map(|run| run.kind),
+            Some(PomodoroKind::Focus)
+        ));
     }
 
     #[test]
