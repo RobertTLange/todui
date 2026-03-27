@@ -63,7 +63,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_v1_database_to_v2_schema() {
+    fn upgrades_v1_database_to_latest_schema() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("todui.db");
         let connection = Connection::open(&path).expect("open raw connection");
@@ -89,6 +89,31 @@ mod tests {
                   todo_count        INTEGER NOT NULL,
                   done_count        INTEGER NOT NULL,
                   UNIQUE(session_id, revision_number)
+                ) STRICT;
+                CREATE TABLE todos (
+                  id                INTEGER PRIMARY KEY,
+                  session_id        INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                  title             TEXT NOT NULL,
+                  notes             TEXT NOT NULL DEFAULT '',
+                  status            TEXT NOT NULL CHECK (status IN ('open', 'done')),
+                  position          INTEGER NOT NULL,
+                  created_at        INTEGER NOT NULL,
+                  updated_at        INTEGER NOT NULL,
+                  completed_at      INTEGER,
+                  UNIQUE(session_id, position)
+                ) STRICT;
+                CREATE TABLE pomodoro_runs (
+                  id                  INTEGER PRIMARY KEY,
+                  session_id          INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                  todo_id             INTEGER REFERENCES todos(id) ON DELETE SET NULL,
+                  kind                TEXT NOT NULL CHECK (kind IN ('focus', 'short_break', 'long_break')),
+                  state               TEXT NOT NULL CHECK (state IN ('running', 'paused', 'completed', 'cancelled')),
+                  planned_seconds     INTEGER NOT NULL,
+                  started_at          INTEGER NOT NULL,
+                  paused_at           INTEGER,
+                  accumulated_pause   INTEGER NOT NULL DEFAULT 0,
+                  ended_at            INTEGER,
+                  updated_at          INTEGER NOT NULL
                 ) STRICT;
                 ",
             )
@@ -116,9 +141,18 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("revision tag column");
+        let pomodoro_session_not_null: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('pomodoro_runs') WHERE name = 'session_id'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pomodoro session not null flag");
 
         assert_eq!(user_version, LATEST_USER_VERSION);
         assert_eq!(session_tag_exists, "tag");
         assert_eq!(revision_tag_exists, "session_tag");
+        assert_eq!(pomodoro_session_not_null, 0);
     }
 }
