@@ -63,11 +63,14 @@ impl Database {
         session_slug: &str,
         revision: Option<u32>,
     ) -> Result<SessionSnapshot> {
-        let session = self.get_session_by_slug(session_slug)?;
+        let mut session = self.get_session_by_slug(session_slug)?;
         let revision_summary = match revision {
             Some(revision_number) => self.revision_summary(session_slug, revision_number)?,
             None => self.current_revision_summary(session.id)?,
         };
+        if let Some(revision_number) = revision {
+            session.tag = self.revision_session_tag(session_slug, revision_number)?;
+        }
         let todos = match revision {
             Some(revision_number) => self.get_revision_todos(session_slug, revision_number)?,
             None => self
@@ -116,6 +119,29 @@ impl Database {
                 other => AppError::Database(other),
             })
     }
+
+    fn revision_session_tag(
+        &self,
+        session_slug: &str,
+        revision_number: u32,
+    ) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT revisions.session_tag
+                 FROM session_revisions revisions
+                 JOIN sessions ON sessions.id = revisions.session_id
+                 WHERE sessions.slug = ?1 AND revisions.revision_number = ?2",
+                params![session_slug, revision_number],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => AppError::RevisionNotFound {
+                    session: session_slug.to_string(),
+                    revision: revision_number,
+                },
+                other => AppError::Database(other),
+            })
+    }
 }
 
 fn map_revision_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<RevisionTodo> {
@@ -146,7 +172,7 @@ mod tests {
     fn lists_revision_history() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
@@ -170,7 +196,7 @@ mod tests {
     fn loads_head_and_historical_snapshots() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "note", 1_711_275_700)
@@ -186,6 +212,7 @@ mod tests {
 
         let head = database.load_snapshot(&session.slug, None).expect("head");
         assert_eq!(head.todos.len(), 1);
+        assert_eq!(head.session.tag.as_deref(), Some("work"));
         assert!(matches!(
             head.mode,
             crate::domain::revision::RevisionMode::Head
@@ -199,13 +226,14 @@ mod tests {
             historical.mode,
             crate::domain::revision::RevisionMode::Historical(1)
         ));
+        assert_eq!(historical.session.tag.as_deref(), Some("work"));
     }
 
     #[test]
     fn returns_revision_not_found_for_missing_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         let error = database
@@ -218,5 +246,25 @@ mod tests {
                 revision: 9
             }
         ));
+    }
+
+    #[test]
+    fn historical_snapshot_keeps_revision_tag_after_live_tag_changes() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
+            .expect("session");
+
+        database
+            .update_session_tag(&session.slug, Some("private"), 1_711_275_700)
+            .expect("tag updated");
+
+        let original = database
+            .load_snapshot(&session.slug, Some(1))
+            .expect("original revision");
+        let current = database.load_snapshot(&session.slug, None).expect("head");
+
+        assert_eq!(original.session.tag.as_deref(), Some("work"));
+        assert_eq!(current.session.tag.as_deref(), Some("private"));
     }
 }

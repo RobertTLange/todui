@@ -1662,7 +1662,7 @@ mod tests {
         let mut external = Database::open(&database_path).expect("external database");
 
         external
-            .create_session("Reading Sprint", None, 1_711_275_900)
+            .create_session("Reading Sprint", None, None, 1_711_275_900)
             .expect("external session");
         screen.handle_tick(&mut database).expect("tick");
 
@@ -1722,7 +1722,7 @@ mod tests {
         let (directory, mut database) = Database::open_temp().expect("database");
         let database_path = directory.path().join("todui.db");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
             .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)

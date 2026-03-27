@@ -281,7 +281,7 @@ mod tests {
     fn adds_todos_and_tracks_revisions() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
@@ -299,7 +299,7 @@ mod tests {
     fn toggles_done_and_undone_timestamps() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
@@ -332,7 +332,7 @@ mod tests {
     fn edits_todo_title_and_notes_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
@@ -364,7 +364,7 @@ mod tests {
     fn deletes_todo_reorders_positions_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let first = database
             .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
@@ -401,7 +401,7 @@ mod tests {
     fn deleting_todo_clears_pomodoro_link() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
             .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)

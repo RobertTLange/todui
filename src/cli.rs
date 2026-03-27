@@ -80,6 +80,8 @@ pub enum SessionCommand {
         name: String,
         #[arg(long)]
         slug: Option<String>,
+        #[arg(long)]
+        tag: Option<String>,
     },
     Delete {
         session: Option<String>,
@@ -87,6 +89,13 @@ pub enum SessionCommand {
     List,
     History {
         session: Option<String>,
+    },
+    Tag {
+        session: Option<String>,
+        #[arg(long, conflicts_with = "clear")]
+        set: Option<String>,
+        #[arg(long, conflicts_with = "set")]
+        clear: bool,
     },
 }
 
@@ -273,8 +282,13 @@ fn handle_session_command<W: Write>(
     command: SessionCommand,
 ) -> Result<()> {
     match command {
-        SessionCommand::New { name, slug } => {
-            let session = database.create_session(&name, slug.as_deref(), now_utc_timestamp())?;
+        SessionCommand::New { name, slug, tag } => {
+            let session = database.create_session(
+                &name,
+                slug.as_deref(),
+                tag.as_deref(),
+                now_utc_timestamp(),
+            )?;
             writeln!(writer, "{}", session.slug)?;
             Ok(())
         }
@@ -288,9 +302,10 @@ fn handle_session_command<W: Write>(
             for session in database.list_sessions()? {
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\tr{}",
+                    "{}\t{}\t{}\t{}\tr{}",
                     session.slug,
                     session.name,
+                    session.tag.as_deref().unwrap_or("-"),
                     format_export_local(session.last_opened_at),
                     session.current_revision
                 )?;
@@ -310,6 +325,31 @@ fn handle_session_command<W: Write>(
                     revision.done_count
                 )?;
             }
+            Ok(())
+        }
+        SessionCommand::Tag {
+            session,
+            set,
+            clear,
+        } => {
+            if set.is_none() && !clear {
+                return Err(AppError::InvalidCommandUsage(
+                    "session tag requires --set or --clear",
+                ));
+            }
+
+            let session_slug = database.resolve_session_slug(session.as_deref())?;
+            let updated = database.update_session_tag(
+                &session_slug,
+                if clear { None } else { set.as_deref() },
+                now_utc_timestamp(),
+            )?;
+            writeln!(
+                writer,
+                "{}\t{}",
+                updated.slug,
+                updated.tag.as_deref().unwrap_or("-")
+            )?;
             Ok(())
         }
     }
@@ -445,6 +485,7 @@ mod dispatch_tests {
                     command: SessionCommand::New {
                         name: String::from("Writing Sprint"),
                         slug: None,
+                        tag: None,
                     },
                 }),
             },
@@ -520,7 +561,7 @@ mod execute_tests {
             &mut database,
             &Config::default(),
             &mut output,
-            parse_from(["todui", "session", "new", "Writing Sprint"]),
+            parse_from(["todui", "session", "new", "Writing Sprint", "--tag", "work"]),
         )
         .expect("create session");
         execute(
@@ -554,6 +595,7 @@ mod execute_tests {
 
         let rendered = String::from_utf8(export).expect("utf8");
         assert!(rendered.contains("# Session: writing-sprint"));
+        assert!(rendered.contains("- tag: work"));
         assert!(rendered.contains("- [ ] Draft spec"));
     }
 
@@ -566,7 +608,7 @@ mod execute_tests {
             &mut database,
             &Config::default(),
             &mut output,
-            parse_from(["todui", "session", "new", "Writing Sprint"]),
+            parse_from(["todui", "session", "new", "Writing Sprint", "--tag", "work"]),
         )
         .expect("create session");
         execute(
@@ -702,10 +744,50 @@ mod tests {
 
         match cli.command.expect("command") {
             Command::Session {
-                command: SessionCommand::New { name, slug },
+                command: SessionCommand::New { name, slug, tag },
             } => {
                 assert_eq!(name, "Writing Sprint");
                 assert_eq!(slug.as_deref(), Some("writing"));
+                assert_eq!(tag, None);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_session_new_tag_and_tag_command() {
+        let cli = parse_from(["todui", "session", "new", "Writing Sprint", "--tag", "work"]);
+
+        match cli.command.expect("command") {
+            Command::Session {
+                command: SessionCommand::New { tag, .. },
+            } => {
+                assert_eq!(tag.as_deref(), Some("work"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse_from([
+            "todui",
+            "session",
+            "tag",
+            "writing-sprint",
+            "--set",
+            "private",
+        ]);
+
+        match cli.command.expect("command") {
+            Command::Session {
+                command:
+                    SessionCommand::Tag {
+                        session,
+                        set,
+                        clear,
+                    },
+            } => {
+                assert_eq!(session.as_deref(), Some("writing-sprint"));
+                assert_eq!(set.as_deref(), Some("private"));
+                assert!(!clear);
             }
             other => panic!("unexpected command: {other:?}"),
         }

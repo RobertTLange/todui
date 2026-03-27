@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
-use crate::db::migrations::{LATEST_USER_VERSION, MIGRATION_SQL};
+use crate::db::migrations::{LATEST_USER_VERSION, apply};
 use crate::error::Result;
 
 #[derive(Debug)]
@@ -38,8 +38,7 @@ fn configure_connection(connection: &Connection) -> Result<()> {
     let current_version: i32 =
         connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if current_version < LATEST_USER_VERSION {
-        connection.execute_batch(MIGRATION_SQL)?;
-        connection.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
+        apply(connection, current_version)?;
     }
 
     Ok(())
@@ -47,7 +46,10 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::Database;
+    use crate::db::migrations::LATEST_USER_VERSION;
 
     #[test]
     fn opens_database_and_applies_schema() {
@@ -57,6 +59,66 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version");
 
-        assert_eq!(user_version, 1);
+        assert_eq!(user_version, LATEST_USER_VERSION);
+    }
+
+    #[test]
+    fn upgrades_v1_database_to_v2_schema() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("todui.db");
+        let connection = Connection::open(&path).expect("open raw connection");
+        connection
+            .execute_batch(
+                "
+                PRAGMA user_version = 1;
+                CREATE TABLE sessions (
+                  id                INTEGER PRIMARY KEY,
+                  slug              TEXT NOT NULL UNIQUE,
+                  name              TEXT NOT NULL,
+                  created_at        INTEGER NOT NULL,
+                  updated_at        INTEGER NOT NULL,
+                  last_opened_at    INTEGER NOT NULL,
+                  current_revision  INTEGER NOT NULL
+                ) STRICT;
+                CREATE TABLE session_revisions (
+                  id                INTEGER PRIMARY KEY,
+                  session_id        INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                  revision_number   INTEGER NOT NULL,
+                  created_at        INTEGER NOT NULL,
+                  reason            TEXT NOT NULL,
+                  todo_count        INTEGER NOT NULL,
+                  done_count        INTEGER NOT NULL,
+                  UNIQUE(session_id, revision_number)
+                ) STRICT;
+                ",
+            )
+            .expect("seed v1 schema");
+        drop(connection);
+
+        let reopened = Database::open(&path).expect("reopen upgraded database");
+        let user_version: i32 = reopened
+            .connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version");
+        let session_tag_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('sessions') WHERE name = 'tag'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("session tag column");
+        let revision_tag_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('session_revisions') WHERE name = 'session_tag'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revision tag column");
+
+        assert_eq!(user_version, LATEST_USER_VERSION);
+        assert_eq!(session_tag_exists, "tag");
+        assert_eq!(revision_tag_exists, "session_tag");
     }
 }
