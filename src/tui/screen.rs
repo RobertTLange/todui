@@ -5,13 +5,10 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::{Constraint, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{
-    Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
-    TableState, Wrap,
-};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -22,11 +19,15 @@ use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, Sessi
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
-use crate::timestamp::{format_full_local, format_month_day_local, now_utc_timestamp};
+use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::todo_list::{
+    GroupedTodos, TodoClickTarget, TodoSection, section_state, section_visible_rows,
+    split_todo_list_area, todo_click_target, todo_section_table,
+};
 
 const EVENT_POLL_MS: u64 = 250;
 
@@ -145,13 +146,15 @@ struct SessionScreen {
     active_run: Option<PomodoroRun>,
     head_token: Option<SessionHeadToken>,
     selected_index: usize,
-    scroll_offset: usize,
+    open_scroll_offset: usize,
+    completed_scroll_offset: usize,
     history_index: usize,
     medium_drawer_open: bool,
     overlay: Option<Overlay>,
     todo_editor: TodoEditorState,
     toast: Option<ToastState>,
     pending_completion_bell: bool,
+    viewport_area: Rect,
     theme: Theme,
     config: Config,
 }
@@ -170,13 +173,15 @@ impl SessionScreen {
             active_run: None,
             head_token: None,
             selected_index: 0,
-            scroll_offset: 0,
+            open_scroll_offset: 0,
+            completed_scroll_offset: 0,
             history_index: 0,
             medium_drawer_open: true,
             overlay: None,
             todo_editor: TodoEditorState::default(),
             toast: None,
             pending_completion_bell: false,
+            viewport_area: Rect::new(0, 0, 120, 24),
             theme: Theme::from_config(&config),
             config,
         }
@@ -219,6 +224,8 @@ impl SessionScreen {
         key: KeyEvent,
         area: Rect,
     ) -> Result<Option<SessionExit>> {
+        self.viewport_area = area;
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             return Ok(Some(SessionExit::Quit));
         }
@@ -258,40 +265,42 @@ impl SessionScreen {
                 if matches!(key.code, KeyCode::Up)
                     || key_matches_binding(&key, &self.config.keys.up) =>
             {
-                self.move_selection(-1, self.visible_rows());
+                self.move_selection(-1);
                 Ok(None)
             }
             KeyCode::Down | KeyCode::Char('j')
                 if matches!(key.code, KeyCode::Down)
                     || key_matches_binding(&key, &self.config.keys.down) =>
             {
-                self.move_selection(1, self.visible_rows());
+                self.move_selection(1);
                 Ok(None)
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.selected_index = 0;
-                self.scroll_offset = 0;
+                self.open_scroll_offset = 0;
+                self.completed_scroll_offset = 0;
+                self.ensure_selection_visible();
                 Ok(None)
             }
             KeyCode::End | KeyCode::Char('G') => {
-                self.selected_index = self.snapshot().todos.len().saturating_sub(1);
-                self.ensure_selection_visible(self.visible_rows());
+                self.selected_index = self.grouped_todos().len().saturating_sub(1);
+                self.ensure_selection_visible();
                 Ok(None)
             }
             KeyCode::PageUp => {
-                self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
+                self.move_selection(-(self.page_size() as isize));
                 Ok(None)
             }
             KeyCode::PageDown => {
-                self.move_selection(self.visible_rows() as isize, self.visible_rows());
+                self.move_selection(self.page_size() as isize);
                 Ok(None)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
+                self.move_selection(-(self.page_size() as isize));
                 Ok(None)
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(self.visible_rows() as isize, self.visible_rows());
+                self.move_selection(self.page_size() as isize);
                 Ok(None)
             }
             KeyCode::Char('x') | KeyCode::Char(' ')
@@ -458,6 +467,8 @@ impl SessionScreen {
         area: Rect,
         mouse: MouseEvent,
     ) -> Result<()> {
+        self.viewport_area = area;
+
         if matches!(
             self.overlay,
             Some(Overlay::TodoEditor | Overlay::Help | Overlay::Details)
@@ -468,25 +479,37 @@ impl SessionScreen {
             return Ok(());
         }
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.move_selection(-1, self.visible_rows()),
-            MouseEventKind::ScrollDown => self.move_selection(1, self.visible_rows()),
+            MouseEventKind::ScrollUp => self.move_selection(-1),
+            MouseEventKind::ScrollDown => self.move_selection(1),
             MouseEventKind::Down(MouseButton::Left) => {
                 if matches!(self.overlay, Some(Overlay::History)) {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
                 let layout = self.layout_for_area(area);
-                if let Some(target) =
-                    list_click_target(layout.list, self.scroll_offset, mouse.column, mouse.row)
-                {
-                    match target {
-                        ListClickTarget::Checkbox(index) => {
-                            self.selected_index = index;
-                            self.toggle_selected_todo(database)?;
+                let list_areas = split_todo_list_area(layout.list);
+                if let Some(target) = todo_click_target(
+                    list_areas,
+                    self.open_scroll_offset,
+                    self.completed_scroll_offset,
+                    mouse.column,
+                    mouse.row,
+                ) {
+                    let grouped = self.grouped_todos();
+                    let flat_index = match target {
+                        TodoClickTarget::Checkbox { section, row }
+                        | TodoClickTarget::Row { section, row } => {
+                            grouped.flat_index_for_section_row(section, row)
                         }
-                        ListClickTarget::Row(index) => self.selected_index = index,
+                    };
+                    if let Some(flat_index) = flat_index {
+                        self.selected_index = flat_index;
+                        if matches!(target, TodoClickTarget::Checkbox { .. }) {
+                            self.toggle_selected_todo(database)?;
+                        } else {
+                            self.ensure_selection_visible();
+                        }
                     }
-                    self.ensure_selection_visible(self.visible_rows());
                 }
             }
             _ => {}
@@ -605,11 +628,32 @@ impl SessionScreen {
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let snapshot = self.snapshot();
         let layout = self.layout_for_area(frame.area());
+        let grouped = self.grouped_todos();
+        let list_areas = split_todo_list_area(layout.list);
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
-            self.todo_list(snapshot, layout.list.height),
-            layout.list,
-            &mut self.list_state(),
+            todo_section_table(
+                "Open",
+                grouped.open(),
+                self.open_scroll_offset,
+                section_visible_rows(list_areas.open),
+                self.current_session_run(),
+                &self.theme,
+            ),
+            list_areas.open,
+            &mut self.open_list_state(),
+        );
+        frame.render_stateful_widget(
+            todo_section_table(
+                "Completed",
+                grouped.completed(),
+                self.completed_scroll_offset,
+                section_visible_rows(list_areas.completed),
+                self.current_session_run(),
+                &self.theme,
+            ),
+            list_areas.completed,
+            &mut self.completed_list_state(),
         );
         if let Some(details_area) = layout.details {
             frame.render_widget(self.details_panel(snapshot), details_area);
@@ -710,39 +754,6 @@ impl SessionScreen {
             self.top_bar_height(),
             self.pomodoro_panel_height(self.snapshot()),
         )
-    }
-
-    fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> Table<'static> {
-        let visible_rows = height.saturating_sub(3).max(1) as usize;
-        let rows = snapshot
-            .todos
-            .iter()
-            .skip(self.scroll_offset)
-            .take(visible_rows)
-            .map(|todo| todo_table_row(todo, self.current_session_run()))
-            .collect::<Vec<_>>();
-
-        Table::new(
-            rows,
-            [
-                Constraint::Length(3),
-                Constraint::Fill(1),
-                Constraint::Length(6),
-                Constraint::Length(11),
-            ],
-        )
-        .header(
-            Row::new([
-                Cell::from(""),
-                Cell::from("Title"),
-                Cell::from("Status"),
-                Cell::from("Last Update"),
-            ])
-            .style(self.theme.block_style().add_modifier(Modifier::BOLD)),
-        )
-        .block(Block::default().borders(Borders::ALL).title("Todos"))
-        .column_spacing(1)
-        .row_highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
@@ -907,7 +918,8 @@ impl SessionScreen {
     }
 
     fn current_todo(&self) -> Option<&RevisionTodo> {
-        self.snapshot.as_ref()?.todos.get(self.selected_index)
+        let snapshot = self.snapshot.as_ref()?;
+        GroupedTodos::new(&snapshot.todos).todo_at_flat_index(self.selected_index)
     }
 
     fn current_session_run(&self) -> Option<&PomodoroRun> {
@@ -916,12 +928,12 @@ impl SessionScreen {
             .filter(|run| run.session_id == self.snapshot().session.id)
     }
 
-    fn snapshot(&self) -> &SessionSnapshot {
-        self.snapshot.as_ref().expect("snapshot loaded")
+    fn grouped_todos(&self) -> GroupedTodos<'_> {
+        GroupedTodos::new(&self.snapshot().todos)
     }
 
-    fn visible_rows(&self) -> usize {
-        8
+    fn snapshot(&self) -> &SessionSnapshot {
+        self.snapshot.as_ref().expect("snapshot loaded")
     }
 
     fn is_read_only(&self) -> bool {
@@ -929,27 +941,34 @@ impl SessionScreen {
     }
 
     fn reselect(&mut self, todo_id: Option<i64>) {
-        if let Some(todo_id) = todo_id
-            && let Some(index) = self
-                .snapshot()
-                .todos
-                .iter()
-                .position(|todo| todo.todo_id == todo_id)
-        {
-            self.selected_index = index;
+        let (selected_index, total_len) = {
+            let grouped = self.grouped_todos();
+            let selected_index =
+                if let Some(index) = todo_id.and_then(|todo_id| grouped.flat_index_of(todo_id)) {
+                    index
+                } else {
+                    min(self.selected_index, grouped.len().saturating_sub(1))
+                };
+            (selected_index, grouped.len())
+        };
+        self.selected_index = selected_index;
+
+        if total_len == 0 {
+            self.selected_index = 0;
+            self.open_scroll_offset = 0;
+            self.completed_scroll_offset = 0;
+            return;
         }
-        self.selected_index = min(
-            self.selected_index,
-            self.snapshot().todos.len().saturating_sub(1),
-        );
-        self.ensure_selection_visible(self.visible_rows());
+
+        self.ensure_selection_visible();
     }
 
-    fn move_selection(&mut self, delta: isize, visible_rows: usize) {
-        let todo_count = self.snapshot().todos.len();
+    fn move_selection(&mut self, delta: isize) {
+        let todo_count = self.grouped_todos().len();
         if todo_count == 0 {
             self.selected_index = 0;
-            self.scroll_offset = 0;
+            self.open_scroll_offset = 0;
+            self.completed_scroll_offset = 0;
             return;
         }
         if delta.is_negative() {
@@ -960,21 +979,70 @@ impl SessionScreen {
                 todo_count.saturating_sub(1),
             );
         }
-        self.ensure_selection_visible(visible_rows);
+        self.ensure_selection_visible();
     }
 
-    fn ensure_selection_visible(&mut self, visible_rows: usize) {
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = self.selected_index + 1 - visible_rows;
+    fn page_size(&self) -> usize {
+        let grouped = self.grouped_todos();
+        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        match grouped.section_row_for_flat_index(self.selected_index) {
+            Some((TodoSection::Completed, _)) => section_visible_rows(areas.completed),
+            _ => section_visible_rows(areas.open),
         }
     }
 
-    fn list_state(&self) -> TableState {
-        let mut state = TableState::default();
-        state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
-        state
+    fn ensure_selection_visible(&mut self) {
+        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        let open_rows = section_visible_rows(areas.open);
+        let completed_rows = section_visible_rows(areas.completed);
+        let (open_len, completed_len, selected_section_row) = {
+            let grouped = self.grouped_todos();
+            (
+                grouped.open().len(),
+                grouped.completed().len(),
+                grouped.section_row_for_flat_index(self.selected_index),
+            )
+        };
+
+        self.open_scroll_offset = clamp_scroll_offset(self.open_scroll_offset, open_len, open_rows);
+        self.completed_scroll_offset =
+            clamp_scroll_offset(self.completed_scroll_offset, completed_len, completed_rows);
+
+        let Some((section, row)) = selected_section_row else {
+            return;
+        };
+
+        let (scroll_offset, visible_rows) = match section {
+            TodoSection::Open => (&mut self.open_scroll_offset, open_rows),
+            TodoSection::Completed => (&mut self.completed_scroll_offset, completed_rows),
+        };
+        if row < *scroll_offset {
+            *scroll_offset = row;
+        } else if row >= *scroll_offset + visible_rows {
+            *scroll_offset = row + 1 - visible_rows;
+        }
+    }
+
+    fn open_list_state(&self) -> ratatui::widgets::TableState {
+        let grouped = self.grouped_todos();
+        let selected_row = grouped
+            .section_row_for_flat_index(self.selected_index)
+            .and_then(|(section, row)| match section {
+                TodoSection::Open => Some(row.saturating_sub(self.open_scroll_offset)),
+                TodoSection::Completed => None,
+            });
+        section_state(selected_row)
+    }
+
+    fn completed_list_state(&self) -> ratatui::widgets::TableState {
+        let grouped = self.grouped_todos();
+        let selected_row = grouped
+            .section_row_for_flat_index(self.selected_index)
+            .and_then(|(section, row)| match section {
+                TodoSection::Completed => Some(row.saturating_sub(self.completed_scroll_offset)),
+                TodoSection::Open => None,
+            });
+        section_state(selected_row)
     }
 
     fn history_state(&self) -> ListState {
@@ -1136,32 +1204,6 @@ impl SessionScreen {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ListClickTarget {
-    Checkbox(usize),
-    Row(usize),
-}
-
-fn list_click_target(
-    list_area: Rect,
-    scroll_offset: usize,
-    x: u16,
-    y: u16,
-) -> Option<ListClickTarget> {
-    let inner_x = list_area.x.saturating_add(1);
-    let inner_y = list_area.y.saturating_add(1);
-    if x < inner_x || y <= inner_y || y >= list_area.bottom().saturating_sub(1) {
-        return None;
-    }
-
-    let row_index = scroll_offset + usize::from(y.saturating_sub(inner_y + 1));
-    if x <= inner_x.saturating_add(2) {
-        Some(ListClickTarget::Checkbox(row_index))
-    } else {
-        Some(ListClickTarget::Row(row_index))
-    }
-}
-
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
     match kind {
         PomodoroKind::Focus => i64::from(config.pomodoro.focus_minutes) * 60,
@@ -1186,41 +1228,8 @@ fn linked_title(run: &PomodoroRun, snapshot: &SessionSnapshot) -> String {
         .unwrap_or_else(|| String::from("session-only"))
 }
 
-fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> Row<'static> {
-    Row::new([
-        Cell::from(todo_checkbox(todo)),
-        Cell::from(todo.title.clone()),
-        Cell::from(todo_status_label(todo, run)),
-        Cell::from(todo_time_label(todo)),
-    ])
-}
-
-fn todo_checkbox(todo: &RevisionTodo) -> &'static str {
-    match todo.status {
-        TodoStatus::Open => "[ ]",
-        TodoStatus::Done => "[x]",
-    }
-}
-
-fn todo_status_label(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> &'static str {
-    if run.is_some_and(|active| {
-        active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
-    }) {
-        "FOCUS"
-    } else {
-        match todo.status {
-            TodoStatus::Open => "open",
-            TodoStatus::Done => "done",
-        }
-    }
-}
-
-fn todo_time_label(todo: &RevisionTodo) -> String {
-    let timestamp = match todo.status {
-        TodoStatus::Open => todo.created_at,
-        TodoStatus::Done => todo.completed_at.unwrap_or(todo.updated_at),
-    };
-    format_month_day_local(timestamp)
+fn clamp_scroll_offset(offset: usize, total_rows: usize, visible_rows: usize) -> usize {
+    total_rows.saturating_sub(visible_rows).min(offset)
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -1262,26 +1271,36 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        ListClickTarget, Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding,
-        list_click_target, progress_bar, todo_status_label, todo_time_label,
+        Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding, progress_bar,
     };
     use crate::config::Config;
     use crate::db::Database;
     use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
     use crate::domain::revision::RevisionMode;
+    use crate::domain::todo::TodoStatus;
     use crate::tui::layout::split_screen;
+    use crate::tui::widgets::todo_list::{
+        TodoClickTarget, TodoSection, split_todo_list_area, todo_click_target, todo_status_label,
+        todo_time_label,
+    };
 
     #[test]
     fn identifies_checkbox_and_row_click_targets() {
-        let area = Rect::new(0, 0, 40, 10);
-        assert_eq!(list_click_target(area, 0, 1, 1), None);
+        let area = split_todo_list_area(Rect::new(0, 0, 40, 10));
+        assert_eq!(todo_click_target(area, 0, 0, 0, 2), None);
         assert_eq!(
-            list_click_target(area, 0, 1, 2),
-            Some(ListClickTarget::Checkbox(0))
+            todo_click_target(area, 0, 0, 1, 2),
+            Some(TodoClickTarget::Checkbox {
+                section: TodoSection::Open,
+                row: 0,
+            })
         );
         assert_eq!(
-            list_click_target(area, 0, 6, 3),
-            Some(ListClickTarget::Row(1))
+            todo_click_target(area, 0, 0, 6, 7),
+            Some(TodoClickTarget::Row {
+                section: TodoSection::Completed,
+                row: 0,
+            })
         );
     }
 
@@ -1451,6 +1470,96 @@ mod tests {
                 .handle_key(&mut database, key(KeyCode::Char('o')))
                 .unwrap(),
             Some(SessionExit::Overview)
+        );
+    }
+
+    #[test]
+    fn screen_moves_selection_between_open_and_completed_sections() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+        assert_eq!(
+            screen.current_todo().expect("selected").title,
+            "Review bindings"
+        );
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        assert_eq!(screen.current_todo().expect("selected").title, "Draft spec");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .unwrap();
+        assert_eq!(screen.current_todo().expect("selected").title, "Draft spec");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+        assert_eq!(screen.current_todo().expect("selected").title, "Draft spec");
+
+        screen.handle_key(&mut database, key(KeyCode::End)).unwrap();
+        assert_eq!(
+            screen.current_todo().expect("selected").title,
+            "Review bindings"
+        );
+    }
+
+    #[test]
+    fn screen_scrolls_open_and_completed_sections_independently() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let mut now = 1_711_275_900;
+        let mut completed_ids = Vec::new();
+
+        for title in ["Open 1", "Open 2", "Open 3", "Done 1", "Done 2", "Done 3"] {
+            let todo = database
+                .add_todo(&screen.session_slug, title, "", now)
+                .expect("todo");
+            if title.starts_with("Done") {
+                now += 10;
+                database
+                    .set_todo_status(todo.id, Some(&screen.session_slug), TodoStatus::Done, now)
+                    .expect("done");
+                completed_ids.push(todo.id);
+            }
+            now += 10;
+        }
+
+        screen.reload(&database).expect("reload");
+        let area = Rect::new(0, 0, 120, 14);
+
+        screen
+            .handle_key_in_area(&mut database, key(KeyCode::Home), area)
+            .unwrap();
+
+        let open_count = screen.grouped_todos().open().len();
+        for _ in 0..open_count.saturating_sub(1) {
+            screen
+                .handle_key_in_area(&mut database, key(KeyCode::Down), area)
+                .unwrap();
+        }
+
+        assert!(screen.open_scroll_offset > 0);
+        assert_eq!(screen.completed_scroll_offset, 0);
+
+        let open_scroll_offset = screen.open_scroll_offset;
+        screen
+            .handle_key_in_area(&mut database, key(KeyCode::Down), area)
+            .unwrap();
+        screen
+            .handle_key_in_area(&mut database, key(KeyCode::Down), area)
+            .unwrap();
+
+        assert_eq!(screen.open_scroll_offset, open_scroll_offset);
+        assert!(screen.completed_scroll_offset > 0);
+        assert_eq!(
+            screen.current_todo().expect("selected").todo_id,
+            completed_ids[1]
         );
     }
 
@@ -1768,9 +1877,11 @@ mod tests {
         assert!(wide.contains("Pomodoro"));
         assert!(wide.contains("Status"));
         assert!(wide.contains("Last Update"));
+        assert!(wide.contains("Open"));
+        assert!(wide.contains("Completed"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
-        assert!(wide_lines[3].contains("Todos"));
+        assert!(wide_lines[3].contains("Open"));
         assert!(wide.contains("e edit"));
         assert!(wide.contains("Left/o overview"));
 
