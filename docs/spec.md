@@ -288,7 +288,7 @@ Shows:
 	•	current revision
 	•	open/done counts
 
-Enter opens the selected session head.
+Enter or Right opens the selected session head.
 
 9.2.2 Session view
 
@@ -421,7 +421,7 @@ Session actions
 	•	Space / x toggle done
 	•	Enter open details
 	•	H open revision history
-	•	o return to the session overview
+	•	Left or o return to the session overview
 	•	r when in revision mode, return to head
 	•	p open or trigger Pomodoro action on selected todo/session
 
