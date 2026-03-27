@@ -79,6 +79,8 @@ The app shall:
 	•	open a previous revision of a session
 	•	add todos from CLI and TUI
 	•	edit todo title and notes from CLI and TUI
+	•	delete todos from CLI and TUI
+	•	delete sessions from CLI and TUI
 	•	toggle todo completion from CLI and TUI
 	•	display timestamps in the TUI
 	•	export a markdown text version of a session
@@ -103,7 +105,6 @@ Do not implement these in v1:
 	•	due dates
 	•	tags
 	•	recurring tasks
-	•	task deletion
 	•	task dependencies
 	•	natural-language parsing
 	•	restore/fork-from-revision write workflows
@@ -131,6 +132,8 @@ Instead:
 	•	click checkbox = toggle done
 	•	Enter = open selected todo details
 	•	e = edit selected todo
+	•	d = delete selected todo with confirmation
+	•	D = delete current session with confirmation
 	•	Space or x = toggle done on selected todo
 
 Do not make whole-row click toggle completion.
@@ -185,10 +188,12 @@ Binary name: todui
 
 todui
 todui session new <name> [--slug <slug>]
+todui session delete [<session>]
 todui session list
 todui session history [<session>]
 
 todui add <title> [--session <session>] [--note <text>]
+todui delete <todo-id> [--session <session>]
 todui edit <todo-id> [--session <session>] [--title <text>] \
   [--note <text> | --clear-note]
 todui done <todo-id> [--session <session>]
@@ -211,11 +216,21 @@ todui add
 	•	if --session is omitted, add to the most recently opened session head
 	•	if no session exists, return an error
 
+todui delete
+	•	if --session is provided, the todo must belong to that session
+	•	deletes immediately in CLI
+	•	compacts remaining todo ordering positions
+
 todui edit
 	•	requires at least one of --title, --note, or --clear-note
 	•	if --session is provided, the todo must belong to that session
 	•	--note and --clear-note are mutually exclusive
 	•	omitted fields keep their current value
+
+todui session delete
+	•	with <session>: deletes that session
+	•	no args: deletes the most recently opened session
+	•	deletes the live session plus todos, revision snapshots, and Pomodoro runs
 
 todui export md
 	•	defaults to most recent session head
@@ -243,8 +258,10 @@ Slug rules:
 
 todui session new "Writing Sprint"
 todui add "Draft design spec" --session writing-sprint
+todui delete 1 --session writing-sprint
 todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
 todui add "Review keybindings" --session writing-sprint --note "Ghostty + mouse"
+todui session delete writing-sprint
 todui resume writing-sprint
 todui resume writing-sprint --revision 3
 todui export md writing-sprint --revision 3 > sprint.md
@@ -355,6 +372,8 @@ Shows key hints:
 	•	j/k move
 	•	space toggle
 	•	n new
+	•	d delete todo
+	•	D delete session
 	•	p Pomodoro
 	•	H history
 	•	o overview
@@ -397,6 +416,8 @@ List navigation
 Session actions
 	•	n create new todo in current session
 	•	e edit selected todo
+	•	d delete selected todo after confirmation
+	•	D delete current session after confirmation
 	•	Space / x toggle done
 	•	Enter open details
 	•	H open revision history
@@ -430,6 +451,7 @@ When viewing a historical revision:
 	•	top bar shows READ ONLY
 	•	footer replaces mutating hints with r return to head
 	•	clicking a checkbox shows toast: Historical revisions are read-only
+	•	delete actions show toast: Historical revisions are read-only
 	•	Pomodoro card becomes a summary card, not a control card
 
 Revision banner:
@@ -628,6 +650,7 @@ A revision is created after every successful session mutation:
 	•	add todo
 	•	edit title
 	•	edit notes
+	•	delete todo
 	•	toggle done / undone
 	•	reorder todos
 
@@ -723,6 +746,12 @@ Reordering:
 	•	out of scope in CLI v1
 	•	optional in TUI v1
 	•	if implemented, create a revision
+
+Deletion:
+	•	deleting a todo compacts later positions
+	•	deleting a todo creates a revision snapshot
+	•	deleting a session is a hard delete of the session and all related rows
+	•	deleting a session does not create a final revision
 
 17. Pomodoro design
 

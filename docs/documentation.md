@@ -53,6 +53,8 @@ Primary references:
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
   - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name, and `n` in a live session creates a todo with title + notes
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
+  - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
+  - historical revisions remain mutation-blocked, including both delete actions
 
 ## How To Run + Demo
 
@@ -80,6 +82,8 @@ target/debug/todui session history writing-sprint
 target/debug/todui resume writing-sprint
 target/debug/todui resume writing-sprint --revision 1
 target/debug/todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
+target/debug/todui delete 1 --session writing-sprint
+target/debug/todui session delete writing-sprint
 target/debug/todui export md writing-sprint --revision 1 --timestamps full --include-notes
 ```
 
@@ -92,6 +96,8 @@ todui
 todui resume writing-sprint
 todui session history writing-sprint
 todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
+todui delete 1 --session writing-sprint
+todui session delete writing-sprint
 todui export md writing-sprint --format gfm
 ```
 
@@ -113,6 +119,8 @@ TUI create flow:
 - `Enter` to open the new session head
 - `n` again to add a todo with optional notes inside the session view
 - `e` on the selected todo to edit title and notes in the same modal
+- `d` on the selected live todo to open a delete confirmation
+- `D` in overview or a live session to open a session delete confirmation
 
 ## Known Issues / Follow-Ups
 
