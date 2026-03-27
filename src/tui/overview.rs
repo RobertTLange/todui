@@ -557,6 +557,14 @@ mod tests {
         );
 
         let exit = screen
+            .handle_key(&mut database, key(KeyCode::Right))
+            .unwrap();
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession(String::from("writing-sprint")))
+        );
+
+        let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert_eq!(
