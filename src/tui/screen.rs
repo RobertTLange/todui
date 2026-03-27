@@ -129,6 +129,7 @@ struct TodoEditorState {
     mode: TodoEditorMode,
     title: String,
     notes: String,
+    repo: String,
     focused_field: EditorField,
     error: Option<String>,
 }
@@ -374,7 +375,8 @@ impl SessionScreen {
             KeyCode::Tab => {
                 self.todo_editor.focused_field = match self.todo_editor.focused_field {
                     EditorField::Primary => EditorField::Secondary,
-                    EditorField::Secondary => EditorField::Primary,
+                    EditorField::Secondary => EditorField::Tertiary,
+                    EditorField::Tertiary => EditorField::Primary,
                 };
                 Ok(None)
             }
@@ -773,14 +775,17 @@ impl SessionScreen {
 
     fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
         let text = if let Some(todo) = self.current_todo() {
+            let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
             format!(
-                "title: {}\nstatus: {}\nnotes: {}\ncreated: {}\nupdated: {}\ncompleted: {}\nid: {}",
+                "title: {}\nstatus: {}\nrepo: {}\nrepo source: {}\nnotes: {}\ncreated: {}\nupdated: {}\ncompleted: {}\nid: {}",
                 todo.title,
                 if todo.status == TodoStatus::Done {
                     "done"
                 } else {
                     "open"
                 },
+                effective_repo.unwrap_or_else(|| String::from("-")),
+                repo_source,
                 if todo.notes.trim().is_empty() {
                     "-"
                 } else {
@@ -835,6 +840,8 @@ impl SessionScreen {
                 primary_value: &self.todo_editor.title,
                 secondary_label: Some("Notes"),
                 secondary_value: Some(&self.todo_editor.notes),
+                tertiary_label: Some("Repo"),
+                tertiary_value: Some(&self.todo_editor.repo),
                 focused_field: self.todo_editor.focused_field,
                 error: self.todo_editor.error.as_deref(),
                 footer_hint: self.todo_editor_footer_hint(),
@@ -1086,16 +1093,21 @@ impl SessionScreen {
             return;
         }
 
-        let Some((todo_id, title, notes)) = self
-            .current_todo()
-            .map(|todo| (todo.todo_id, todo.title.clone(), todo.notes.clone()))
-        else {
+        let Some((todo_id, title, notes, repo)) = self.current_todo().map(|todo| {
+            (
+                todo.todo_id,
+                todo.title.clone(),
+                todo.notes.clone(),
+                todo.repo.clone().unwrap_or_default(),
+            )
+        }) else {
             return;
         };
         self.todo_editor = TodoEditorState {
             mode: TodoEditorMode::Edit { todo_id },
             title,
             notes,
+            repo,
             focused_field: EditorField::Primary,
             error: None,
         };
@@ -1155,6 +1167,7 @@ impl SessionScreen {
                 &self.session_slug,
                 title,
                 self.todo_editor.notes.trim(),
+                Some(self.todo_editor.repo.as_str()),
                 now_utc_timestamp(),
             ),
             TodoEditorMode::Edit { todo_id } => database.update_todo(
@@ -1162,6 +1175,7 @@ impl SessionScreen {
                 Some(&self.session_slug),
                 title,
                 self.todo_editor.notes.trim(),
+                Some(self.todo_editor.repo.as_str()),
                 now_utc_timestamp(),
             ),
         };
@@ -1189,6 +1203,7 @@ impl SessionScreen {
         match self.todo_editor.focused_field {
             EditorField::Primary => &mut self.todo_editor.title,
             EditorField::Secondary => &mut self.todo_editor.notes,
+            EditorField::Tertiary => &mut self.todo_editor.repo,
         }
     }
 
@@ -1203,6 +1218,16 @@ impl SessionScreen {
         match self.todo_editor.mode {
             TodoEditorMode::Create => "Tab next field  Enter create  Esc cancel",
             TodoEditorMode::Edit { .. } => "Tab next field  Enter save  Esc cancel",
+        }
+    }
+
+    fn current_todo_repo_details(&self, todo: &RevisionTodo) -> (Option<String>, &'static str) {
+        if let Some(repo) = todo.repo.as_ref() {
+            (Some(repo.clone()), "todo")
+        } else if let Some(repo) = self.snapshot().session.repo.as_ref() {
+            (Some(repo.clone()), "session")
+        } else {
+            (None, "-")
         }
     }
 }
@@ -1334,6 +1359,12 @@ mod tests {
                 .handle_key(&mut database, key(KeyCode::Char(character)))
                 .unwrap();
         }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "@SakanaAI/todui-keymove".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
@@ -1345,6 +1376,10 @@ mod tests {
         assert_eq!(
             screen.current_todo().expect("selected").notes,
             "include notes"
+        );
+        assert_eq!(
+            screen.current_todo().expect("selected").repo.as_deref(),
+            Some("sakanaai/todui-keymove")
         );
 
         screen
@@ -1408,11 +1443,21 @@ mod tests {
                 .handle_key(&mut database, key(KeyCode::Char(character)))
                 .unwrap();
         }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "https://github.com/RobLange3/todui".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert_eq!(screen.snapshot().todos[0].title, "Draft polished spec");
         assert_eq!(screen.snapshot().todos[0].notes, "cover db and tui");
+        assert_eq!(
+            screen.snapshot().todos[0].repo.as_deref(),
+            Some("roblange3/todui")
+        );
 
         assert_eq!(
             screen
@@ -1467,7 +1512,7 @@ mod tests {
 
         for title in ["Open 1", "Open 2", "Open 3", "Done 1", "Done 2", "Done 3"] {
             let todo = database
-                .add_todo(&screen.session_slug, title, "", now)
+                .add_todo(&screen.session_slug, title, "", None, now)
                 .expect("todo");
             if title.starts_with("Done") {
                 now += 10;
@@ -1810,7 +1855,13 @@ mod tests {
         let mut external = Database::open(&database_path).expect("external database");
 
         external
-            .add_todo(&screen.session_slug, "Ship live refresh", "", 1_711_275_900)
+            .add_todo(
+                &screen.session_slug,
+                "Ship live refresh",
+                "",
+                None,
+                1_711_275_900,
+            )
             .expect("external todo");
         screen.handle_tick(&mut database).expect("tick");
 
@@ -1839,6 +1890,7 @@ mod tests {
                 &screen.session_slug,
                 "Should stay hidden",
                 "",
+                None,
                 1_711_275_900,
             )
             .expect("external todo");
@@ -1861,7 +1913,7 @@ mod tests {
         let mut external = Database::open(&database_path).expect("external database");
 
         external
-            .create_session("Reading Sprint", None, None, 1_711_275_900)
+            .create_session("Reading Sprint", None, None, None, 1_711_275_900)
             .expect("external session");
         screen.handle_tick(&mut database).expect("tick");
 
@@ -2079,13 +2131,13 @@ mod tests {
         let (directory, mut database) = Database::open_temp().expect("database");
         let database_path = directory.path().join("todui.db");
         let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&session.slug, "Draft spec", "cover db", 1_711_275_700)
+            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
         database
-            .add_todo(&session.slug, "Review bindings", "", 1_711_275_800)
+            .add_todo(&session.slug, "Review bindings", "", None, 1_711_275_800)
             .expect("todo");
 
         let mut screen = SessionScreen::new(session.slug, None, Config::default());

@@ -461,6 +461,7 @@ mod tests {
             todo_id,
             title: format!("todo-{todo_id}"),
             notes: String::new(),
+            repo: None,
             status,
             position,
             created_at,
