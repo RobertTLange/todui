@@ -229,7 +229,7 @@ impl SessionScreen {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Ok(Some(SessionExit::Quit)),
-            KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
+            KeyCode::Left | KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
             KeyCode::Char('?') => {
                 self.overlay = Some(Overlay::Help);
                 Ok(None)
@@ -785,17 +785,17 @@ impl SessionScreen {
 
     fn footer(&self, layout_mode: LayoutMode) -> Paragraph<'static> {
         let text = if self.is_read_only() {
-            "j/k move  H history  r return to head  o overview  q quit"
+            "j/k move  H history  r return to head  Left/o overview  q quit"
         } else {
             match layout_mode {
                 LayoutMode::Wide => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  H history  p pomodoro  Left/o overview  q quit"
                 }
                 LayoutMode::Medium => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Tab drawer  H history  p pomodoro  Left/o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Enter details  H history  p pomodoro  Left/o overview  q quit"
                 }
             }
         };
@@ -806,7 +806,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1432,6 +1432,27 @@ mod tests {
     }
 
     #[test]
+    fn screen_left_arrow_returns_to_overview_without_overriding_overlays() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        assert_eq!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap(),
+            Some(SessionExit::Overview)
+        );
+
+        screen.overlay = Some(Overlay::Help);
+        assert!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(screen.overlay, Some(Overlay::Help)));
+    }
+
+    #[test]
     fn screen_handles_mouse_history_and_pomodoro_controls() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let area = Rect::new(0, 0, 120, 24);
@@ -1660,7 +1681,7 @@ mod tests {
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Todos"));
         assert!(wide.contains("e edit"));
-        assert!(wide.contains("o overview"));
+        assert!(wide.contains("Left/o overview"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
@@ -1677,7 +1698,7 @@ mod tests {
         screen.overlay = Some(Overlay::Help);
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
-        assert!(help.contains("Overview: o"));
+        assert!(help.contains("Overview: Left or o"));
 
         screen.overlay = Some(Overlay::TodoEditor);
         let editor = render_buffer(&screen, 120, 24);
