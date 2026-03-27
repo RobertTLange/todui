@@ -1,4 +1,4 @@
-use std::io::{Stdout, stdout};
+use std::io::{Stdout, Write, stdout};
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -27,5 +27,11 @@ pub fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    Ok(())
+}
+
+pub fn ring_terminal(terminal: &mut AppTerminal) -> Result<()> {
+    terminal.backend_mut().write_all(b"\x07")?;
+    terminal.backend_mut().flush()?;
     Ok(())
 }

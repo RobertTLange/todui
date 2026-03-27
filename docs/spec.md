@@ -1198,6 +1198,7 @@ accent = "cyan"
 focus_minutes = 25
 short_break_minutes = 5
 long_break_minutes = 15
+notify_on_complete = true
 
 [keys]
 up = ["up", "k"]
@@ -1209,6 +1210,7 @@ pomodoro = ["p"]
 v1 only needs:
 	•	theme mode
 	•	Pomodoro durations
+	•	optional Pomodoro completion bell toggle
 	•	optional key overrides
 
 25. Testing plan
