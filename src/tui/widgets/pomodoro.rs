@@ -4,19 +4,14 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::domain::pomodoro::{PomodoroRun, PomodoroState, progress_ratio, remaining_seconds};
 use crate::tui::theme::{SurfaceTone, TextTone, Theme};
 
-const FOOTER_LINES: u16 = 3;
+const FOOTER_LINES: u16 = 2;
 
 pub fn active_footer_height() -> u16 {
     FOOTER_LINES + 2
 }
 
-pub fn active_footer(
-    theme: &Theme,
-    run: &PomodoroRun,
-    linked_title: Option<&str>,
-    now: i64,
-) -> Paragraph<'static> {
-    Paragraph::new(active_footer_lines(theme, run, linked_title, now))
+pub fn active_footer(theme: &Theme, run: &PomodoroRun, now: i64) -> Paragraph<'static> {
+    Paragraph::new(active_footer_lines(theme, run, now))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -28,19 +23,10 @@ pub fn active_footer(
         .style(theme.surface_style(SurfaceTone::Neutral))
 }
 
-fn active_footer_lines(
-    theme: &Theme,
-    run: &PomodoroRun,
-    linked_title: Option<&str>,
-    now: i64,
-) -> Vec<Line<'static>> {
+fn active_footer_lines(theme: &Theme, run: &PomodoroRun, now: i64) -> Vec<Line<'static>> {
     vec![
         Line::styled(status_line(run, now), theme.text_style(TextTone::Focus)),
         Line::styled(progress_bar(run, now), theme.text_style(TextTone::Focus)),
-        Line::styled(
-            format!("Linked: {}", linked_title.unwrap_or("No linked todo")),
-            theme.text_style(TextTone::Meta),
-        ),
     ]
 }
 

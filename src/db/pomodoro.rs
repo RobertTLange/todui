@@ -19,44 +19,24 @@ impl Database {
             .map_err(AppError::from)
     }
 
-    pub fn get_active_pomodoro_with_link(&self) -> Result<Option<(PomodoroRun, Option<String>)>> {
-        self.connection
-            .query_row(
-                "SELECT runs.id, runs.session_id, runs.todo_id, runs.kind, runs.state, runs.planned_seconds, runs.started_at, runs.paused_at, runs.accumulated_pause, runs.ended_at, runs.updated_at,
-                        todos.title
-                 FROM pomodoro_runs runs
-                 LEFT JOIN todos ON todos.id = runs.todo_id
-                 WHERE runs.state IN ('running', 'paused')
-                 LIMIT 1",
-                [],
-                |row| Ok((map_pomodoro_run(row)?, row.get(11)?)),
-            )
-            .optional()
-            .map_err(AppError::from)
-    }
-
     pub fn start_pomodoro(
         &mut self,
-        todo_id: Option<i64>,
         kind: PomodoroKind,
         planned_seconds: i64,
         now: i64,
     ) -> Result<PomodoroRun> {
         let transaction = self.connection.transaction()?;
-        if let Some(todo_id) = todo_id {
-            transaction
-                .query_row("SELECT id FROM todos WHERE id = ?1", [todo_id], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .optional()?
-                .ok_or(AppError::TodoNotFound(todo_id))?;
-        }
-
         let insert = transaction.execute(
             "INSERT INTO pomodoro_runs (
                 session_id, todo_id, kind, state, planned_seconds, started_at, paused_at, accumulated_pause, ended_at, updated_at
              ) VALUES (?1, ?2, ?3, 'running', ?4, ?5, NULL, 0, NULL, ?5)",
-            params![Option::<i64>::None, todo_id, kind.as_str(), planned_seconds, now],
+            params![
+                Option::<i64>::None,
+                Option::<i64>::None,
+                kind.as_str(),
+                planned_seconds,
+                now
+            ],
         );
         match insert {
             Ok(_) => {}
@@ -183,9 +163,9 @@ mod tests {
             .expect("session");
 
         let run = database
-            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_700)
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_700)
             .expect("run");
-        let second = database.start_pomodoro(None, PomodoroKind::ShortBreak, 300, 1_711_275_701);
+        let second = database.start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_701);
         assert!(second.is_err());
 
         let paused = database
@@ -207,33 +187,11 @@ mod tests {
         let (_directory, mut database) = Database::open_temp().expect("database");
 
         let run = database
-            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_700)
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_700)
             .expect("run");
 
         assert_eq!(run.session_id, None);
         assert_eq!(run.todo_id, None);
         assert_eq!(run.state, PomodoroState::Running);
-    }
-
-    #[test]
-    fn reads_active_pomodoro_with_optional_linked_title() {
-        let (_directory, mut database) = Database::open_temp().expect("database");
-        let session = database
-            .create_session("Writing Sprint", None, None, 1_711_275_600)
-            .expect("session");
-        let todo = database
-            .add_todo(&session.slug, "Draft spec", "", 1_711_275_700)
-            .expect("todo");
-        let run = database
-            .start_pomodoro(Some(todo.id), PomodoroKind::Focus, 1_500, 1_711_275_750)
-            .expect("run");
-
-        let active = database
-            .get_active_pomodoro_with_link()
-            .expect("active")
-            .expect("run");
-
-        assert_eq!(active.0.id, run.id);
-        assert_eq!(active.1.as_deref(), Some("Draft spec"));
     }
 }

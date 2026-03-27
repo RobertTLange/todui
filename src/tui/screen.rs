@@ -149,7 +149,6 @@ struct SessionScreen {
     snapshot: Option<SessionSnapshot>,
     revisions: Vec<RevisionSummary>,
     active_run: Option<PomodoroRun>,
-    active_run_title: Option<String>,
     head_token: Option<SessionHeadToken>,
     selected_index: usize,
     open_scroll_offset: usize,
@@ -172,7 +171,6 @@ impl SessionScreen {
             snapshot: None,
             revisions: Vec::new(),
             active_run: None,
-            active_run_title: None,
             head_token: None,
             selected_index: 0,
             open_scroll_offset: 0,
@@ -194,13 +192,8 @@ impl SessionScreen {
         self.revisions = database.list_revisions(&self.session_slug)?;
         if self.is_read_only_snapshot(&snapshot) {
             self.active_run = None;
-            self.active_run_title = None;
-        } else if let Some((run, title)) = database.get_active_pomodoro_with_link()? {
-            self.active_run = Some(run);
-            self.active_run_title = title;
         } else {
-            self.active_run = None;
-            self.active_run_title = None;
+            self.active_run = database.get_active_pomodoro()?;
         }
         self.head_token = Some(database.session_head_token(&self.session_slug)?);
         self.snapshot = Some(snapshot);
@@ -607,9 +600,7 @@ impl SessionScreen {
                 _ => {}
             }
         } else {
-            let todo_id = self.current_todo().map(|todo| todo.todo_id);
             database.start_pomodoro(
-                todo_id,
                 kind,
                 pomodoro_seconds(&self.config, kind),
                 now_utc_timestamp(),
@@ -670,12 +661,7 @@ impl SessionScreen {
             && let Some(run) = self.active_run.as_ref()
         {
             frame.render_widget(
-                active_footer(
-                    &self.theme,
-                    run,
-                    self.active_run_title.as_deref(),
-                    now_utc_timestamp(),
-                ),
+                active_footer(&self.theme, run, now_utc_timestamp()),
                 footer_area,
             );
         }
@@ -1669,6 +1655,7 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('p')))
             .unwrap();
         assert!(screen.active_run.is_some());
+        assert_eq!(screen.active_run.as_ref().unwrap().todo_id, None);
 
         screen
             .handle_key(&mut database, key(KeyCode::Char('p')))
@@ -1774,7 +1761,7 @@ mod tests {
     fn screen_tick_completes_timer_and_toast_expires() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
-            .start_pomodoro(None, PomodoroKind::Focus, 1, 0)
+            .start_pomodoro(PomodoroKind::Focus, 1, 0)
             .expect("run");
         database.complete_pomodoro(run.id, 1).expect("complete");
         screen.reload(&database).unwrap();
@@ -1800,7 +1787,7 @@ mod tests {
         screen.config.pomodoro.notify_on_complete = false;
 
         let run = database
-            .start_pomodoro(None, PomodoroKind::ShortBreak, 1, 0)
+            .start_pomodoro(PomodoroKind::ShortBreak, 1, 0)
             .expect("run");
         database.complete_pomodoro(run.id, 1).expect("complete");
         screen.reload(&database).unwrap();
@@ -1958,13 +1945,14 @@ mod tests {
     fn active_footer_renders_in_narrow_session_layout() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
-            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
             .expect("run");
         screen.reload(&database).expect("reload");
 
         let tiny = render_buffer(&screen, 49, 24);
         assert!(tiny.contains("Pomodoro"));
         assert!(tiny.contains("FOCUS"));
+        assert!(!tiny.contains("Linked:"));
     }
 
     #[test]
@@ -2000,14 +1988,15 @@ mod tests {
     fn active_focus_footer_renders_without_session_link() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
-            .start_pomodoro(None, PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
             .expect("run");
         screen.reload(&database).expect("reload");
 
         let rendered = render_buffer(&screen, 120, 24);
         assert!(rendered.contains("Pomodoro"));
         assert!(rendered.contains("FOCUS"));
-        assert!(rendered.contains("No linked todo"));
+        assert!(!rendered.contains("Linked:"));
+        assert!(!rendered.contains("No linked todo"));
         assert_eq!(
             screen.active_run.as_ref().map(|active| active.id),
             Some(run.id)
@@ -2018,7 +2007,7 @@ mod tests {
     fn active_break_footer_renders_in_session_view() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
-            .start_pomodoro(None, PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
             .expect("run");
         screen.reload(&database).expect("reload");
 

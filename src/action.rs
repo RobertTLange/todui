@@ -42,7 +42,6 @@ pub enum Action {
     },
     StartPomodoro {
         kind: crate::domain::pomodoro::PomodoroKind,
-        todo_id: Option<i64>,
     },
     PausePomodoro,
     ResumePomodoro,
