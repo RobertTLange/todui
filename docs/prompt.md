@@ -74,7 +74,7 @@ Source spec: [spec.md](spec.md)
   - `todui undone <todo-id> [--session <session>]`
   - `todui resume [<session>] [--revision <n>]`
   - `todui export md [<session>] [--revision <n>] [--output <file>] [--format gfm|plain] [--timestamps full|compact|none] [--include-notes] [--open-only]`
-- TUI session view with top bar, todo list, detail pane, footer, overlays/modals, timestamps, semantic theme tokens, keyboard + mouse support.
+- TUI session view with top bar, todo list, details overlay, footer, overlays/modals, timestamps, semantic theme tokens, keyboard + mouse support.
 - Revision history overlay and read-only historical revision mode.
 - Pomodoro card inside session view with start/pause/resume/cancel and summary behavior in historical mode.
 - Markdown export for head and historical revisions.

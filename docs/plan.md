@@ -123,7 +123,7 @@ Scope:
 
 - Implement bare `todui` overview flow that lists sessions and opens the selected session head.
 - Implement `todui resume` head flow.
-- Build top bar, list pane, detail pane, footer.
+- Build top bar, list pane, details overlay, footer.
 - Implement selection, keyboard navigation, Vim aliases, mouse row select, checkbox toggle hitbox.
 - Render timestamps and semantic styles.
 - Implement narrow-layout behavior.

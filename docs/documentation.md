@@ -125,6 +125,8 @@ TUI create flow:
 - `Enter` to open the new session head
 - `t` in overview to edit or clear the selected session tag
 - `n` again to add a todo with optional notes inside the session view
+- `i` or `Right` inside the session view to open the selected todo details
+- `Left` inside the session view to close details first, then return to the overview when no details box is open
 - `e` on the selected todo to edit title and notes in the same modal
 - `d` on the selected live todo to open a delete confirmation
 - `D` in overview or a live session to open a session delete confirmation
