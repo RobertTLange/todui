@@ -8,7 +8,10 @@ use crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table,
+    TableState, Wrap,
+};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -19,7 +22,7 @@ use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, Sessi
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
-use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
+use crate::timestamp::{format_full_local, format_month_day_local, now_utc_timestamp};
 use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
@@ -699,19 +702,37 @@ impl SessionScreen {
         }
     }
 
-    fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> List<'static> {
-        let visible_rows = height.saturating_sub(2).max(1) as usize;
-        let items = snapshot
+    fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> Table<'static> {
+        let visible_rows = height.saturating_sub(3).max(1) as usize;
+        let rows = snapshot
             .todos
             .iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(|todo| ListItem::new(todo_line(todo, self.current_session_run())))
+            .map(|todo| todo_table_row(todo, self.current_session_run()))
             .collect::<Vec<_>>();
 
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Todos"))
-            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+        Table::new(
+            rows,
+            [
+                Constraint::Length(3),
+                Constraint::Fill(1),
+                Constraint::Length(6),
+                Constraint::Length(11),
+            ],
+        )
+        .header(
+            Row::new([
+                Cell::from(""),
+                Cell::from("Title"),
+                Cell::from("Status"),
+                Cell::from("Last Update"),
+            ])
+            .style(self.theme.block_style().add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title("Todos"))
+        .column_spacing(1)
+        .row_highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
@@ -932,8 +953,8 @@ impl SessionScreen {
         }
     }
 
-    fn list_state(&self) -> ListState {
-        let mut state = ListState::default();
+    fn list_state(&self) -> TableState {
+        let mut state = TableState::default();
         state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
         state
     }
@@ -1105,11 +1126,11 @@ fn list_click_target(
 ) -> Option<ListClickTarget> {
     let inner_x = list_area.x.saturating_add(1);
     let inner_y = list_area.y.saturating_add(1);
-    if x < inner_x || y < inner_y || y >= list_area.bottom().saturating_sub(1) {
+    if x < inner_x || y <= inner_y || y >= list_area.bottom().saturating_sub(1) {
         return None;
     }
 
-    let row_index = scroll_offset + usize::from(y.saturating_sub(inner_y));
+    let row_index = scroll_offset + usize::from(y.saturating_sub(inner_y + 1));
     if x <= inner_x.saturating_add(2) {
         Some(ListClickTarget::Checkbox(row_index))
     } else {
@@ -1141,24 +1162,41 @@ fn linked_title(run: &PomodoroRun, snapshot: &SessionSnapshot) -> String {
         .unwrap_or_else(|| String::from("session-only"))
 }
 
-fn todo_line(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> String {
-    let marker = match todo.status {
+fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> Row<'static> {
+    Row::new([
+        Cell::from(todo_checkbox(todo)),
+        Cell::from(todo.title.clone()),
+        Cell::from(todo_status_label(todo, run)),
+        Cell::from(todo_time_label(todo)),
+    ])
+}
+
+fn todo_checkbox(todo: &RevisionTodo) -> &'static str {
+    match todo.status {
         TodoStatus::Open => "[ ]",
         TodoStatus::Done => "[x]",
-    };
-    let mut suffix = match todo.status {
-        TodoStatus::Open => format!("created {}", format_compact_local(todo.created_at)),
-        TodoStatus::Done => format!(
-            "done {}",
-            format_compact_local(todo.completed_at.unwrap_or(todo.updated_at))
-        ),
-    };
+    }
+}
+
+fn todo_status_label(todo: &RevisionTodo, run: Option<&PomodoroRun>) -> &'static str {
     if run.is_some_and(|active| {
         active.todo_id == Some(todo.todo_id) && matches!(active.kind, PomodoroKind::Focus)
     }) {
-        suffix = format!("FOCUS {suffix}");
+        "FOCUS"
+    } else {
+        match todo.status {
+            TodoStatus::Open => "open",
+            TodoStatus::Done => "done",
+        }
     }
-    format!("{marker} {}  {suffix}", todo.title)
+}
+
+fn todo_time_label(todo: &RevisionTodo) -> String {
+    let timestamp = match todo.status {
+        TodoStatus::Open => todo.created_at,
+        TodoStatus::Done => todo.completed_at.unwrap_or(todo.updated_at),
+    };
+    format_month_day_local(timestamp)
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -1201,7 +1239,7 @@ mod tests {
 
     use super::{
         ListClickTarget, Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding,
-        list_click_target, progress_bar,
+        list_click_target, progress_bar, todo_status_label, todo_time_label,
     };
     use crate::config::Config;
     use crate::db::Database;
@@ -1211,12 +1249,13 @@ mod tests {
     #[test]
     fn identifies_checkbox_and_row_click_targets() {
         let area = Rect::new(0, 0, 40, 10);
+        assert_eq!(list_click_target(area, 0, 1, 1), None);
         assert_eq!(
-            list_click_target(area, 0, 1, 1),
+            list_click_target(area, 0, 1, 2),
             Some(ListClickTarget::Checkbox(0))
         );
         assert_eq!(
-            list_click_target(area, 0, 6, 2),
+            list_click_target(area, 0, 6, 3),
             Some(ListClickTarget::Row(1))
         );
     }
@@ -1461,7 +1500,7 @@ mod tests {
             .handle_mouse(
                 &mut database,
                 area,
-                mouse(MouseEventKind::Down(MouseButton::Left), 6, 4),
+                mouse(MouseEventKind::Down(MouseButton::Left), 6, 5),
             )
             .unwrap();
         assert_eq!(screen.selected_index, 0);
@@ -1470,7 +1509,7 @@ mod tests {
             .handle_mouse(
                 &mut database,
                 area,
-                mouse(MouseEventKind::Down(MouseButton::Left), 1, 4),
+                mouse(MouseEventKind::Down(MouseButton::Left), 1, 5),
             )
             .unwrap();
         assert_eq!(
@@ -1677,6 +1716,8 @@ mod tests {
         let wide = render_buffer(&screen, 120, 24);
         assert!(wide.contains("Writing Sprint"));
         assert!(wide.contains("Pomodoro"));
+        assert!(wide.contains("Status"));
+        assert!(wide.contains("Last Update"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Todos"));
@@ -1711,6 +1752,30 @@ mod tests {
         });
         let toast = render_buffer(&screen, 120, 24);
         assert!(toast.contains("Notice"));
+    }
+
+    #[test]
+    fn todo_row_retains_stateful_timestamp_semantics() {
+        let (_directory, _database, screen) = seeded_screen();
+        let open = &screen.snapshot().todos[0];
+
+        assert_eq!(todo_status_label(open, None), "open");
+        assert_eq!(
+            todo_time_label(open),
+            crate::timestamp::format_month_day_local(open.created_at)
+        );
+
+        let open_time = screen.snapshot().todos[1].created_at;
+        let done = crate::domain::revision::RevisionTodo {
+            status: crate::domain::todo::TodoStatus::Done,
+            completed_at: Some(open_time + 60),
+            ..screen.snapshot().todos[1].clone()
+        };
+        assert_eq!(todo_status_label(&done, None), "done");
+        assert_eq!(
+            todo_time_label(&done),
+            crate::timestamp::format_month_day_local(open_time + 60)
+        );
     }
 
     fn seeded_screen() -> (tempfile::TempDir, Database, SessionScreen) {
