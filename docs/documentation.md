@@ -52,6 +52,7 @@ Primary references:
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
   - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name, and `n` in a live session creates a todo with title + notes
+  - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
 
 ## How To Run + Demo
 
@@ -78,6 +79,7 @@ target/debug/todui
 target/debug/todui session history writing-sprint
 target/debug/todui resume writing-sprint
 target/debug/todui resume writing-sprint --revision 1
+target/debug/todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
 target/debug/todui export md writing-sprint --revision 1 --timestamps full --include-notes
 ```
 
@@ -89,6 +91,7 @@ todui add "Draft design spec" --session writing-sprint
 todui
 todui resume writing-sprint
 todui session history writing-sprint
+todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
 todui export md writing-sprint --format gfm
 ```
 
@@ -109,8 +112,9 @@ TUI create flow:
 - `n` to create a session from the overview
 - `Enter` to open the new session head
 - `n` again to add a todo with optional notes inside the session view
+- `e` on the selected todo to edit title and notes in the same modal
 
 ## Known Issues / Follow-Ups
 
 - No open blockers against [plan.md](plan.md).
-- Follow-up space, if wanted later: reuse the same modal path for in-TUI todo editing (`e`) and add more render snapshot coverage around modal focus/cursor behavior.
+- Follow-up space, if wanted later: add deeper render/input coverage around modal focus movement, cancel paths, and no-op edits.
