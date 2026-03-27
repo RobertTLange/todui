@@ -6,7 +6,6 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -22,7 +21,7 @@ use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 use crate::tui::widgets::todo_list::{
     GroupedTodos, TodoClickTarget, TodoSection, section_state, section_visible_rows,
@@ -116,6 +115,14 @@ enum Overlay {
 struct ToastState {
     message: String,
     expires_at: Instant,
+    tone: ToastTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastTone {
+    Success,
+    Warning,
+    Danger,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -442,7 +449,7 @@ impl SessionScreen {
                         database.delete_todo(id, Some(&self.session_slug), now_utc_timestamp())?;
                         self.reload(database)?;
                         self.overlay = None;
-                        self.set_toast(String::from("Todo deleted"));
+                        self.set_toast(String::from("Todo deleted"), ToastTone::Danger);
                         Ok(None)
                     }
                     Some(Overlay::DeleteSession { slug, .. }) => {
@@ -537,7 +544,7 @@ impl SessionScreen {
             if self.config.pomodoro.notify_on_complete {
                 self.pending_completion_bell = true;
             }
-            self.set_toast(String::from("Pomodoro completed"));
+            self.set_toast(String::from("Pomodoro completed"), ToastTone::Success);
             self.reload(database)?;
         }
         Ok(())
@@ -560,7 +567,10 @@ impl SessionScreen {
             return Ok(());
         };
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return Ok(());
         }
 
@@ -579,12 +589,18 @@ impl SessionScreen {
 
     fn handle_pomodoro(&mut self, database: &mut Database, kind: PomodoroKind) -> Result<()> {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return Ok(());
         }
         if let Some(run) = self.active_run.clone() {
             if run.session_id != self.snapshot().session.id {
-                self.set_toast(String::from("Another session already has an active timer"));
+                self.set_toast(
+                    String::from("Another session already has an active timer"),
+                    ToastTone::Warning,
+                );
                 return Ok(());
             }
             match run.state {
@@ -611,7 +627,10 @@ impl SessionScreen {
 
     fn cancel_active_pomodoro(&mut self, database: &mut Database) -> Result<()> {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return Ok(());
         }
         if let Some(run) = self.current_session_run().cloned() {
@@ -626,10 +645,12 @@ impl SessionScreen {
         let layout = self.layout_for_area(frame.area());
         let grouped = self.grouped_todos();
         let list_areas = split_todo_list_area(layout.list);
+        frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
             todo_section_table(
                 "Open",
+                TodoSection::Open,
                 grouped.open(),
                 self.open_scroll_offset,
                 section_visible_rows(list_areas.open),
@@ -642,6 +663,7 @@ impl SessionScreen {
         frame.render_stateful_widget(
             todo_section_table(
                 "Completed",
+                TodoSection::Completed,
                 grouped.completed(),
                 self.completed_scroll_offset,
                 section_visible_rows(list_areas.completed),
@@ -688,13 +710,32 @@ impl SessionScreen {
         if let Some(toast) = &self.toast {
             let area = centered_rect(frame.area(), 50, 3);
             frame.render_widget(Clear, area);
+            let surface_tone = match toast.tone {
+                ToastTone::Success => SurfaceTone::Overlay,
+                ToastTone::Warning => SurfaceTone::Notice,
+                ToastTone::Danger => SurfaceTone::Danger,
+            };
+            let text_tone = match toast.tone {
+                ToastTone::Success => TextTone::Focus,
+                ToastTone::Warning => TextTone::Warning,
+                ToastTone::Danger => TextTone::Danger,
+            };
             frame.render_widget(
                 Paragraph::new(toast.message.clone())
-                    .block(Block::default().borders(Borders::ALL).title("Notice"))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Notice")
+                            .style(self.theme.surface_style(surface_tone))
+                            .border_style(self.theme.surface_border_style(surface_tone))
+                            .title_style(self.theme.surface_title_style(surface_tone)),
+                    )
                     .style(
-                        Style::default()
-                            .fg(self.theme.fg_warning)
-                            .bg(self.theme.bg_overlay),
+                        self.theme.surface_style(surface_tone).fg(self
+                            .theme
+                            .text_style(text_tone)
+                            .fg
+                            .unwrap_or(self.theme.fg_default)),
                     ),
                 area,
             );
@@ -710,23 +751,41 @@ impl SessionScreen {
             snapshot.session.name, snapshot.session.slug
         ))];
         if self.is_read_only() {
-            lines.push(Line::from(format!(
-                "Viewing session {} @ r{} — {} — read-only",
-                snapshot.session.slug,
-                snapshot.revision.revision_number,
-                format_full_local(snapshot.revision.created_at)
-            )));
+            lines.push(Line::styled(
+                format!(
+                    "Viewing session {} @ r{} — {} — read-only",
+                    snapshot.session.slug,
+                    snapshot.revision.revision_number,
+                    format_full_local(snapshot.revision.created_at)
+                ),
+                self.theme.text_style(TextTone::Danger),
+            ));
         } else if let Some(run) = self.current_session_run() {
-            lines.push(Line::from(format!(
-                "{} · {} remaining",
-                run.kind.label(),
-                format_duration(remaining_seconds(run, now_utc_timestamp()))
-            )));
+            let tone = if matches!(run.kind, PomodoroKind::Focus) {
+                TextTone::Focus
+            } else {
+                TextTone::Break
+            };
+            lines.push(Line::styled(
+                format!(
+                    "{} · {} remaining",
+                    run.kind.label(),
+                    format_duration(remaining_seconds(run, now_utc_timestamp()))
+                ),
+                self.theme.text_style(tone),
+            ));
         }
 
         Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Session"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Session")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn top_bar_height(&self) -> u16 {
@@ -773,8 +832,15 @@ impl SessionScreen {
 
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Details"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Details")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn pomodoro_panel_height(&self, snapshot: &SessionSnapshot) -> u16 {
@@ -785,41 +851,83 @@ impl SessionScreen {
         let run = self.current_session_run();
         let mut lines = Vec::new();
         if self.is_read_only() {
-            lines.push(Line::from(format!(
-                "Focus runs up to this revision: {}",
-                self.pomodoro_summary.completed_focus_runs
-            )));
-            lines.push(Line::from(format!(
-                "Total focus time: {}",
-                format_duration(self.pomodoro_summary.total_focus_seconds)
-            )));
+            lines.push(Line::styled(
+                format!(
+                    "Focus runs up to this revision: {}",
+                    self.pomodoro_summary.completed_focus_runs
+                ),
+                self.theme.text_style(TextTone::Muted),
+            ));
+            lines.push(Line::styled(
+                format!(
+                    "Total focus time: {}",
+                    format_duration(self.pomodoro_summary.total_focus_seconds)
+                ),
+                self.theme.text_style(TextTone::Meta),
+            ));
         } else if let Some(run) = run {
-            lines.push(Line::from(format!(
-                "{} · {} remaining",
-                run.kind.label(),
-                format_duration(remaining_seconds(run, now_utc_timestamp()))
-            )));
-            lines.push(Line::from(progress_bar(run, now_utc_timestamp())));
-            lines.push(Line::from(format!(
-                "Linked: {}",
-                linked_title(run, snapshot)
-            )));
-            lines.push(Line::from("[p pause/resume] [c cancel]"));
+            let tone = if matches!(run.kind, PomodoroKind::Focus) {
+                TextTone::Focus
+            } else {
+                TextTone::Break
+            };
+            lines.push(Line::styled(
+                format!(
+                    "{} · {} remaining",
+                    run.kind.label(),
+                    format_duration(remaining_seconds(run, now_utc_timestamp()))
+                ),
+                self.theme.text_style(tone),
+            ));
+            lines.push(Line::styled(
+                progress_bar(run, now_utc_timestamp()),
+                self.theme.text_style(tone),
+            ));
+            lines.push(Line::styled(
+                format!("Linked: {}", linked_title(run, snapshot)),
+                self.theme.text_style(TextTone::Meta),
+            ));
+            lines.push(Line::styled(
+                "[p pause/resume] [c cancel]",
+                self.theme.text_style(TextTone::Muted),
+            ));
         } else if self.active_run.is_some() {
-            lines.push(Line::from("Another session has an active timer"));
+            lines.push(Line::styled(
+                "Another session has an active timer",
+                self.theme.text_style(TextTone::Warning),
+            ));
         } else {
-            lines.push(Line::from("No active run"));
-            lines.push(Line::from("[p focus] [b short break] [B long break]"));
+            lines.push(Line::styled(
+                "No active run",
+                self.theme.text_style(TextTone::Muted),
+            ));
+            lines.push(Line::styled(
+                "[p focus] [b short break] [B long break]",
+                self.theme.text_style(TextTone::Meta),
+            ));
         }
         lines
     }
 
     fn pomodoro_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
         let _ = Gauge::default();
+        let tone = match self.current_session_run().map(|run| run.kind) {
+            Some(PomodoroKind::Focus) => SurfaceTone::Focus,
+            Some(PomodoroKind::ShortBreak | PomodoroKind::LongBreak) => SurfaceTone::Break,
+            None if self.active_run.is_some() => SurfaceTone::Notice,
+            None => SurfaceTone::Focus,
+        };
 
         Paragraph::new(self.pomodoro_lines(snapshot))
-            .block(Block::default().borders(Borders::ALL).title("Pomodoro"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Pomodoro")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(tone))
+                    .title_style(self.theme.surface_title_style(tone)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn help_overlay(&self) -> Paragraph<'static> {
@@ -827,8 +935,15 @@ impl SessionScreen {
             "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Help"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Help")
+                .style(self.theme.surface_style(SurfaceTone::Overlay))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
     fn todo_editor_modal(&self) -> Paragraph<'_> {
@@ -852,8 +967,15 @@ impl SessionScreen {
             "Delete todo?\n\n{title}\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Delete Todo"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Delete Todo")
+                .style(self.theme.surface_style(SurfaceTone::Danger))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Danger))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Danger)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
     fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
@@ -861,8 +983,15 @@ impl SessionScreen {
             "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Delete Session")
+                .style(self.theme.surface_style(SurfaceTone::Danger))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Danger))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Danger)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
     fn history_overlay(&self) -> List<'static> {
@@ -881,8 +1010,15 @@ impl SessionScreen {
             })
             .collect::<Vec<_>>();
         List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("History"))
-            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("History")
+                    .style(self.theme.surface_style(SurfaceTone::Overlay))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::History))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::History)),
+            )
+            .highlight_style(self.theme.selection_style(SelectionTone::History))
     }
 
     fn current_todo(&self) -> Option<&RevisionTodo> {
@@ -1019,10 +1155,11 @@ impl SessionScreen {
         state
     }
 
-    fn set_toast(&mut self, message: String) {
+    fn set_toast(&mut self, message: String, tone: ToastTone) {
         self.toast = Some(ToastState {
             message,
             expires_at: Instant::now() + Duration::from_secs(2),
+            tone,
         });
     }
 
@@ -1044,7 +1181,10 @@ impl SessionScreen {
 
     fn open_todo_editor(&mut self) {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return;
         }
         self.todo_editor = TodoEditorState {
@@ -1057,7 +1197,10 @@ impl SessionScreen {
 
     fn open_selected_todo_editor(&mut self) {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return;
         }
 
@@ -1079,7 +1222,10 @@ impl SessionScreen {
 
     fn open_delete_todo(&mut self) {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return;
         }
         let Some(todo) = self.current_todo() else {
@@ -1093,7 +1239,10 @@ impl SessionScreen {
 
     fn open_delete_session(&mut self) {
         if self.is_read_only() {
-            self.set_toast(String::from("Historical revisions are read-only"));
+            self.set_toast(
+                String::from("Historical revisions are read-only"),
+                ToastTone::Warning,
+            );
             return;
         }
         let session = &self.snapshot().session;
@@ -1150,7 +1299,7 @@ impl SessionScreen {
             TodoEditorMode::Edit { .. } => String::from("Todo updated"),
         };
         self.close_todo_editor();
-        self.set_toast(toast);
+        self.set_toast(toast, ToastTone::Success);
         Ok(())
     }
 
@@ -1936,6 +2085,7 @@ mod tests {
         screen.toast = Some(super::ToastState {
             message: String::from("hello"),
             expires_at: Instant::now() + Duration::from_secs(1),
+            tone: super::ToastTone::Warning,
         });
         let toast = render_buffer(&screen, 120, 24);
         assert!(toast.contains("Notice"));
