@@ -1,6 +1,10 @@
-pub const LATEST_USER_VERSION: i32 = 1;
+use rusqlite::Connection;
 
-pub const MIGRATION_SQL: &str = r#"
+use crate::error::Result;
+
+pub const LATEST_USER_VERSION: i32 = 2;
+
+const MIGRATION_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
   id                INTEGER PRIMARY KEY,
   slug              TEXT NOT NULL UNIQUE,
@@ -80,3 +84,21 @@ CREATE TABLE IF NOT EXISTS app_state (
   value             TEXT NOT NULL
 ) STRICT;
 "#;
+
+const MIGRATION_V2_SQL: &str = r#"
+ALTER TABLE sessions ADD COLUMN tag TEXT;
+ALTER TABLE session_revisions ADD COLUMN session_tag TEXT;
+"#;
+
+pub fn apply(connection: &Connection, current_version: i32) -> Result<()> {
+    if current_version < 1 {
+        connection.execute_batch(MIGRATION_V1_SQL)?;
+        connection.pragma_update(None, "user_version", 1)?;
+    }
+    if current_version < 2 {
+        connection.execute_batch(MIGRATION_V2_SQL)?;
+        connection.pragma_update(None, "user_version", 2)?;
+    }
+
+    Ok(())
+}

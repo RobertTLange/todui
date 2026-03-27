@@ -77,14 +77,39 @@ struct OverviewScreen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverviewOverlay {
-    SessionEditor,
+    SessionEditor(SessionEditorMode),
     DeleteSession { slug: String, name: String },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEditorMode {
+    Create,
+    EditTag { slug: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionEditorState {
     name: String,
+    tag: String,
+    focused_field: EditorField,
     error: Option<String>,
+}
+
+impl Default for SessionEditorState {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            tag: String::new(),
+            focused_field: EditorField::Primary,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverviewListRow {
+    label: String,
+    session_index: Option<usize>,
 }
 
 impl OverviewScreen {
@@ -118,7 +143,7 @@ impl OverviewScreen {
         }
 
         match self.overlay {
-            Some(OverviewOverlay::SessionEditor) => {
+            Some(OverviewOverlay::SessionEditor(_)) => {
                 return self.handle_session_editor_key(database, key);
             }
             Some(OverviewOverlay::DeleteSession { .. }) => {
@@ -131,6 +156,10 @@ impl OverviewScreen {
             KeyCode::Char('q') | KeyCode::Esc => Some(OverviewExit::Quit),
             KeyCode::Char('n') => {
                 self.open_session_editor();
+                None
+            }
+            KeyCode::Char('t') => {
+                self.open_tag_editor();
                 None
             }
             KeyCode::Char('D') => {
@@ -188,14 +217,26 @@ impl OverviewScreen {
                 self.close_session_editor();
                 Ok(None)
             }
+            KeyCode::Tab => {
+                if matches!(
+                    self.overlay,
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+                ) {
+                    self.session_editor.focused_field = match self.session_editor.focused_field {
+                        EditorField::Primary => EditorField::Secondary,
+                        EditorField::Secondary => EditorField::Primary,
+                    };
+                }
+                Ok(None)
+            }
             KeyCode::Enter => self.submit_session_editor(database),
             KeyCode::Backspace => {
-                self.session_editor.name.pop();
+                self.current_editor_field_mut().pop();
                 self.session_editor.error = None;
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.session_editor.name.push(character);
+                self.current_editor_field_mut().push(character);
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -236,8 +277,8 @@ impl OverviewScreen {
             MouseEventKind::ScrollDown => self.move_selection(1),
             MouseEventKind::Down(MouseButton::Left) => {
                 let list_area = self.list_area(self.last_area);
-                if let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
-                    && index < self.sessions.len()
+                let rows = self.list_rows();
+                if let Some(index) = list_row_index(list_area, &rows, self.scroll_offset, mouse.row)
                 {
                     self.selected_index = index;
                     self.ensure_selection_visible(self.visible_rows());
@@ -282,7 +323,7 @@ impl OverviewScreen {
 
         frame.render_widget(self.footer(), chunks[2]);
 
-        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor)) {
+        if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 54, 8);
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(), area);
@@ -314,12 +355,12 @@ impl OverviewScreen {
 
     fn session_list(&self, height: u16) -> List<'static> {
         let visible_rows = self.visible_rows_for_height(height);
-        let items = self
-            .sessions
+        let rows = self.list_rows();
+        let items = rows
             .iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(|session| ListItem::new(session_row(session)))
+            .map(|row| ListItem::new(row.label.clone()))
             .collect::<Vec<_>>();
 
         List::new(items)
@@ -333,9 +374,10 @@ impl OverviewScreen {
             .get(self.selected_index)
             .map(|session| {
                 format!(
-                    "name: {}\nslug: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
+                    "name: {}\nslug: {}\ntag: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
                     session.name,
                     session.slug,
+                    session.tag.as_deref().unwrap_or("untagged"),
                     format_full_local(session.last_opened_at),
                     session.current_revision,
                     session.todo_count - session.done_count,
@@ -358,23 +400,43 @@ impl OverviewScreen {
     }
 
     fn footer(&self) -> Paragraph<'static> {
-        Paragraph::new("j/k move  n new  D delete  Enter open  q quit")
+        Paragraph::new("j/k move  n new  t tag  D delete  Enter open  q quit")
             .block(Block::default().borders(Borders::ALL).title("Keys"))
             .style(self.theme.block_style())
     }
 
     fn session_editor_modal(&self) -> Paragraph<'_> {
+        let (title, primary_label, primary_value, secondary_label, secondary_value, footer_hint) =
+            match &self.overlay {
+                Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => (
+                    "New Session",
+                    "Name",
+                    self.session_editor.name.as_str(),
+                    Some("Tag"),
+                    Some(self.session_editor.tag.as_str()),
+                    "Tab switch  Enter create  Esc cancel",
+                ),
+                Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditTag { .. })) => (
+                    "Edit Session Tag",
+                    "Tag",
+                    self.session_editor.tag.as_str(),
+                    None,
+                    None,
+                    "Empty clears  Enter save  Esc cancel",
+                ),
+                _ => ("Session", "Value", "", None, None, "Esc cancel"),
+            };
         render_editor(
             &self.theme,
             EditorView {
-                title: "New Session",
-                primary_label: "Name",
-                primary_value: &self.session_editor.name,
-                secondary_label: None,
-                secondary_value: None,
-                focused_field: EditorField::Primary,
+                title,
+                primary_label,
+                primary_value,
+                secondary_label,
+                secondary_value,
+                focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
-                footer_hint: "Enter create  Esc cancel",
+                footer_hint,
             },
         )
     }
@@ -421,17 +483,22 @@ impl OverviewScreen {
     }
 
     fn ensure_selection_visible(&mut self, visible_rows: usize) {
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = self.selected_index + 1 - visible_rows;
+        let Some(selected_row_index) = self.selected_row_index() else {
+            self.scroll_offset = 0;
+            return;
+        };
+
+        if selected_row_index < self.scroll_offset {
+            self.scroll_offset = selected_row_index;
+        } else if selected_row_index >= self.scroll_offset + visible_rows {
+            self.scroll_offset = selected_row_index + 1 - visible_rows;
         }
     }
 
     fn list_state(&self) -> ListState {
         let mut state = ListState::default();
-        if !self.sessions.is_empty() {
-            state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
+        if let Some(selected_row_index) = self.selected_row_index() {
+            state.select(Some(selected_row_index.saturating_sub(self.scroll_offset)));
         }
         state
     }
@@ -452,8 +519,24 @@ impl OverviewScreen {
     }
 
     fn open_session_editor(&mut self) {
-        self.overlay = Some(OverviewOverlay::SessionEditor);
+        self.overlay = Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create));
         self.session_editor = SessionEditorState::default();
+    }
+
+    fn open_tag_editor(&mut self) {
+        let Some(session) = self.sessions.get(self.selected_index) else {
+            return;
+        };
+        self.overlay = Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditTag {
+            slug: session.slug.clone(),
+            name: session.name.clone(),
+        }));
+        self.session_editor = SessionEditorState {
+            name: String::new(),
+            tag: session.tag.clone().unwrap_or_default(),
+            focused_field: EditorField::Primary,
+            error: None,
+        };
     }
 
     fn open_delete_session(&mut self) {
@@ -472,24 +555,116 @@ impl OverviewScreen {
     }
 
     fn submit_session_editor(&mut self, database: &mut Database) -> Result<Option<OverviewExit>> {
-        let name = self.session_editor.name.trim();
-        if name.is_empty() {
-            self.session_editor.error = Some(String::from("Session name is required"));
-            return Ok(None);
-        }
+        match &self.overlay {
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => {
+                let name = self.session_editor.name.trim();
+                if name.is_empty() {
+                    self.session_editor.error = Some(String::from("Session name is required"));
+                    return Ok(None);
+                }
 
-        match database.create_session(name, None, now_utc_timestamp()) {
-            Ok(session) => {
-                self.reload(database)?;
-                self.close_session_editor();
-                Ok(Some(OverviewExit::OpenSession(session.slug)))
+                match database.create_session(
+                    name,
+                    None,
+                    Some(self.session_editor.tag.as_str()),
+                    now_utc_timestamp(),
+                ) {
+                    Ok(session) => {
+                        self.reload(database)?;
+                        self.close_session_editor();
+                        Ok(Some(OverviewExit::OpenSession(session.slug)))
+                    }
+                    Err(error) => {
+                        self.session_editor.error = Some(error.to_string());
+                        Ok(None)
+                    }
+                }
             }
-            Err(error) => {
-                self.session_editor.error = Some(error.to_string());
-                Ok(None)
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditTag { slug, .. })) => {
+                match database.update_session_tag(
+                    slug,
+                    Some(self.session_editor.tag.as_str()),
+                    now_utc_timestamp(),
+                ) {
+                    Ok(_) => {
+                        self.reload(database)?;
+                        self.close_session_editor();
+                        Ok(None)
+                    }
+                    Err(error) => {
+                        self.session_editor.error = Some(error.to_string());
+                        Ok(None)
+                    }
+                }
             }
+            _ => Ok(None),
         }
     }
+
+    fn current_editor_field_mut(&mut self) -> &mut String {
+        match self.session_editor.focused_field {
+            EditorField::Primary => {
+                if matches!(
+                    self.overlay,
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+                ) {
+                    &mut self.session_editor.name
+                } else {
+                    &mut self.session_editor.tag
+                }
+            }
+            EditorField::Secondary => &mut self.session_editor.tag,
+        }
+    }
+
+    fn list_rows(&self) -> Vec<OverviewListRow> {
+        build_list_rows(&self.sessions)
+    }
+
+    fn selected_row_index(&self) -> Option<usize> {
+        self.list_rows()
+            .iter()
+            .position(|row| row.session_index == Some(self.selected_index))
+    }
+}
+
+fn build_list_rows(sessions: &[SessionOverview]) -> Vec<OverviewListRow> {
+    use std::collections::BTreeMap;
+
+    let mut grouped: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut untagged = Vec::new();
+
+    for (index, session) in sessions.iter().enumerate() {
+        if let Some(tag) = &session.tag {
+            grouped.entry(tag.clone()).or_default().push(index);
+        } else {
+            untagged.push(index);
+        }
+    }
+
+    let mut rows = Vec::new();
+    for (tag, indices) in grouped {
+        rows.push(OverviewListRow {
+            label: format!("[{tag}]"),
+            session_index: None,
+        });
+        rows.extend(indices.into_iter().map(|session_index| OverviewListRow {
+            label: session_row(&sessions[session_index]),
+            session_index: Some(session_index),
+        }));
+    }
+    if !untagged.is_empty() {
+        rows.push(OverviewListRow {
+            label: String::from("[untagged]"),
+            session_index: None,
+        });
+        rows.extend(untagged.into_iter().map(|session_index| OverviewListRow {
+            label: session_row(&sessions[session_index]),
+            session_index: Some(session_index),
+        }));
+    }
+
+    rows
 }
 
 fn session_row(session: &SessionOverview) -> String {
@@ -514,13 +689,19 @@ fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
     })
 }
 
-fn list_row_index(list_area: Rect, scroll_offset: usize, y: u16) -> Option<usize> {
+fn list_row_index(
+    list_area: Rect,
+    rows: &[OverviewListRow],
+    scroll_offset: usize,
+    y: u16,
+) -> Option<usize> {
     let inner_y = list_area.y.saturating_add(1);
     if y < inner_y || y >= list_area.bottom().saturating_sub(1) {
         return None;
     }
 
-    Some(scroll_offset + usize::from(y.saturating_sub(inner_y)))
+    rows.get(scroll_offset + usize::from(y.saturating_sub(inner_y)))
+        .and_then(|row| row.session_index)
 }
 
 #[cfg(test)]
@@ -534,7 +715,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{OverviewExit, OverviewScreen, list_row_index};
+    use super::{OverviewExit, OverviewListRow, OverviewScreen, list_row_index};
     use crate::config::Config;
     use crate::db::Database;
 
@@ -591,11 +772,25 @@ mod tests {
                 .handle_key(&mut database, key(KeyCode::Char(character)))
                 .unwrap();
         }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "Private".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
 
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert_eq!(exit, Some(OverviewExit::OpenSession(String::from("inbox"))));
+        assert_eq!(
+            database
+                .get_session_by_slug("inbox")
+                .expect("new session")
+                .tag
+                .as_deref(),
+            Some("private")
+        );
         assert_eq!(
             database
                 .get_session_by_slug("inbox")
@@ -628,7 +823,10 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
         let list_area = screen.list_area(screen.last_area);
-        let row = list_area.y + 2;
+        let rows = screen.list_rows();
+        let row = (list_area.y..list_area.bottom())
+            .find(|y| list_row_index(list_area, &rows, screen.scroll_offset, *y) == Some(1))
+            .expect("writing row");
 
         let exit = screen.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, row));
         assert!(exit.is_none());
@@ -643,6 +841,8 @@ mod tests {
         let (_directory, _database, mut populated) = seeded_overview_screen();
         let populated_buffer = render_buffer(&mut populated, 120, 24);
         assert!(populated_buffer.contains("session overview"));
+        assert!(populated_buffer.contains("private"));
+        assert!(populated_buffer.contains("work"));
         assert!(populated_buffer.contains("Writing Sprint"));
         assert!(populated_buffer.contains("Enter opens the session head."));
         assert!(populated_buffer.contains("return here."));
@@ -694,23 +894,75 @@ mod tests {
     }
 
     #[test]
+    fn overview_edits_selected_session_tag() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('t')))
+            .unwrap();
+        assert!(render_buffer(&mut screen, 120, 24).contains("Edit Session Tag"));
+        for _ in 0..7 {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "Deep Work".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(
+            database
+                .get_session_by_slug("reading-sprint")
+                .expect("session")
+                .tag
+                .as_deref(),
+            Some("deep-work")
+        );
+    }
+
+    #[test]
     fn list_row_index_uses_inner_rows_only() {
         let area = Rect::new(0, 0, 40, 10);
-        assert_eq!(list_row_index(area, 0, 0), None);
-        assert_eq!(list_row_index(area, 0, 1), Some(0));
-        assert_eq!(list_row_index(area, 2, 2), Some(3));
+        let rows = vec![
+            OverviewListRow {
+                label: String::from("[private]"),
+                session_index: None,
+            },
+            OverviewListRow {
+                label: String::from("Reading"),
+                session_index: Some(0),
+            },
+            OverviewListRow {
+                label: String::from("[work]"),
+                session_index: None,
+            },
+            OverviewListRow {
+                label: String::from("Writing"),
+                session_index: Some(1),
+            },
+        ];
+        assert_eq!(list_row_index(area, &rows, 0, 0), None);
+        assert_eq!(list_row_index(area, &rows, 0, 1), None);
+        assert_eq!(list_row_index(area, &rows, 0, 2), Some(0));
+        assert_eq!(list_row_index(area, &rows, 2, 2), Some(1));
     }
 
     fn seeded_overview_screen() -> (tempfile::TempDir, Database, OverviewScreen) {
         let (directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
             .expect("session");
         database
             .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
             .expect("todo");
         let reading = database
-            .create_session("Reading Sprint", None, 1_711_275_700)
+            .create_session("Reading Sprint", None, Some("private"), 1_711_275_700)
             .expect("session");
         database
             .mark_session_opened(&reading.slug, 1_711_275_800)

@@ -3,20 +3,28 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::db::Database;
 use crate::domain::revision::RevisionSummary;
 use crate::domain::session::{
-    Session, SessionHeadToken, SessionOverview, SessionSummary, slugify, validate_slug,
+    Session, SessionHeadToken, SessionOverview, SessionSummary, normalize_tag, slugify,
+    validate_slug,
 };
 use crate::error::{AppError, Result};
 
 impl Database {
-    pub fn create_session(&mut self, name: &str, slug: Option<&str>, now: i64) -> Result<Session> {
+    pub fn create_session(
+        &mut self,
+        name: &str,
+        slug: Option<&str>,
+        tag: Option<&str>,
+        now: i64,
+    ) -> Result<Session> {
         let resolved_slug = slug.map(str::to_owned).unwrap_or_else(|| slugify(name));
+        let resolved_tag = normalize_tag(tag)?;
         validate_slug(&resolved_slug)?;
 
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions (slug, name, created_at, updated_at, last_opened_at, current_revision)
-             VALUES (?1, ?2, ?3, ?3, ?3, 0)",
-            params![resolved_slug, name, now],
+            "INSERT INTO sessions (slug, name, created_at, updated_at, last_opened_at, current_revision, tag)
+             VALUES (?1, ?2, ?3, ?3, ?3, 0, ?4)",
+            params![resolved_slug, name, now, resolved_tag],
         )?;
         let session_id = transaction.last_insert_rowid();
         let revision = create_revision_snapshot(&transaction, session_id, "session created", now)?;
@@ -32,7 +40,7 @@ impl Database {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
-            "SELECT slug, name, last_opened_at, current_revision
+            "SELECT slug, name, tag, last_opened_at, current_revision
              FROM sessions
              ORDER BY last_opened_at DESC, id DESC",
         )?;
@@ -45,6 +53,7 @@ impl Database {
             "SELECT
                 sessions.slug,
                 sessions.name,
+                sessions.tag,
                 sessions.last_opened_at,
                 sessions.current_revision,
                 COALESCE(session_revisions.todo_count, 0),
@@ -62,7 +71,7 @@ impl Database {
     pub fn get_session_by_slug(&self, slug: &str) -> Result<Session> {
         self.connection
             .query_row(
-                "SELECT id, slug, name, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, name, tag, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  WHERE slug = ?1",
                 [slug],
@@ -77,7 +86,7 @@ impl Database {
     pub fn get_most_recent_session(&self) -> Result<Session> {
         self.connection
             .query_row(
-                "SELECT id, slug, name, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, name, tag, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  ORDER BY last_opened_at DESC, id DESC
                  LIMIT 1",
@@ -120,7 +129,7 @@ impl Database {
         let transaction = self.connection.transaction()?;
         let session = transaction
             .query_row(
-                "SELECT id, slug, name, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, name, tag, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  WHERE slug = ?1",
                 [slug],
@@ -134,6 +143,36 @@ impl Database {
         transaction.commit()?;
 
         Ok(session)
+    }
+
+    pub fn update_session_tag(
+        &mut self,
+        slug: &str,
+        tag: Option<&str>,
+        now: i64,
+    ) -> Result<Session> {
+        let resolved_tag = normalize_tag(tag)?;
+        let transaction = self.connection.transaction()?;
+        let session_id: i64 = transaction
+            .query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+
+        transaction.execute(
+            "UPDATE sessions SET tag = ?1, updated_at = ?2 WHERE id = ?3",
+            params![resolved_tag, now, session_id],
+        )?;
+        let revision =
+            create_revision_snapshot(&transaction, session_id, "session tag updated", now)?;
+        transaction.execute(
+            "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
+            params![revision.revision_number, session_id],
+        )?;
+        transaction.commit()?;
+
+        self.get_session_by_slug(slug)
     }
 
     pub fn session_head_token(&self, slug: &str) -> Result<SessionHeadToken> {
@@ -193,18 +232,24 @@ pub(crate) fn create_revision_snapshot(
         [session_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let session_tag: Option<String> = transaction.query_row(
+        "SELECT tag FROM sessions WHERE id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )?;
 
     transaction.execute(
         "INSERT INTO session_revisions (
-            session_id, revision_number, created_at, reason, todo_count, done_count
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            session_id, revision_number, created_at, reason, todo_count, done_count, session_tag
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             session_id,
             revision_number,
             now,
             reason,
             todo_count,
-            done_count
+            done_count,
+            session_tag
         ],
     )?;
     let revision_id = transaction.last_insert_rowid();
@@ -266,10 +311,11 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         id: row.get(0)?,
         slug: row.get(1)?,
         name: row.get(2)?,
-        created_at: row.get(3)?,
-        updated_at: row.get(4)?,
-        last_opened_at: row.get(5)?,
-        current_revision: row.get(6)?,
+        tag: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        last_opened_at: row.get(6)?,
+        current_revision: row.get(7)?,
     })
 }
 
@@ -277,8 +323,9 @@ fn map_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSumma
     Ok(SessionSummary {
         slug: row.get(0)?,
         name: row.get(1)?,
-        last_opened_at: row.get(2)?,
-        current_revision: row.get(3)?,
+        tag: row.get(2)?,
+        last_opened_at: row.get(3)?,
+        current_revision: row.get(4)?,
     })
 }
 
@@ -286,10 +333,11 @@ fn map_session_overview(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOver
     Ok(SessionOverview {
         slug: row.get(0)?,
         name: row.get(1)?,
-        last_opened_at: row.get(2)?,
-        current_revision: row.get(3)?,
-        todo_count: row.get(4)?,
-        done_count: row.get(5)?,
+        tag: row.get(2)?,
+        last_opened_at: row.get(3)?,
+        current_revision: row.get(4)?,
+        todo_count: row.get(5)?,
+        done_count: row.get(6)?,
     })
 }
 
@@ -312,25 +360,27 @@ mod tests {
     fn creates_and_lists_sessions() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let created = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("Work Projects"), 1_711_275_600)
             .expect("session");
 
         assert_eq!(created.slug, "writing-sprint");
+        assert_eq!(created.tag.as_deref(), Some("work-projects"));
         assert_eq!(created.current_revision, 1);
 
         let listed = database.list_sessions().expect("sessions");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].slug, "writing-sprint");
+        assert_eq!(listed[0].tag.as_deref(), Some("work-projects"));
     }
 
     #[test]
     fn resolves_recent_session_and_marks_opened() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
-            .create_session("Reading Sprint", None, 1_711_275_700)
+            .create_session("Reading Sprint", None, None, 1_711_275_700)
             .expect("session");
 
         assert_eq!(
@@ -352,7 +402,7 @@ mod tests {
     fn lists_overview_rows_in_recent_order_with_counts() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, Some("work"), 1_711_275_600)
             .expect("session");
         database
             .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
@@ -370,7 +420,7 @@ mod tests {
             .expect("done");
 
         let reading = database
-            .create_session("Reading Sprint", None, 1_711_275_700)
+            .create_session("Reading Sprint", None, None, 1_711_275_700)
             .expect("session");
         database
             .mark_session_opened(&writing.slug, 1_711_275_800)
@@ -379,23 +429,25 @@ mod tests {
         let overview = database.list_session_overview().expect("overview");
         assert_eq!(overview.len(), 2);
         assert_eq!(overview[0].slug, writing.slug);
+        assert_eq!(overview[0].tag.as_deref(), Some("work"));
         assert_eq!(overview[0].todo_count, 2);
         assert_eq!(overview[0].done_count, 1);
         assert_eq!(overview[1].slug, reading.slug);
+        assert_eq!(overview[1].tag, None);
     }
 
     #[test]
     fn deleting_session_cascades_and_updates_recent_pointer() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
             .add_todo(&writing.slug, "Draft spec", "", 1_711_275_650)
             .expect("todo");
 
         let reading = database
-            .create_session("Reading Sprint", None, 1_711_275_700)
+            .create_session("Reading Sprint", None, Some("private"), 1_711_275_700)
             .expect("session");
         let todo = database
             .add_todo(&reading.slug, "Review paper", "", 1_711_275_750)
@@ -425,7 +477,7 @@ mod tests {
     fn deleting_last_session_clears_recent_pointer() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         database.delete_session(&session.slug).expect("delete");
@@ -440,7 +492,7 @@ mod tests {
     fn session_head_token_changes_for_same_session_mutations_only() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("writing session");
         let initial = database
             .session_head_token(&writing.slug)
@@ -462,11 +514,33 @@ mod tests {
         );
 
         database
-            .create_session("Reading Sprint", None, 1_711_275_800)
+            .create_session("Reading Sprint", None, None, 1_711_275_800)
             .expect("reading session");
         let after_other_session = database
             .session_head_token(&writing.slug)
             .expect("unchanged token");
         assert_eq!(after_other_session, after_todo);
+    }
+
+    #[test]
+    fn updates_and_clears_session_tag_with_new_revision() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
+            .expect("session");
+
+        let updated = database
+            .update_session_tag(&session.slug, Some("Private Projects"), 1_711_275_700)
+            .expect("set tag");
+        assert_eq!(updated.tag.as_deref(), Some("private-projects"));
+        assert_eq!(updated.current_revision, 2);
+        assert_eq!(updated.updated_at, 1_711_275_700);
+
+        let cleared = database
+            .update_session_tag(&session.slug, None, 1_711_275_800)
+            .expect("clear tag");
+        assert_eq!(cleared.tag, None);
+        assert_eq!(cleared.current_revision, 3);
+        assert_eq!(cleared.updated_at, 1_711_275_800);
     }
 }
