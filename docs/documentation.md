@@ -51,6 +51,7 @@ Primary references:
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
+  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name, and `n` in a live session creates a todo with title + notes
 
 ## How To Run + Demo
 
@@ -102,7 +103,14 @@ todui resume writing-sprint --revision 2
 todui export md writing-sprint --revision 2 --timestamps full --include-notes
 ```
 
+TUI create flow:
+
+- `todui`
+- `n` to create a session from the overview
+- `Enter` to open the new session head
+- `n` again to add a todo with optional notes inside the session view
+
 ## Known Issues / Follow-Ups
 
 - No open blockers against [plan.md](plan.md).
-- Follow-up space, if wanted later: richer TUI editing modals and deeper render snapshot coverage.
+- Follow-up space, if wanted later: reuse the same modal path for in-TUI todo editing (`e`) and add more render snapshot coverage around modal focus/cursor behavior.
