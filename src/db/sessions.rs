@@ -436,6 +436,7 @@ mod tests {
         ));
     }
 
+    #[test]
     fn session_head_token_changes_for_same_session_mutations_only() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
