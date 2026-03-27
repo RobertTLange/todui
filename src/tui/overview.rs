@@ -6,7 +6,6 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
@@ -18,7 +17,7 @@ use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_full_local, format_month_day_local};
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 
 const EVENT_POLL_MS: u64 = 250;
@@ -301,6 +300,7 @@ impl OverviewScreen {
         self.last_area = frame.area();
         let chunks =
             Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(frame.area());
+        frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
         frame.render_widget(self.top_bar(), chunks[0]);
 
@@ -356,8 +356,15 @@ impl OverviewScreen {
             Line::from("todui | session overview | h = help"),
             Line::from(subtitle),
         ])
-        .block(Block::default().borders(Borders::ALL).title("Overview"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Overview")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn session_list(&self, height: u16) -> Table<'static> {
@@ -367,7 +374,7 @@ impl OverviewScreen {
             .iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(session_table_row)
+            .map(|session| session_table_row(session, &self.theme))
             .collect::<Vec<_>>();
 
         Table::new(
@@ -390,11 +397,18 @@ impl OverviewScreen {
                 Cell::from("Done"),
                 Cell::from("Last Opened"),
             ])
-            .style(self.theme.block_style().add_modifier(Modifier::BOLD)),
+            .style(self.theme.surface_title_style(SurfaceTone::Open)),
         )
-        .block(Block::default().borders(Borders::ALL).title("Sessions"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Sessions")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
         .column_spacing(1)
-        .row_highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+        .row_highlight_style(self.theme.selection_style(SelectionTone::Open))
     }
 
     fn details_panel(&self) -> Paragraph<'static> {
@@ -417,15 +431,29 @@ impl OverviewScreen {
 
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Details"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Details")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn empty_state(&self) -> Paragraph<'static> {
         Paragraph::new("No sessions yet.\n\nPress n to create one from the TUI.")
             .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title("Sessions"))
-            .style(self.theme.block_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Sessions")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn help_overlay(&self) -> Paragraph<'static> {
@@ -433,8 +461,15 @@ impl OverviewScreen {
             "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Help"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Help")
+                .style(self.theme.surface_style(SurfaceTone::Overlay))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
     fn session_editor_modal(&self) -> Paragraph<'_> {
@@ -478,8 +513,15 @@ impl OverviewScreen {
             "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
-        .style(self.theme.block_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Delete Session")
+                .style(self.theme.surface_style(SurfaceTone::Danger))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Danger))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Danger)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
     fn selected_session_slug(&self) -> Option<String> {
@@ -640,14 +682,23 @@ impl OverviewScreen {
     }
 }
 
-fn session_table_row(session: &SessionOverview) -> Row<'static> {
+fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
     Row::new([
-        Cell::from(session.tag.clone().unwrap_or_else(|| String::from("-"))),
+        Cell::from(session.tag.clone().unwrap_or_else(|| String::from("-"))).style(
+            if session.tag.is_some() {
+                theme.text_style(TextTone::Tag)
+            } else {
+                theme.text_style(TextTone::Muted)
+            },
+        ),
         Cell::from(session.slug.clone()),
-        Cell::from(format!("r{}", session.current_revision)),
-        Cell::from((session.todo_count - session.done_count).to_string()),
-        Cell::from(session.done_count.to_string()),
-        Cell::from(format_month_day_local(session.last_opened_at)),
+        Cell::from(format!("r{}", session.current_revision))
+            .style(theme.text_style(TextTone::Meta)),
+        Cell::from((session.todo_count - session.done_count).to_string())
+            .style(theme.text_style(TextTone::Open)),
+        Cell::from(session.done_count.to_string()).style(theme.text_style(TextTone::Completed)),
+        Cell::from(format_month_day_local(session.last_opened_at))
+            .style(theme.text_style(TextTone::Muted)),
     ])
 }
 
