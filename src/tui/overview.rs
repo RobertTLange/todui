@@ -8,14 +8,14 @@ use crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
 use crate::domain::session::SessionOverview;
 use crate::error::Result;
-use crate::timestamp::format_full_local;
 use crate::timestamp::now_utc_timestamp;
+use crate::timestamp::{format_full_local, format_month_day_local};
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
@@ -104,12 +104,6 @@ impl Default for SessionEditorState {
             error: None,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OverviewListRow {
-    label: String,
-    session_index: Option<usize>,
 }
 
 impl OverviewScreen {
@@ -277,8 +271,8 @@ impl OverviewScreen {
             MouseEventKind::ScrollDown => self.move_selection(1),
             MouseEventKind::Down(MouseButton::Left) => {
                 let list_area = self.list_area(self.last_area);
-                let rows = self.list_rows();
-                if let Some(index) = list_row_index(list_area, &rows, self.scroll_offset, mouse.row)
+                if let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
+                    && index < self.sessions.len()
                 {
                     self.selected_index = index;
                     self.ensure_selection_visible(self.visible_rows());
@@ -353,19 +347,41 @@ impl OverviewScreen {
         .style(self.theme.block_style())
     }
 
-    fn session_list(&self, height: u16) -> List<'static> {
+    fn session_list(&self, height: u16) -> Table<'static> {
         let visible_rows = self.visible_rows_for_height(height);
-        let rows = self.list_rows();
-        let items = rows
+        let rows = self
+            .sessions
             .iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(|row| ListItem::new(row.label.clone()))
+            .map(session_table_row)
             .collect::<Vec<_>>();
 
-        List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Sessions"))
-            .highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Fill(1),
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Length(5),
+                Constraint::Length(11),
+            ],
+        )
+        .header(
+            Row::new([
+                Cell::from("Tag"),
+                Cell::from("Slug"),
+                Cell::from("Rev"),
+                Cell::from("Open"),
+                Cell::from("Done"),
+                Cell::from("Last Opened"),
+            ])
+            .style(self.theme.block_style().add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title("Sessions"))
+        .column_spacing(1)
+        .row_highlight_style(self.theme.selected_style().add_modifier(Modifier::BOLD))
     }
 
     fn details_panel(&self) -> Paragraph<'static> {
@@ -461,7 +477,7 @@ impl OverviewScreen {
     }
 
     fn visible_rows_for_height(&self, height: u16) -> usize {
-        height.saturating_sub(2).max(1) as usize
+        height.saturating_sub(3).max(1) as usize
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -483,22 +499,17 @@ impl OverviewScreen {
     }
 
     fn ensure_selection_visible(&mut self, visible_rows: usize) {
-        let Some(selected_row_index) = self.selected_row_index() else {
-            self.scroll_offset = 0;
-            return;
-        };
-
-        if selected_row_index < self.scroll_offset {
-            self.scroll_offset = selected_row_index;
-        } else if selected_row_index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = selected_row_index + 1 - visible_rows;
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        } else if self.selected_index >= self.scroll_offset + visible_rows {
+            self.scroll_offset = self.selected_index + 1 - visible_rows;
         }
     }
 
-    fn list_state(&self) -> ListState {
-        let mut state = ListState::default();
-        if let Some(selected_row_index) = self.selected_row_index() {
-            state.select(Some(selected_row_index.saturating_sub(self.scroll_offset)));
+    fn list_state(&self) -> TableState {
+        let mut state = TableState::default();
+        if !self.sessions.is_empty() {
+            state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
         }
         state
     }
@@ -616,66 +627,17 @@ impl OverviewScreen {
             EditorField::Secondary => &mut self.session_editor.tag,
         }
     }
-
-    fn list_rows(&self) -> Vec<OverviewListRow> {
-        build_list_rows(&self.sessions)
-    }
-
-    fn selected_row_index(&self) -> Option<usize> {
-        self.list_rows()
-            .iter()
-            .position(|row| row.session_index == Some(self.selected_index))
-    }
 }
 
-fn build_list_rows(sessions: &[SessionOverview]) -> Vec<OverviewListRow> {
-    use std::collections::BTreeMap;
-
-    let mut grouped: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut untagged = Vec::new();
-
-    for (index, session) in sessions.iter().enumerate() {
-        if let Some(tag) = &session.tag {
-            grouped.entry(tag.clone()).or_default().push(index);
-        } else {
-            untagged.push(index);
-        }
-    }
-
-    let mut rows = Vec::new();
-    for (tag, indices) in grouped {
-        rows.push(OverviewListRow {
-            label: format!("[{tag}]"),
-            session_index: None,
-        });
-        rows.extend(indices.into_iter().map(|session_index| OverviewListRow {
-            label: session_row(&sessions[session_index]),
-            session_index: Some(session_index),
-        }));
-    }
-    if !untagged.is_empty() {
-        rows.push(OverviewListRow {
-            label: String::from("[untagged]"),
-            session_index: None,
-        });
-        rows.extend(untagged.into_iter().map(|session_index| OverviewListRow {
-            label: session_row(&sessions[session_index]),
-            session_index: Some(session_index),
-        }));
-    }
-
-    rows
-}
-
-fn session_row(session: &SessionOverview) -> String {
-    format!(
-        "{} ({})  r{}  open:{} done:{}",
-        session.name,
-        session.slug,
-        session.current_revision,
-        session.todo_count - session.done_count,
-        session.done_count
-    )
+fn session_table_row(session: &SessionOverview) -> Row<'static> {
+    Row::new([
+        Cell::from(session.tag.clone().unwrap_or_else(|| String::from("-"))),
+        Cell::from(session.slug.clone()),
+        Cell::from(format!("r{}", session.current_revision)),
+        Cell::from((session.todo_count - session.done_count).to_string()),
+        Cell::from(session.done_count.to_string()),
+        Cell::from(format_month_day_local(session.last_opened_at)),
+    ])
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -689,19 +651,13 @@ fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
     })
 }
 
-fn list_row_index(
-    list_area: Rect,
-    rows: &[OverviewListRow],
-    scroll_offset: usize,
-    y: u16,
-) -> Option<usize> {
+fn list_row_index(list_area: Rect, scroll_offset: usize, y: u16) -> Option<usize> {
     let inner_y = list_area.y.saturating_add(1);
-    if y < inner_y || y >= list_area.bottom().saturating_sub(1) {
+    if y <= inner_y || y >= list_area.bottom().saturating_sub(1) {
         return None;
     }
 
-    rows.get(scroll_offset + usize::from(y.saturating_sub(inner_y)))
-        .and_then(|row| row.session_index)
+    Some(scroll_offset + usize::from(y.saturating_sub(inner_y + 1)))
 }
 
 #[cfg(test)]
@@ -715,7 +671,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{OverviewExit, OverviewListRow, OverviewScreen, list_row_index};
+    use super::{OverviewExit, OverviewScreen, list_row_index};
     use crate::config::Config;
     use crate::db::Database;
 
@@ -823,10 +779,7 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
         let list_area = screen.list_area(screen.last_area);
-        let rows = screen.list_rows();
-        let row = (list_area.y..list_area.bottom())
-            .find(|y| list_row_index(list_area, &rows, screen.scroll_offset, *y) == Some(1))
-            .expect("writing row");
+        let row = list_area.y + 3;
 
         let exit = screen.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, row));
         assert!(exit.is_none());
@@ -841,9 +794,11 @@ mod tests {
         let (_directory, _database, mut populated) = seeded_overview_screen();
         let populated_buffer = render_buffer(&mut populated, 120, 24);
         assert!(populated_buffer.contains("session overview"));
+        assert!(populated_buffer.contains("Tag"));
+        assert!(populated_buffer.contains("Slug"));
+        assert!(populated_buffer.contains("Last Opened"));
         assert!(populated_buffer.contains("private"));
-        assert!(populated_buffer.contains("work"));
-        assert!(populated_buffer.contains("Writing Sprint"));
+        assert!(populated_buffer.contains("writing-sprint"));
         assert!(populated_buffer.contains("Enter opens the session head."));
         assert!(populated_buffer.contains("return here."));
 
@@ -929,28 +884,11 @@ mod tests {
     #[test]
     fn list_row_index_uses_inner_rows_only() {
         let area = Rect::new(0, 0, 40, 10);
-        let rows = vec![
-            OverviewListRow {
-                label: String::from("[private]"),
-                session_index: None,
-            },
-            OverviewListRow {
-                label: String::from("Reading"),
-                session_index: Some(0),
-            },
-            OverviewListRow {
-                label: String::from("[work]"),
-                session_index: None,
-            },
-            OverviewListRow {
-                label: String::from("Writing"),
-                session_index: Some(1),
-            },
-        ];
-        assert_eq!(list_row_index(area, &rows, 0, 0), None);
-        assert_eq!(list_row_index(area, &rows, 0, 1), None);
-        assert_eq!(list_row_index(area, &rows, 0, 2), Some(0));
-        assert_eq!(list_row_index(area, &rows, 2, 2), Some(1));
+        assert_eq!(list_row_index(area, 0, 0), None);
+        assert_eq!(list_row_index(area, 0, 1), None);
+        assert_eq!(list_row_index(area, 0, 2), Some(0));
+        assert_eq!(list_row_index(area, 0, 3), Some(1));
+        assert_eq!(list_row_index(area, 2, 4), Some(4));
     }
 
     fn seeded_overview_screen() -> (tempfile::TempDir, Database, OverviewScreen) {
