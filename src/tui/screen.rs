@@ -235,7 +235,7 @@ impl SessionScreen {
             Some(Overlay::Help) => {
                 if matches!(
                     key.code,
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h')
                 ) {
                     self.overlay = None;
                 }
@@ -257,7 +257,7 @@ impl SessionScreen {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Ok(Some(SessionExit::Quit)),
             KeyCode::Left | KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
-            KeyCode::Char('?') => {
+            KeyCode::Char('h') => {
                 self.overlay = Some(Overlay::Help);
                 Ok(None)
             }
@@ -715,7 +715,7 @@ impl SessionScreen {
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
         let mut lines = vec![Line::from(format!(
-            "todui | {} ({}) | {revision}",
+            "todui | {} ({}) | {revision} | h = help",
             snapshot.session.name, snapshot.session.slug
         ))];
         if self.is_read_only() {
@@ -834,7 +834,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1320,7 +1320,7 @@ mod tests {
         let (_directory, mut database, mut screen) = seeded_screen();
         assert!(
             screen
-                .handle_key(&mut database, key(KeyCode::Char('?')))
+                .handle_key(&mut database, key(KeyCode::Char('h')))
                 .unwrap()
                 .is_none()
         );
@@ -1604,6 +1604,30 @@ mod tests {
     }
 
     #[test]
+    fn read_only_header_keeps_help_hint() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(matches!(
+            screen.snapshot().mode,
+            RevisionMode::Historical(_)
+        ));
+        assert!(rendered.contains("read-only"));
+        assert!(rendered.contains("h = help"));
+        assert!(!rendered.contains("Keys"));
+    }
+
+    #[test]
     fn screen_handles_mouse_history_and_pomodoro_controls() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let area = Rect::new(0, 0, 120, 24);
@@ -1860,10 +1884,12 @@ mod tests {
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Open"));
+        assert!(wide.contains("h = help"));
         assert!(!wide.contains("Keys"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
+        assert!(medium.contains("h = help"));
         assert!(!medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
@@ -1878,6 +1904,7 @@ mod tests {
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
         assert!(help.contains("Overview: Left or o"));
+        assert!(help.contains("Help: h"));
 
         screen.overlay = Some(Overlay::TodoEditor);
         let editor = render_buffer(&screen, 120, 24);

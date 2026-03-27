@@ -77,6 +77,7 @@ struct OverviewScreen {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverviewOverlay {
+    Help,
     SessionEditor(SessionEditorMode),
     DeleteSession { slug: String, name: String },
 }
@@ -137,6 +138,15 @@ impl OverviewScreen {
         }
 
         match self.overlay {
+            Some(OverviewOverlay::Help) => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h')
+                ) {
+                    self.overlay = None;
+                }
+                return Ok(None);
+            }
             Some(OverviewOverlay::SessionEditor(_)) => {
                 return self.handle_session_editor_key(database, key);
             }
@@ -148,6 +158,10 @@ impl OverviewScreen {
 
         let exit = match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(OverviewExit::Quit),
+            KeyCode::Char('h') => {
+                self.overlay = Some(OverviewOverlay::Help);
+                None
+            }
             KeyCode::Char('n') => {
                 self.open_session_editor();
                 None
@@ -311,6 +325,11 @@ impl OverviewScreen {
             }
         }
 
+        if matches!(self.overlay, Some(OverviewOverlay::Help)) {
+            let area = centered_rect(frame.area(), 58, 11);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.help_overlay(), area);
+        }
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 54, 8);
             frame.render_widget(Clear, area);
@@ -334,7 +353,7 @@ impl OverviewScreen {
         };
 
         Paragraph::new(vec![
-            Line::from("todui | session overview"),
+            Line::from("todui | session overview | h = help"),
             Line::from(subtitle),
         ])
         .block(Block::default().borders(Borders::ALL).title("Overview"))
@@ -407,6 +426,15 @@ impl OverviewScreen {
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title("Sessions"))
             .style(self.theme.block_style())
+    }
+
+    fn help_overlay(&self) -> Paragraph<'static> {
+        Paragraph::new(
+            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit tag: t\nDelete session: D\nQuit: q or Esc\nClose help: h, q, or Esc",
+        )
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Help"))
+        .style(self.theme.block_style())
     }
 
     fn session_editor_modal(&self) -> Paragraph<'_> {
@@ -777,6 +805,7 @@ mod tests {
         let (_directory, _database, mut populated) = seeded_overview_screen();
         let populated_buffer = render_buffer(&mut populated, 120, 24);
         assert!(populated_buffer.contains("session overview"));
+        assert!(populated_buffer.contains("h = help"));
         assert!(populated_buffer.contains("Tag"));
         assert!(populated_buffer.contains("Slug"));
         assert!(populated_buffer.contains("Last Opened"));
@@ -792,7 +821,23 @@ mod tests {
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
+        assert!(empty_buffer.contains("h = help"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_opens_help_overlay_with_h() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('h')))
+            .unwrap();
+        assert!(render_buffer(&mut screen, 120, 24).contains("Help"));
+        assert!(render_buffer(&mut screen, 120, 24).contains("Open session"));
+
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+        assert!(!render_buffer(&mut screen, 120, 24).contains("Open session"));
     }
 
     #[test]
