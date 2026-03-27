@@ -2,7 +2,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::db::Database;
 use crate::domain::revision::RevisionSummary;
-use crate::domain::session::{Session, SessionOverview, SessionSummary, slugify, validate_slug};
+use crate::domain::session::{
+    Session, SessionHeadToken, SessionOverview, SessionSummary, slugify, validate_slug,
+};
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -132,6 +134,26 @@ impl Database {
         transaction.commit()?;
 
         Ok(session)
+    }
+
+    pub fn session_head_token(&self, slug: &str) -> Result<SessionHeadToken> {
+        self.connection
+            .query_row(
+                "SELECT current_revision, updated_at
+                 FROM sessions
+                 WHERE slug = ?1",
+                [slug],
+                |row| {
+                    Ok(SessionHeadToken {
+                        current_revision: row.get(0)?,
+                        updated_at: row.get(1)?,
+                    })
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => AppError::SessionNotFound(slug.to_string()),
+                other => AppError::Database(other),
+            })
     }
 
     pub fn current_revision_summary(&self, session_id: i64) -> Result<RevisionSummary> {
@@ -284,6 +306,7 @@ pub(crate) fn map_revision_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<
 #[cfg(test)]
 mod tests {
     use crate::db::Database;
+    use crate::domain::session::SessionHeadToken;
 
     #[test]
     fn creates_and_lists_sessions() {
@@ -411,5 +434,38 @@ mod tests {
             database.resolve_session_slug(None),
             Err(crate::error::AppError::NoRecentSession)
         ));
+    }
+
+    fn session_head_token_changes_for_same_session_mutations_only() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let writing = database
+            .create_session("Writing Sprint", None, 1_711_275_600)
+            .expect("writing session");
+        let initial = database
+            .session_head_token(&writing.slug)
+            .expect("initial head token");
+
+        database
+            .add_todo(&writing.slug, "Draft spec", "", 1_711_275_700)
+            .expect("todo");
+        let after_todo = database
+            .session_head_token(&writing.slug)
+            .expect("updated head token");
+        assert_ne!(after_todo, initial);
+        assert_eq!(
+            after_todo,
+            SessionHeadToken {
+                current_revision: 2,
+                updated_at: 1_711_275_700,
+            }
+        );
+
+        database
+            .create_session("Reading Sprint", None, 1_711_275_800)
+            .expect("reading session");
+        let after_other_session = database
+            .session_head_token(&writing.slug)
+            .expect("unchanged token");
+        assert_eq!(after_other_session, after_todo);
     }
 }
