@@ -335,11 +335,7 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
-                let layout = split_screen(
-                    area,
-                    self.medium_drawer_open,
-                    self.top_bar_height(),
-                );
+                let layout = split_screen(area, self.medium_drawer_open, self.top_bar_height());
                 if let Some(target) =
                     list_click_target(layout.list, self.scroll_offset, mouse.column, mouse.row)
                 {
@@ -451,11 +447,7 @@ impl SessionScreen {
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
-        let layout = split_screen(
-            frame.area(),
-            self.medium_drawer_open,
-            self.top_bar_height(),
-        );
+        let layout = split_screen(frame.area(), self.medium_drawer_open, self.top_bar_height());
         let snapshot = self.snapshot();
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
