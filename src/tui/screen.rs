@@ -5,7 +5,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{
@@ -334,6 +334,7 @@ impl SessionScreen {
                         Rect::new(0, 0, 60, 24),
                         self.medium_drawer_open,
                         self.top_bar_height(),
+                        4,
                     )
                     .mode,
                     LayoutMode::Narrow
@@ -466,7 +467,7 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
-                let layout = split_screen(area, self.medium_drawer_open, self.top_bar_height());
+                let layout = self.layout_for_area(area);
                 if let Some(target) =
                     list_click_target(layout.list, self.scroll_offset, mouse.column, mouse.row)
                 {
@@ -591,8 +592,8 @@ impl SessionScreen {
     }
 
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
-        let layout = split_screen(frame.area(), self.medium_drawer_open, self.top_bar_height());
         let snapshot = self.snapshot();
+        let layout = self.layout_for_area(frame.area());
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
             self.todo_list(snapshot, layout.list.height),
@@ -600,20 +601,9 @@ impl SessionScreen {
             &mut self.list_state(),
         );
         if let Some(details_area) = layout.details {
-            if matches!(layout.mode, LayoutMode::Medium) {
-                let panes =
-                    Layout::vertical([Constraint::Percentage(58), Constraint::Percentage(42)])
-                        .split(details_area);
-                frame.render_widget(self.details_panel(snapshot), panes[0]);
-                frame.render_widget(self.pomodoro_panel(snapshot), panes[1]);
-            } else {
-                frame.render_widget(self.details_panel(snapshot), details_area);
-            }
+            frame.render_widget(self.details_panel(snapshot), details_area);
         }
-        if let Some(pomodoro_area) = layout
-            .pomodoro
-            .filter(|_| matches!(layout.mode, LayoutMode::Wide))
-        {
+        if let Some(pomodoro_area) = layout.pomodoro {
             frame.render_widget(self.pomodoro_panel(snapshot), pomodoro_area);
         }
         frame.render_widget(self.footer(layout.mode), layout.footer);
@@ -702,6 +692,15 @@ impl SessionScreen {
         }
     }
 
+    fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
+        split_screen(
+            area,
+            self.medium_drawer_open,
+            self.top_bar_height(),
+            self.pomodoro_panel_height(self.snapshot()),
+        )
+    }
+
     fn todo_list(&self, snapshot: &SessionSnapshot, height: u16) -> Table<'static> {
         let visible_rows = height.saturating_sub(3).max(1) as usize;
         let rows = snapshot
@@ -767,7 +766,11 @@ impl SessionScreen {
             .style(self.theme.block_style())
     }
 
-    fn pomodoro_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+    fn pomodoro_panel_height(&self, snapshot: &SessionSnapshot) -> u16 {
+        self.pomodoro_lines(snapshot).len() as u16 + 2
+    }
+
+    fn pomodoro_lines(&self, snapshot: &SessionSnapshot) -> Vec<Line<'static>> {
         let run = self.current_session_run();
         let mut lines = Vec::new();
         if self.is_read_only() {
@@ -797,9 +800,13 @@ impl SessionScreen {
             lines.push(Line::from("No active run"));
             lines.push(Line::from("[p focus] [b short break] [B long break]"));
         }
+        lines
+    }
+
+    fn pomodoro_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
         let _ = Gauge::default();
 
-        Paragraph::new(lines)
+        Paragraph::new(self.pomodoro_lines(snapshot))
             .block(Block::default().borders(Borders::ALL).title("Pomodoro"))
             .style(self.theme.block_style())
     }
@@ -1245,6 +1252,7 @@ mod tests {
     use crate::db::Database;
     use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
     use crate::domain::revision::RevisionMode;
+    use crate::tui::layout::split_screen;
 
     #[test]
     fn identifies_checkbox_and_row_click_targets() {
@@ -1638,10 +1646,35 @@ mod tests {
         });
         screen.handle_tick(&mut database).unwrap();
         assert!(screen.toast.as_ref().unwrap().message.contains("completed"));
+        assert!(screen.take_pending_bell());
+        assert!(!screen.take_pending_bell());
 
         screen.toast.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
         screen.expire_toast();
         assert!(screen.toast.is_none());
+    }
+
+    #[test]
+    fn screen_tick_skips_bell_when_completion_notifications_are_disabled() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        screen.config.pomodoro.notify_on_complete = false;
+
+        let run = database
+            .start_pomodoro(&screen.session_slug, None, PomodoroKind::ShortBreak, 1, 0)
+            .expect("run");
+        database.complete_pomodoro(run.id, 1).expect("complete");
+        screen.reload(&database).unwrap();
+        screen.active_run = Some(crate::domain::pomodoro::PomodoroRun {
+            state: PomodoroState::Running,
+            started_at: 0,
+            planned_seconds: 0,
+            ..run
+        });
+
+        screen.handle_tick(&mut database).unwrap();
+
+        assert!(screen.toast.as_ref().unwrap().message.contains("completed"));
+        assert!(!screen.take_pending_bell());
     }
 
     #[test]
@@ -1755,6 +1788,47 @@ mod tests {
     }
 
     #[test]
+    fn idle_pomodoro_panel_has_no_blank_row_before_bottom_border() {
+        let (_directory, _database, mut screen) = seeded_screen();
+        let wide_buffer = render_test_buffer(&screen, 120, 24);
+        let wide_layout = split_screen(
+            Rect::new(0, 0, 120, 24),
+            screen.medium_drawer_open,
+            screen.top_bar_height(),
+            screen.pomodoro_panel_height(screen.snapshot()),
+        );
+        let wide_pomodoro = wide_layout.pomodoro.expect("wide pomodoro");
+        assert_eq!(wide_pomodoro.height, 4);
+        assert_eq!(
+            wide_buffer[(
+                wide_pomodoro.x + 1,
+                wide_pomodoro.y + wide_pomodoro.height - 1
+            )]
+                .symbol(),
+            "─"
+        );
+
+        screen.medium_drawer_open = true;
+        let medium_buffer = render_test_buffer(&screen, 80, 24);
+        let medium_layout = split_screen(
+            Rect::new(0, 0, 80, 24),
+            screen.medium_drawer_open,
+            screen.top_bar_height(),
+            screen.pomodoro_panel_height(screen.snapshot()),
+        );
+        let medium_pomodoro = medium_layout.pomodoro.expect("medium pomodoro");
+        assert_eq!(medium_pomodoro.height, 4);
+        assert_eq!(
+            medium_buffer[(
+                medium_pomodoro.x + 1,
+                medium_pomodoro.y + medium_pomodoro.height - 1
+            )]
+                .symbol(),
+            "─"
+        );
+    }
+
+    #[test]
     fn todo_row_retains_stateful_timestamp_semantics() {
         let (_directory, _database, screen) = seeded_screen();
         let open = &screen.snapshot().todos[0];
@@ -1802,10 +1876,14 @@ mod tests {
     }
 
     fn render_buffer(screen: &SessionScreen, width: u16, height: u16) -> String {
+        buffer_to_string(&render_test_buffer(screen, width, height))
+    }
+
+    fn render_test_buffer(screen: &SessionScreen, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| screen.render(frame)).expect("draw");
-        buffer_to_string(terminal.backend().buffer())
+        terminal.backend().buffer().clone()
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
