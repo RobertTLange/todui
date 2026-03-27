@@ -2,13 +2,14 @@ use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::tui::theme::Theme;
+use crate::tui::theme::{SurfaceTone, Theme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EditorField {
     #[default]
     Primary,
     Secondary,
+    Tertiary,
 }
 
 pub struct EditorView<'a> {
@@ -17,6 +18,8 @@ pub struct EditorView<'a> {
     pub primary_value: &'a str,
     pub secondary_label: Option<&'a str>,
     pub secondary_value: Option<&'a str>,
+    pub tertiary_label: Option<&'a str>,
+    pub tertiary_value: Option<&'a str>,
     pub focused_field: EditorField,
     pub error: Option<&'a str>,
     pub footer_hint: &'a str,
@@ -41,6 +44,15 @@ pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
         )));
     }
 
+    if let (Some(label), Some(value)) = (view.tertiary_label, view.tertiary_value) {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(format!(
+            "{}: {}",
+            label,
+            display_field(value, matches!(view.focused_field, EditorField::Tertiary))
+        )));
+    }
+
     lines.push(Line::from(String::new()));
     if let Some(error) = view.error {
         lines.push(Line::from(format!("Error: {error}")));
@@ -50,7 +62,14 @@ pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
 
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(view.title))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(view.title)
+                .style(theme.surface_style(SurfaceTone::Overlay))
+                .border_style(theme.surface_border_style(SurfaceTone::Overlay))
+                .title_style(theme.surface_title_style(SurfaceTone::Overlay)),
+        )
         .style(Style::default().fg(theme.fg_default).bg(theme.bg_overlay))
 }
 
@@ -86,7 +105,9 @@ mod tests {
                             primary_value: "Draft spec",
                             secondary_label: Some("Notes"),
                             secondary_value: Some("cover TUI"),
-                            focused_field: EditorField::Secondary,
+                            tertiary_label: Some("Repo"),
+                            tertiary_value: Some("@exampleorg/todui-keymove"),
+                            focused_field: EditorField::Tertiary,
                             error: Some("Todo title is required"),
                             footer_hint: "Enter save  Esc cancel",
                         },
@@ -98,7 +119,8 @@ mod tests {
 
         let text = buffer_to_string(terminal.backend().buffer());
         assert!(text.contains("Title: Draft spec"));
-        assert!(text.contains("Notes: cover TUI|"));
+        assert!(text.contains("Notes: cover TUI"));
+        assert!(text.contains("Repo: @exampleorg/todui-keymove|"));
         assert!(text.contains("Todo title is required"));
     }
 

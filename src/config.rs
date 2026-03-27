@@ -49,6 +49,8 @@ pub struct PomodoroConfig {
     pub short_break_minutes: u16,
     #[serde(default = "default_long_break_minutes")]
     pub long_break_minutes: u16,
+    #[serde(default = "default_notify_on_complete")]
+    pub notify_on_complete: bool,
 }
 
 impl Default for PomodoroConfig {
@@ -57,6 +59,7 @@ impl Default for PomodoroConfig {
             focus_minutes: default_focus_minutes(),
             short_break_minutes: default_short_break_minutes(),
             long_break_minutes: default_long_break_minutes(),
+            notify_on_complete: default_notify_on_complete(),
         }
     }
 }
@@ -158,6 +161,10 @@ fn default_long_break_minutes() -> u16 {
     15
 }
 
+fn default_notify_on_complete() -> bool {
+    true
+}
+
 fn default_up_keys() -> Vec<String> {
     vec![String::from("up"), String::from("k")]
 }
@@ -181,6 +188,7 @@ fn default_pomodoro_keys() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::fs;
     use std::path::PathBuf;
 
     use super::{Config, load_from_path, resolve_paths_from};
@@ -223,5 +231,17 @@ mod tests {
         let config = load_from_path(&config_path).expect("default config");
 
         assert_eq!(config, Config::default());
+        assert!(config.pomodoro.notify_on_complete);
+    }
+
+    #[test]
+    fn loads_explicit_pomodoro_completion_notification_flag() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[pomodoro]\nnotify_on_complete = false\n").expect("config");
+
+        let config = load_from_path(&config_path).expect("parsed config");
+
+        assert!(!config.pomodoro.notify_on_complete);
     }
 }

@@ -12,71 +12,48 @@ pub struct ScreenLayout {
     pub mode: LayoutMode,
     pub top_bar: Rect,
     pub main: Rect,
-    pub footer: Rect,
     pub list: Rect,
-    pub details: Option<Rect>,
-    pub pomodoro: Option<Rect>,
+    pub footer: Option<Rect>,
 }
 
 pub fn layout_mode(width: u16) -> LayoutMode {
     match width {
-        0..=69 => LayoutMode::Narrow,
-        70..=99 => LayoutMode::Medium,
+        0..=49 => LayoutMode::Narrow,
+        50..=99 => LayoutMode::Medium,
         _ => LayoutMode::Wide,
     }
 }
 
-pub fn split_screen(area: Rect, medium_drawer_open: bool, top_bar_height: u16) -> ScreenLayout {
+pub fn split_screen(area: Rect, top_bar_height: u16, footer_height: Option<u16>) -> ScreenLayout {
     let mode = layout_mode(area.width);
     let outer = Layout::vertical([
         Constraint::Length(top_bar_height.max(3)),
         Constraint::Min(0),
-        Constraint::Length(3),
     ])
     .split(area);
 
     match mode {
-        LayoutMode::Wide => {
-            let panes =
-                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(outer[1]);
-            let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(panes[1]);
+        _ if footer_height.is_some() => {
+            let footer_height = footer_height.unwrap_or(0).max(3);
+            let panes = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(footer_height.min(outer[1].height)),
+            ])
+            .split(outer[1]);
             ScreenLayout {
                 mode,
                 top_bar: outer[0],
                 main: outer[1],
-                footer: outer[2],
                 list: panes[0],
-                details: Some(right[0]),
-                pomodoro: Some(right[1]),
+                footer: Some(panes[1]),
             }
         }
-        LayoutMode::Medium => {
-            let panes = if medium_drawer_open {
-                Layout::vertical([Constraint::Min(0), Constraint::Length(11)]).split(outer[1])
-            } else {
-                Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(outer[1])
-            };
-            let details = medium_drawer_open.then_some(panes[1]);
-            ScreenLayout {
-                mode,
-                top_bar: outer[0],
-                main: outer[1],
-                footer: outer[2],
-                list: panes[0],
-                details,
-                pomodoro: details,
-            }
-        }
-        LayoutMode::Narrow => ScreenLayout {
+        _ => ScreenLayout {
             mode,
             top_bar: outer[0],
             main: outer[1],
-            footer: outer[2],
             list: outer[1],
-            details: None,
-            pomodoro: None,
+            footer: None,
         },
     }
 }
@@ -100,7 +77,9 @@ mod tests {
 
     #[test]
     fn selects_expected_layout_modes() {
-        assert_eq!(layout_mode(60), LayoutMode::Narrow);
+        assert_eq!(layout_mode(49), LayoutMode::Narrow);
+        assert_eq!(layout_mode(50), LayoutMode::Medium);
+        assert_eq!(layout_mode(60), LayoutMode::Medium);
         assert_eq!(layout_mode(80), LayoutMode::Medium);
         assert_eq!(layout_mode(120), LayoutMode::Wide);
     }
@@ -113,8 +92,26 @@ mod tests {
     }
 
     #[test]
-    fn medium_layout_can_hide_details_drawer() {
-        let layout = split_screen(Rect::new(0, 0, 80, 24), false, 3);
-        assert!(layout.details.is_none());
+    fn wide_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 120, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
+    }
+
+    #[test]
+    fn medium_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 80, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
+    }
+
+    #[test]
+    fn layout_hides_footer_when_not_requested() {
+        let layout = split_screen(Rect::new(0, 0, 120, 24), 3, None);
+        assert!(layout.footer.is_none());
+    }
+
+    #[test]
+    fn narrow_layout_uses_requested_footer_height() {
+        let layout = split_screen(Rect::new(0, 0, 49, 24), 3, Some(4));
+        assert_eq!(layout.footer.expect("footer").height, 4);
     }
 }

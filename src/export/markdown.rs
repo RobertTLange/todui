@@ -17,6 +17,11 @@ pub fn render(snapshot: &SessionSnapshot, options: &MarkdownOptions) -> String {
         format!("# Session: {}", snapshot.session.slug),
         String::new(),
         format!("- slug: {}", snapshot.session.slug),
+    ];
+    if let Some(tag) = &snapshot.session.tag {
+        lines.push(format!("- tag: {tag}"));
+    }
+    lines.extend([
         format!("- revision: {}", snapshot.revision.revision_number),
         format!(
             "- exported-at: {}",
@@ -29,7 +34,7 @@ pub fn render(snapshot: &SessionSnapshot, options: &MarkdownOptions) -> String {
         String::new(),
         String::from("## Todos"),
         String::new(),
-    ];
+    ]);
 
     for todo in snapshot
         .todos
@@ -102,6 +107,8 @@ mod tests {
                 id: 1,
                 slug: String::from("writing-sprint"),
                 name: String::from("Writing Sprint"),
+                tag: Some(String::from("work")),
+                repo: None,
                 created_at: 1,
                 updated_at: 1_711_275_900,
                 last_opened_at: 1_711_275_900,
@@ -118,6 +125,7 @@ mod tests {
                 todo_id: 1,
                 title: String::from("Draft spec"),
                 notes: String::from("cover db"),
+                repo: None,
                 status: TodoStatus::Open,
                 position: 1,
                 created_at: 1_711_275_700,
@@ -139,6 +147,7 @@ mod tests {
         );
 
         assert!(output.contains("- [ ] Draft spec"));
+        assert!(output.contains("- tag: work"));
         assert!(output.contains("notes: cover db"));
     }
 }

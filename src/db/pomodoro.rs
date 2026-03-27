@@ -1,7 +1,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::db::Database;
-use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, PomodoroSummary};
+use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState};
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -21,44 +21,22 @@ impl Database {
 
     pub fn start_pomodoro(
         &mut self,
-        session_slug: &str,
-        todo_id: Option<i64>,
         kind: PomodoroKind,
         planned_seconds: i64,
         now: i64,
     ) -> Result<PomodoroRun> {
         let transaction = self.connection.transaction()?;
-        let session_id: i64 = transaction
-            .query_row(
-                "SELECT id FROM sessions WHERE slug = ?1",
-                [session_slug],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(session_slug.to_string()))?;
-
-        if let Some(todo_id) = todo_id {
-            let todo_session_id: i64 = transaction
-                .query_row(
-                    "SELECT session_id FROM todos WHERE id = ?1",
-                    [todo_id],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or(AppError::TodoNotFound(todo_id))?;
-            if todo_session_id != session_id {
-                return Err(AppError::TodoSessionMismatch {
-                    todo_id,
-                    session: session_slug.to_string(),
-                });
-            }
-        }
-
         let insert = transaction.execute(
             "INSERT INTO pomodoro_runs (
                 session_id, todo_id, kind, state, planned_seconds, started_at, paused_at, accumulated_pause, ended_at, updated_at
              ) VALUES (?1, ?2, ?3, 'running', ?4, ?5, NULL, 0, NULL, ?5)",
-            params![session_id, todo_id, kind.as_str(), planned_seconds, now],
+            params![
+                Option::<i64>::None,
+                Option::<i64>::None,
+                kind.as_str(),
+                planned_seconds,
+                now
+            ],
         );
         match insert {
             Ok(_) => {}
@@ -142,53 +120,6 @@ impl Database {
                 other => AppError::Database(other),
             })
     }
-
-    pub fn pomodoro_summary_for_session(
-        &self,
-        session_id: i64,
-        up_to: Option<i64>,
-    ) -> Result<PomodoroSummary> {
-        let query = match up_to {
-            Some(_) => {
-                "SELECT COUNT(*),
-                        COALESCE(SUM(ended_at - started_at - accumulated_pause), 0)
-                 FROM pomodoro_runs
-                 WHERE session_id = ?1
-                   AND kind = 'focus'
-                   AND state = 'completed'
-                   AND ended_at IS NOT NULL
-                   AND ended_at <= ?2"
-            }
-            None => {
-                "SELECT COUNT(*),
-                        COALESCE(SUM(ended_at - started_at - accumulated_pause), 0)
-                 FROM pomodoro_runs
-                 WHERE session_id = ?1
-                   AND kind = 'focus'
-                   AND state = 'completed'
-                   AND ended_at IS NOT NULL"
-            }
-        };
-
-        let summary = if let Some(upper_bound) = up_to {
-            self.connection
-                .query_row(query, params![session_id, upper_bound], |row| {
-                    Ok(PomodoroSummary {
-                        completed_focus_runs: row.get(0)?,
-                        total_focus_seconds: row.get(1)?,
-                    })
-                })?
-        } else {
-            self.connection.query_row(query, [session_id], |row| {
-                Ok(PomodoroSummary {
-                    completed_focus_runs: row.get(0)?,
-                    total_focus_seconds: row.get(1)?,
-                })
-            })?
-        };
-
-        Ok(summary)
-    }
 }
 
 fn map_pomodoro_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<PomodoroRun> {
@@ -222,31 +153,19 @@ fn map_pomodoro_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<PomodoroRun> {
 #[cfg(test)]
 mod tests {
     use crate::db::Database;
-    use crate::domain::pomodoro::PomodoroKind;
+    use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
 
     #[test]
     fn enforces_single_active_pomodoro() {
         let (_directory, mut database) = Database::open_temp().expect("database");
-        let session = database
-            .create_session("Writing Sprint", None, 1_711_275_600)
+        database
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
             .expect("session");
 
         let run = database
-            .start_pomodoro(
-                &session.slug,
-                None,
-                PomodoroKind::Focus,
-                1_500,
-                1_711_275_700,
-            )
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_700)
             .expect("run");
-        let second = database.start_pomodoro(
-            &session.slug,
-            None,
-            PomodoroKind::ShortBreak,
-            300,
-            1_711_275_701,
-        );
+        let second = database.start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_701);
         assert!(second.is_err());
 
         let paused = database
@@ -260,14 +179,19 @@ mod tests {
         let completed = database
             .complete_pomodoro(run.id, 1_711_276_000)
             .expect("completed");
-        assert_eq!(
-            completed.state,
-            crate::domain::pomodoro::PomodoroState::Completed
-        );
+        assert_eq!(completed.state, PomodoroState::Completed);
+    }
 
-        let summary = database
-            .pomodoro_summary_for_session(session.id, None)
-            .expect("summary");
-        assert_eq!(summary.completed_focus_runs, 1);
+    #[test]
+    fn starts_unlinked_global_pomodoro() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+
+        let run = database
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_700)
+            .expect("run");
+
+        assert_eq!(run.session_id, None);
+        assert_eq!(run.todo_id, None);
+        assert_eq!(run.state, PomodoroState::Running);
     }
 }

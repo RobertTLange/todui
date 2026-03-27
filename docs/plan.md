@@ -53,7 +53,8 @@ Fixed decisions; do not re-open unless spec changes:
 - Todo deletion is a successful session mutation and creates a new snapshot revision.
 - Session deletion is a hard delete and does not create a final revision.
 - Markdown export default = GFM.
-- Pomodoro lives inside session view only.
+- Sessions may carry one optional tag; overview groups by tag and shows `untagged` last.
+- Pomodoro runs are global, with an active footer shown in overview and live session views.
 - Keyboard-first, mouse-complete, modeless navigation.
 - SQLite config = WAL + foreign keys on + busy timeout + STRICT tables.
 - Timestamps stored as UTC Unix epoch integers.
@@ -122,7 +123,7 @@ Scope:
 
 - Implement bare `todui` overview flow that lists sessions and opens the selected session head.
 - Implement `todui resume` head flow.
-- Build top bar, list pane, detail pane, footer.
+- Build top bar, list pane, details overlay, footer.
 - Implement selection, keyboard navigation, Vim aliases, mouse row select, checkbox toggle hitbox.
 - Render timestamps and semantic styles.
 - Implement narrow-layout behavior.
