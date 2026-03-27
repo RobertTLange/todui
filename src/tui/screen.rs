@@ -1804,6 +1804,7 @@ mod tests {
         assert!(toast.contains("Notice"));
     }
 
+    #[test]
     fn stacked_layout_keeps_details_and_pomodoro_visible_at_sixty_columns() {
         let (_directory, _database, screen) = seeded_screen();
 
