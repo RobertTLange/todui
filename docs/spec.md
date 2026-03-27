@@ -368,7 +368,6 @@ Pomodoro footer
 	•	phase label: FOCUS, SHORT BREAK, LONG BREAK
 	•	remaining time
 	•	progress bar
-	•	linked todo title or “No linked todo”
 	•	controls live in help text: Start / Pause / Resume / Cancel
 
 Footer
@@ -425,7 +424,7 @@ Session actions
 	•	H open revision history
 	•	Left closes details first, otherwise returns to the session overview
 	•	r when in revision mode, return to head
-	•	p open or trigger Pomodoro action on the selected todo, or start unlinked if no todo is selected
+	•	p open or trigger Pomodoro action
 
 Pomodoro actions
 	•	p start focus if idle
@@ -764,11 +763,11 @@ The active footer appears:
 
 17.2 Attach model
 
-A Pomodoro run is session-agnostic and may optionally belong to a selected todo.
+A Pomodoro run is session-agnostic and not attached to any specific todo.
 
 Behavior:
-	•	if a todo is selected when starting focus, attach to that todo
-	•	if no todo is selected, start an unlinked global run
+	•	start runs globally from either overview or live session view
+	•	selected todo does not affect Pomodoro state
 
 17.3 State machine
 
@@ -1007,7 +1006,7 @@ enum Action {
     OpenHistory,
     SelectRevision { revision: u32 },
 
-    StartPomodoro { kind: PomodoroKind, todo_id: Option<i64> },
+    StartPomodoro { kind: PomodoroKind },
     PausePomodoro,
     ResumePomodoro,
     CancelPomodoro,
@@ -1104,7 +1103,7 @@ get_revision_todos(session_id, revision_number) -> Vec<RevisionTodo>
 list_revisions(session_id) -> Vec<RevisionSummary>
 create_revision_snapshot(session_id, reason, now) -> RevisionSummary
 
-start_pomodoro(todo_id, kind, planned_seconds, now)
+start_pomodoro(kind, planned_seconds, now)
 pause_pomodoro(run_id, now)
 resume_pomodoro(run_id, now)
 cancel_pomodoro(run_id, now)
