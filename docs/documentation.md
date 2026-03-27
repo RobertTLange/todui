@@ -47,13 +47,15 @@ Primary references:
   - CLI outputs stay compact and scriptable: identifiers / tab-separated summaries to stdout, errors via process exit path
 - Milestone 2-5 implementation choices:
   - bare `todui` now opens a real ratatui+crossterm session overview, while `resume` stays the direct session opener
-  - the overview is browse-only; session recency changes only when a session is actually entered, and `o` returns from a session back to the overview
+  - sessions now carry one optional normalized tag, the overview groups sections by tag, and `untagged` is shown last
+  - the overview is browse-first for session opening, but tag editing now also lives there: `t` edits the selected session tag without entering the session
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
-  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name, and `n` in a live session creates a todo with title + notes
+  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag, and `n` in a live session creates a todo with title + notes
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
   - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
+  - CLI session management now includes `todui session new --tag ...`, `todui session tag [session] --set ...`, `todui session tag [session] --clear`, and `todui session list` / markdown export both surface session tags
   - historical revisions remain mutation-blocked, including both delete actions
   - overview/session navigation now supports arrow traversal across screens: `Right` opens the selected session from overview, and `Left` returns from a session to overview
 
@@ -66,7 +68,7 @@ Current repo state:
 - Milestone 1 smoke commands now pass:
 
 ```bash
-target/debug/todui session new "Writing Sprint"
+target/debug/todui session new "Writing Sprint" --tag work
 target/debug/todui add "Draft design spec" --session writing-sprint
 target/debug/todui done 1 --session writing-sprint
 target/debug/todui export md writing-sprint --format gfm
@@ -92,6 +94,7 @@ Target smoke commands:
 
 ```bash
 todui session new "Writing Sprint"
+todui session tag writing-sprint --set private
 todui add "Draft design spec" --session writing-sprint
 todui
 todui resume writing-sprint
@@ -117,7 +120,9 @@ TUI create flow:
 
 - `todui`
 - `n` to create a session from the overview
+- `Tab` inside the overview session modal to move between name and optional tag
 - `Enter` to open the new session head
+- `t` in overview to edit or clear the selected session tag
 - `n` again to add a todo with optional notes inside the session view
 - `e` on the selected todo to edit title and notes in the same modal
 - `d` on the selected live todo to open a delete confirmation

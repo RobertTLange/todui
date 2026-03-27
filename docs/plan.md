@@ -53,6 +53,7 @@ Fixed decisions; do not re-open unless spec changes:
 - Todo deletion is a successful session mutation and creates a new snapshot revision.
 - Session deletion is a hard delete and does not create a final revision.
 - Markdown export default = GFM.
+- Sessions may carry one optional tag; overview groups by tag and shows `untagged` last.
 - Pomodoro lives inside session view only.
 - Keyboard-first, mouse-complete, modeless navigation.
 - SQLite config = WAL + foreign keys on + busy timeout + STRICT tables.
