@@ -8,7 +8,7 @@ This spec assumes Rust + Ratatui + Crossterm + SQLite. That is a good fit here b
 
 Build a local-first terminal app named todui with:
 	•	a full-screen TUI for browsing and editing to-do sessions
-	•	a CLI for creating sessions, resuming sessions, adding todos, inspecting history, and exporting markdown
+	•	a CLI for creating sessions, resuming sessions, adding/editing todos, inspecting history, and exporting markdown
 	•	session-specific revision history
 	•	optional Pomodoro support embedded inside the session view
 	•	mouse and keyboard navigation
@@ -78,6 +78,7 @@ The app shall:
 	•	resume a named session
 	•	open a previous revision of a session
 	•	add todos from CLI and TUI
+	•	edit todo title and notes from CLI and TUI
 	•	toggle todo completion from CLI and TUI
 	•	display timestamps in the TUI
 	•	export a markdown text version of a session
@@ -128,7 +129,8 @@ Instead:
 5.3 Separate selection from completion
 	•	click row = select todo
 	•	click checkbox = toggle done
-	•	Enter = open/edit selected todo
+	•	Enter = open selected todo details
+	•	e = edit selected todo
 	•	Space or x = toggle done on selected todo
 
 Do not make whole-row click toggle completion.
@@ -187,6 +189,8 @@ todui session list
 todui session history [<session>]
 
 todui add <title> [--session <session>] [--note <text>]
+todui edit <todo-id> [--session <session>] [--title <text>] \
+  [--note <text> | --clear-note]
 todui done <todo-id> [--session <session>]
 todui undone <todo-id> [--session <session>]
 
@@ -206,6 +210,12 @@ todui resume
 todui add
 	•	if --session is omitted, add to the most recently opened session head
 	•	if no session exists, return an error
+
+todui edit
+	•	requires at least one of --title, --note, or --clear-note
+	•	if --session is provided, the todo must belong to that session
+	•	--note and --clear-note are mutually exclusive
+	•	omitted fields keep their current value
 
 todui export md
 	•	defaults to most recent session head
@@ -233,6 +243,7 @@ Slug rules:
 
 todui session new "Writing Sprint"
 todui add "Draft design spec" --session writing-sprint
+todui edit 1 --session writing-sprint --title "Draft final design spec" --clear-note
 todui add "Review keybindings" --session writing-sprint --note "Ghostty + mouse"
 todui resume writing-sprint
 todui resume writing-sprint --revision 3
@@ -387,7 +398,7 @@ Session actions
 	•	n create new todo in current session
 	•	e edit selected todo
 	•	Space / x toggle done
-	•	Enter open details/editor
+	•	Enter open details
 	•	H open revision history
 	•	o return to the session overview
 	•	r when in revision mode, return to head
