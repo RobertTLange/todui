@@ -1,17 +1,10 @@
 use std::cmp::min;
-use std::io::{Stdout, stdout};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
@@ -27,11 +20,11 @@ use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
+use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::Theme;
+use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 
 const EVENT_POLL_MS: u64 = 250;
-
-type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn run(
     database: &mut Database,
@@ -39,31 +32,44 @@ pub fn run(
     session_slug: Option<String>,
     revision: Option<u32>,
 ) -> Result<()> {
+    super::run(
+        database,
+        config,
+        super::TuiRoute::Session {
+            session_slug,
+            revision,
+        },
+    )
+}
+
+pub(crate) fn run_in_terminal(
+    terminal: &mut AppTerminal,
+    database: &mut Database,
+    config: &Config,
+    session_slug: Option<String>,
+    revision: Option<u32>,
+) -> Result<SessionExit> {
     let resolved_slug = database.resolve_session_slug(session_slug.as_deref())?;
     database.mark_session_opened(&resolved_slug, now_utc_timestamp())?;
 
     let mut screen = SessionScreen::new(resolved_slug, revision, config.clone());
     screen.reload(database)?;
-
-    let mut terminal = init_terminal()?;
-    let result = event_loop(&mut terminal, database, &mut screen);
-    restore_terminal(&mut terminal)?;
-    result
+    event_loop(terminal, database, &mut screen)
 }
 
 fn event_loop(
     terminal: &mut AppTerminal,
     database: &mut Database,
     screen: &mut SessionScreen,
-) -> Result<()> {
+) -> Result<SessionExit> {
     loop {
         terminal.draw(|frame| screen.render(frame))?;
 
         if event::poll(Duration::from_millis(EVENT_POLL_MS))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    if screen.handle_key(database, key_event)? {
-                        break Ok(());
+                    if let Some(exit) = screen.handle_key(database, key_event)? {
+                        break Ok(exit);
                     }
                 }
                 Event::Mouse(mouse_event) => {
@@ -80,22 +86,10 @@ fn event_loop(
     }
 }
 
-fn init_terminal() -> Result<AppTerminal> {
-    enable_raw_mode()?;
-    let mut handle = stdout();
-    execute!(handle, EnterAlternateScreen, EnableMouseCapture)?;
-    Ok(Terminal::new(CrosstermBackend::new(handle))?)
-}
-
-fn restore_terminal(terminal: &mut AppTerminal) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionExit {
+    Quit,
+    Overview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,12 +97,33 @@ enum Overlay {
     Help,
     History,
     Details,
+    TodoEditor,
+    DeleteTodo { id: i64, title: String },
+    DeleteSession { slug: String, name: String },
 }
 
 #[derive(Debug, Clone)]
 struct ToastState {
     message: String,
     expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TodoEditorState {
+    mode: TodoEditorMode,
+    title: String,
+    notes: String,
+    focused_field: EditorField,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TodoEditorMode {
+    #[default]
+    Create,
+    Edit {
+        todo_id: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -124,6 +139,7 @@ struct SessionScreen {
     history_index: usize,
     medium_drawer_open: bool,
     overlay: Option<Overlay>,
+    todo_editor: TodoEditorState,
     toast: Option<ToastState>,
     theme: Theme,
     config: Config,
@@ -146,6 +162,7 @@ impl SessionScreen {
             history_index: 0,
             medium_drawer_open: true,
             overlay: None,
+            todo_editor: TodoEditorState::default(),
             toast: None,
             theme: Theme::from_config(&config),
             config,
@@ -173,9 +190,13 @@ impl SessionScreen {
         Ok(())
     }
 
-    fn handle_key(&mut self, database: &mut Database, key: KeyEvent) -> Result<bool> {
+    fn handle_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            return Ok(true);
+            return Ok(Some(SessionExit::Quit));
         }
 
         match self.overlay {
@@ -187,97 +208,118 @@ impl SessionScreen {
                 ) {
                     self.overlay = None;
                 }
-                return Ok(false);
+                return Ok(None);
+            }
+            Some(Overlay::TodoEditor) => return self.handle_todo_editor_key(database, key),
+            Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. }) => {
+                return self.handle_delete_key(database, key);
             }
             Some(Overlay::Details) => {
                 if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                     self.overlay = None;
                 }
-                return Ok(false);
+                return Ok(None);
             }
             None => {}
         }
 
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => Ok(true),
+            KeyCode::Char('q') | KeyCode::Esc => Ok(Some(SessionExit::Quit)),
+            KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
             KeyCode::Char('?') => {
                 self.overlay = Some(Overlay::Help);
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Up | KeyCode::Char('k')
                 if matches!(key.code, KeyCode::Up)
                     || key_matches_binding(&key, &self.config.keys.up) =>
             {
                 self.move_selection(-1, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Down | KeyCode::Char('j')
                 if matches!(key.code, KeyCode::Down)
                     || key_matches_binding(&key, &self.config.keys.down) =>
             {
                 self.move_selection(1, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.selected_index = 0;
                 self.scroll_offset = 0;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::End | KeyCode::Char('G') => {
                 self.selected_index = self.snapshot().todos.len().saturating_sub(1);
                 self.ensure_selection_visible(self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::PageUp => {
                 self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::PageDown => {
                 self.move_selection(self.visible_rows() as isize, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(-(self.visible_rows() as isize), self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_selection(self.visible_rows() as isize, self.visible_rows());
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('x') | KeyCode::Char(' ')
                 if key_matches_binding(&key, &self.config.keys.toggle_done) =>
             {
                 self.toggle_selected_todo(database)?;
-                Ok(false)
+                Ok(None)
+            }
+            KeyCode::Char('n') => {
+                self.open_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Char('e') => {
+                self.open_selected_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Char('d') => {
+                self.open_delete_todo();
+                Ok(None)
+            }
+            KeyCode::Char('D') => {
+                self.open_delete_session();
+                Ok(None)
             }
             KeyCode::Char('H') if key_matches_binding(&key, &self.config.keys.history) => {
                 self.overlay = Some(Overlay::History);
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('r') if self.revision.is_some() => {
                 self.revision = None;
                 self.reload(database)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('p') if key_matches_binding(&key, &self.config.keys.pomodoro) => {
                 self.handle_pomodoro(database, PomodoroKind::Focus)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('b') => {
                 self.handle_pomodoro(database, PomodoroKind::ShortBreak)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('B') => {
                 self.handle_pomodoro(database, PomodoroKind::LongBreak)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Char('c') => {
                 self.cancel_active_pomodoro(database)?;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Tab => {
                 self.medium_drawer_open = !self.medium_drawer_open;
-                Ok(false)
+                Ok(None)
             }
             KeyCode::Enter => {
                 if matches!(
@@ -291,13 +333,54 @@ impl SessionScreen {
                 ) {
                     self.overlay = Some(Overlay::Details);
                 }
-                Ok(false)
+                Ok(None)
             }
-            _ => Ok(false),
+            _ => Ok(None),
         }
     }
 
-    fn handle_history_key(&mut self, database: &Database, key: KeyEvent) -> Result<bool> {
+    fn handle_todo_editor_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_todo_editor();
+                Ok(None)
+            }
+            KeyCode::Tab => {
+                self.todo_editor.focused_field = match self.todo_editor.focused_field {
+                    EditorField::Primary => EditorField::Secondary,
+                    EditorField::Secondary => EditorField::Primary,
+                };
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                self.submit_todo_editor(database)?;
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                let field = self.focused_todo_field();
+                field.pop();
+                self.todo_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let field = self.focused_todo_field();
+                field.push(character);
+                self.todo_editor.error = None;
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_history_key(
+        &mut self,
+        database: &Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.overlay = None,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -318,7 +401,39 @@ impl SessionScreen {
             }
             _ => {}
         }
-        Ok(false)
+        Ok(None)
+    }
+
+    fn handle_delete_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<SessionExit>> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.overlay = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let overlay = self.overlay.clone();
+                match overlay {
+                    Some(Overlay::DeleteTodo { id, .. }) => {
+                        database.delete_todo(id, Some(&self.session_slug), now_utc_timestamp())?;
+                        self.reload(database)?;
+                        self.overlay = None;
+                        self.set_toast(String::from("Todo deleted"));
+                        Ok(None)
+                    }
+                    Some(Overlay::DeleteSession { slug, .. }) => {
+                        database.delete_session(&slug)?;
+                        self.overlay = None;
+                        Ok(Some(SessionExit::Overview))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     fn handle_mouse(
@@ -327,6 +442,15 @@ impl SessionScreen {
         area: Rect,
         mouse: MouseEvent,
     ) -> Result<()> {
+        if matches!(
+            self.overlay,
+            Some(Overlay::TodoEditor | Overlay::Help | Overlay::Details)
+        ) || matches!(
+            self.overlay,
+            Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. })
+        ) {
+            return Ok(());
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => self.move_selection(-1, self.visible_rows()),
             MouseEventKind::ScrollDown => self.move_selection(1, self.visible_rows()),
@@ -491,6 +615,21 @@ impl SessionScreen {
             frame.render_widget(Clear, area);
             frame.render_stateful_widget(self.history_overlay(), area, &mut self.history_state());
         }
+        if matches!(self.overlay, Some(Overlay::TodoEditor)) {
+            let area = centered_rect(frame.area(), 60, 10);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.todo_editor_modal(), area);
+        }
+        if let Some(Overlay::DeleteTodo { title, .. }) = &self.overlay {
+            let area = centered_rect(frame.area(), 60, 8);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.delete_todo_modal(title), area);
+        }
+        if let Some(Overlay::DeleteSession { slug, name }) = &self.overlay {
+            let area = centered_rect(frame.area(), 60, 9);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.delete_session_modal(slug, name), area);
+        }
         if let Some(toast) = &self.toast {
             let area = centered_rect(frame.area(), 50, 3);
             frame.render_widget(Clear, area);
@@ -629,15 +768,17 @@ impl SessionScreen {
 
     fn footer(&self, layout_mode: LayoutMode) -> Paragraph<'static> {
         let text = if self.is_read_only() {
-            "j/k move  H history  r return to head  q quit"
+            "j/k move  H history  r return to head  o overview  q quit"
         } else {
             match layout_mode {
-                LayoutMode::Wide => "j/k move  space toggle  H history  p pomodoro  q quit",
+                LayoutMode::Wide => {
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  H history  p pomodoro  o overview  q quit"
+                }
                 LayoutMode::Medium => {
-                    "j/k move  space toggle  Tab drawer  H history  p pomodoro  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Tab drawer  H history  p pomodoro  o overview  q quit"
                 }
                 LayoutMode::Narrow => {
-                    "j/k move  space toggle  Enter details  H history  p pomodoro  q quit"
+                    "j/k move  n new  e edit  d del todo  D del session  space toggle  Enter details  H history  p pomodoro  o overview  q quit"
                 }
             }
         };
@@ -648,10 +789,44 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p, b, B, c\nOverview: o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title("Help"))
+        .style(self.theme.block_style())
+    }
+
+    fn todo_editor_modal(&self) -> Paragraph<'_> {
+        render_editor(
+            &self.theme,
+            EditorView {
+                title: self.todo_editor_title(),
+                primary_label: "Title",
+                primary_value: &self.todo_editor.title,
+                secondary_label: Some("Notes"),
+                secondary_value: Some(&self.todo_editor.notes),
+                focused_field: self.todo_editor.focused_field,
+                error: self.todo_editor.error.as_deref(),
+                footer_hint: self.todo_editor_footer_hint(),
+            },
+        )
+    }
+
+    fn delete_todo_modal(&self, title: &str) -> Paragraph<'static> {
+        Paragraph::new(format!(
+            "Delete todo?\n\n{title}\n\nEnter delete  Esc cancel"
+        ))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Delete Todo"))
+        .style(self.theme.block_style())
+    }
+
+    fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
+        Paragraph::new(format!(
+            "Delete session {name} ({slug})?\n\nThis permanently removes its todos, history, and pomodoro runs.\n\nEnter delete  Esc cancel"
+        ))
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title("Delete Session"))
         .style(self.theme.block_style())
     }
 
@@ -768,6 +943,135 @@ impl SessionScreen {
             self.toast = None;
         }
     }
+
+    fn open_todo_editor(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        self.todo_editor = TodoEditorState {
+            mode: TodoEditorMode::Create,
+            focused_field: EditorField::Primary,
+            ..TodoEditorState::default()
+        };
+        self.overlay = Some(Overlay::TodoEditor);
+    }
+
+    fn open_selected_todo_editor(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+
+        let Some((todo_id, title, notes)) = self
+            .current_todo()
+            .map(|todo| (todo.todo_id, todo.title.clone(), todo.notes.clone()))
+        else {
+            return;
+        };
+        self.todo_editor = TodoEditorState {
+            mode: TodoEditorMode::Edit { todo_id },
+            title,
+            notes,
+            focused_field: EditorField::Primary,
+            error: None,
+        };
+        self.overlay = Some(Overlay::TodoEditor);
+    }
+
+    fn open_delete_todo(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        let Some(todo) = self.current_todo() else {
+            return;
+        };
+        self.overlay = Some(Overlay::DeleteTodo {
+            id: todo.todo_id,
+            title: todo.title.clone(),
+        });
+    }
+
+    fn open_delete_session(&mut self) {
+        if self.is_read_only() {
+            self.set_toast(String::from("Historical revisions are read-only"));
+            return;
+        }
+        let session = &self.snapshot().session;
+        self.overlay = Some(Overlay::DeleteSession {
+            slug: session.slug.clone(),
+            name: session.name.clone(),
+        });
+    }
+
+    fn close_todo_editor(&mut self) {
+        self.overlay = None;
+        self.todo_editor = TodoEditorState::default();
+    }
+
+    fn submit_todo_editor(&mut self, database: &mut Database) -> Result<()> {
+        let title = self.todo_editor.title.trim();
+        if title.is_empty() {
+            self.todo_editor.error = Some(String::from("Todo title is required"));
+            return Ok(());
+        }
+
+        let saved = match self.todo_editor.mode {
+            TodoEditorMode::Create => database.add_todo(
+                &self.session_slug,
+                title,
+                self.todo_editor.notes.trim(),
+                now_utc_timestamp(),
+            ),
+            TodoEditorMode::Edit { todo_id } => database.update_todo(
+                todo_id,
+                Some(&self.session_slug),
+                title,
+                self.todo_editor.notes.trim(),
+                now_utc_timestamp(),
+            ),
+        };
+
+        let saved = match saved {
+            Ok(todo) => todo,
+            Err(error) => {
+                self.todo_editor.error = Some(error.to_string());
+                return Ok(());
+            }
+        };
+
+        self.reload(database)?;
+        self.reselect(Some(saved.id));
+        let toast = match self.todo_editor.mode {
+            TodoEditorMode::Create => String::from("Todo added"),
+            TodoEditorMode::Edit { .. } => String::from("Todo updated"),
+        };
+        self.close_todo_editor();
+        self.set_toast(toast);
+        Ok(())
+    }
+
+    fn focused_todo_field(&mut self) -> &mut String {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => &mut self.todo_editor.title,
+            EditorField::Secondary => &mut self.todo_editor.notes,
+        }
+    }
+
+    fn todo_editor_title(&self) -> &'static str {
+        match self.todo_editor.mode {
+            TodoEditorMode::Create => "New Todo",
+            TodoEditorMode::Edit { .. } => "Edit Todo",
+        }
+    }
+
+    fn todo_editor_footer_hint(&self) -> &'static str {
+        match self.todo_editor.mode {
+            TodoEditorMode::Create => "Tab next field  Enter create  Esc cancel",
+            TodoEditorMode::Edit { .. } => "Tab next field  Enter save  Esc cancel",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -878,7 +1182,7 @@ mod tests {
     use ratatui::layout::Rect;
 
     use super::{
-        ListClickTarget, Overlay, SessionScreen, format_duration, key_matches_binding,
+        ListClickTarget, Overlay, SessionExit, SessionScreen, format_duration, key_matches_binding,
         list_click_target, progress_bar,
     };
     use crate::config::Config;
@@ -936,9 +1240,10 @@ mod tests {
     fn screen_handles_navigation_toggle_history_and_read_only_paths() {
         let (_directory, mut database, mut screen) = seeded_screen();
         assert!(
-            !screen
+            screen
                 .handle_key(&mut database, key(KeyCode::Char('?')))
                 .unwrap()
+                .is_none()
         );
         assert!(matches!(screen.overlay, Some(Overlay::Help)));
         screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
@@ -965,10 +1270,38 @@ mod tests {
             .unwrap();
 
         screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("New Todo"));
+        for character in "Outline modal flow".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "include notes".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos.len(), 3);
+        assert_eq!(
+            screen.current_todo().expect("selected").title,
+            "Outline modal flow"
+        );
+        assert_eq!(
+            screen.current_todo().expect("selected").notes,
+            "include notes"
+        );
+
+        screen
             .handle_key(&mut database, key(KeyCode::Char('x')))
             .unwrap();
         assert_eq!(
-            screen.snapshot().todos[0].status,
+            screen.snapshot().todos[2].status,
             crate::domain::todo::TodoStatus::Done
         );
 
@@ -996,6 +1329,88 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('r')))
             .unwrap();
         assert!(matches!(screen.snapshot().mode, RevisionMode::Head));
+        screen
+            .handle_key(&mut database, key(KeyCode::Home))
+            .unwrap();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Edit Todo"));
+        for _ in 0.."Draft spec".len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "Draft polished spec".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for _ in 0.."cover db".len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "cover db and tui".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos[0].title, "Draft polished spec");
+        assert_eq!(screen.snapshot().todos[0].notes, "cover db and tui");
+
+        assert_eq!(
+            screen
+                .handle_key(&mut database, key(KeyCode::Char('o')))
+                .unwrap(),
+            Some(SessionExit::Overview)
+        );
+    }
+
+    #[test]
+    fn screen_blocks_blank_todo_title_and_read_only_creation() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Todo title is required"));
+        assert_eq!(screen.snapshot().todos.len(), 2);
+
+        screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(matches!(
+            screen.snapshot().mode,
+            RevisionMode::Historical(_)
+        ));
+        let revision_todo_count = screen.snapshot().todos.len();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+        assert_eq!(screen.snapshot().todos.len(), revision_todo_count);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
     }
 
     #[test]
@@ -1065,6 +1480,71 @@ mod tests {
     }
 
     #[test]
+    fn screen_confirms_and_deletes_selected_todo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('d')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Delete Todo"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(screen.snapshot().todos.len(), 1);
+        assert_eq!(screen.snapshot().todos[0].title, "Review bindings");
+        assert!(
+            screen
+                .toast
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("Todo deleted")
+        );
+    }
+
+    #[test]
+    fn screen_confirms_and_deletes_current_session() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        assert!(render_buffer(&screen, 120, 24).contains("Delete Session"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(exit, Some(SessionExit::Overview));
+        assert!(database.get_session_by_slug("writing-sprint").is_err());
+    }
+
+    #[test]
+    fn screen_blocks_delete_in_read_only_revision() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('H')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('d')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('D')))
+            .unwrap();
+        assert!(screen.toast.as_ref().unwrap().message.contains("read-only"));
+    }
+
+    #[test]
     fn screen_tick_completes_timer_and_toast_expires() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
@@ -1096,6 +1576,8 @@ mod tests {
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Todos"));
+        assert!(wide.contains("e edit"));
+        assert!(wide.contains("o overview"));
 
         screen.medium_drawer_open = true;
         let medium = render_buffer(&screen, 80, 24);
@@ -1112,6 +1594,12 @@ mod tests {
         screen.overlay = Some(Overlay::Help);
         let help = render_buffer(&screen, 120, 24);
         assert!(help.contains("Navigation"));
+        assert!(help.contains("Overview: o"));
+
+        screen.overlay = Some(Overlay::TodoEditor);
+        let editor = render_buffer(&screen, 120, 24);
+        assert!(editor.contains("New Todo"));
+        assert!(editor.contains("Title"));
 
         screen.toast = Some(super::ToastState {
             message: String::from("hello"),

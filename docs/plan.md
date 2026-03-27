@@ -47,8 +47,11 @@ Design notes:
 Fixed decisions; do not re-open unless spec changes:
 
 - `todui resume` defaults to most recent session head.
+- bare `todui` opens the session overview and does not mutate last-opened state by itself.
 - Historical revisions are view-only and read-only.
 - Revision strategy = full snapshot per successful session mutation.
+- Todo deletion is a successful session mutation and creates a new snapshot revision.
+- Session deletion is a hard delete and does not create a final revision.
 - Markdown export default = GFM.
 - Pomodoro lives inside session view only.
 - Keyboard-first, mouse-complete, modeless navigation.
@@ -117,6 +120,7 @@ todui export md writing-sprint --format gfm
 
 Scope:
 
+- Implement bare `todui` overview flow that lists sessions and opens the selected session head.
 - Implement `todui resume` head flow.
 - Build top bar, list pane, detail pane, footer.
 - Implement selection, keyboard navigation, Vim aliases, mouse row select, checkbox toggle hitbox.
@@ -125,6 +129,7 @@ Scope:
 
 Acceptance criteria:
 
+- `todui` opens the overview TUI, including an empty state when no sessions exist.
 - TUI opens the most recent session or requested session head.
 - Keyboard-only flow covers all v1 head interactions.
 - Mouse support works where terminal reports it, but app remains fully usable without it.
@@ -201,6 +206,7 @@ Scope:
 - Finalize semantic theme tokens and status rendering.
 - Complete export options: `--timestamps`, `--include-notes`, `--open-only`, `--revision`.
 - Add/expand unit, repo, CLI, and TUI tests from spec.
+- Add hard-delete support for todos and sessions in CLI and TUI, with TUI confirmation.
 - Tighten error messages and final UX polish.
 
 Acceptance criteria:
@@ -208,6 +214,8 @@ Acceptance criteria:
 - Config overrides default values cleanly.
 - Export behavior matches option matrix in spec.
 - Test suite covers critical v1 flows.
+- Todo delete preserves ordering invariants and revision history.
+- Session delete removes the session and cascaded data cleanly.
 - Full gate passes clean.
 
 Validation commands:
@@ -225,8 +233,10 @@ todui export md writing-sprint --revision 1 --timestamps full --include-notes
 todui session new "Writing Sprint"
 todui add "Draft design spec" --session writing-sprint
 todui add "Review keybindings" --session writing-sprint --note "Ghostty + mouse"
+todui delete 1 --session writing-sprint
 todui resume writing-sprint
 todui session history writing-sprint
+todui session delete writing-sprint
 todui resume writing-sprint --revision 2
 todui export md writing-sprint --revision 2 --format gfm
 ```
