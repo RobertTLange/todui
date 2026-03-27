@@ -12,7 +12,6 @@ pub struct ScreenLayout {
     pub mode: LayoutMode,
     pub top_bar: Rect,
     pub main: Rect,
-    pub footer: Rect,
     pub list: Rect,
     pub details: Option<Rect>,
     pub pomodoro: Option<Rect>,
@@ -37,7 +36,6 @@ pub fn split_screen(
     let outer = Layout::vertical([
         Constraint::Length(top_bar_height.max(3)),
         Constraint::Min(0),
-        Constraint::Length(3),
     ])
     .split(area);
 
@@ -55,7 +53,6 @@ pub fn split_screen(
                 mode,
                 top_bar: outer[0],
                 main: outer[1],
-                footer: outer[2],
                 list: panes[0],
                 details: Some(right[0]),
                 pomodoro: Some(right[1]),
@@ -81,7 +78,6 @@ pub fn split_screen(
                 mode,
                 top_bar: outer[0],
                 main: outer[1],
-                footer: outer[2],
                 list: panes[0],
                 details,
                 pomodoro,
@@ -91,7 +87,6 @@ pub fn split_screen(
             mode,
             top_bar: outer[0],
             main: outer[1],
-            footer: outer[2],
             list: outer[1],
             details: None,
             pomodoro: None,

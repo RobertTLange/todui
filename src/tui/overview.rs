@@ -285,12 +285,8 @@ impl OverviewScreen {
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         self.last_area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(frame.area());
+        let chunks =
+            Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(frame.area());
 
         frame.render_widget(self.top_bar(), chunks[0]);
 
@@ -314,8 +310,6 @@ impl OverviewScreen {
                 frame.render_widget(self.details_panel(), details_area);
             }
         }
-
-        frame.render_widget(self.footer(), chunks[2]);
 
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 54, 8);
@@ -415,12 +409,6 @@ impl OverviewScreen {
             .style(self.theme.block_style())
     }
 
-    fn footer(&self) -> Paragraph<'static> {
-        Paragraph::new("j/k move  n new  t tag  D delete  Enter open  q quit")
-            .block(Block::default().borders(Borders::ALL).title("Keys"))
-            .style(self.theme.block_style())
-    }
-
     fn session_editor_modal(&self) -> Paragraph<'_> {
         let (title, primary_label, primary_value, secondary_label, secondary_value, footer_hint) =
             match &self.overlay {
@@ -515,12 +503,7 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
-        let body = Layout::vertical([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(area)[1];
+        let body = Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(area)[1];
         if body.width >= 90 {
             Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(body)
                 [0]
@@ -801,6 +784,7 @@ mod tests {
         assert!(populated_buffer.contains("writing-sprint"));
         assert!(populated_buffer.contains("Enter opens the session head."));
         assert!(populated_buffer.contains("return here."));
+        assert!(!populated_buffer.contains("Keys"));
 
         let (_directory, database) = Database::open_temp().expect("database");
         let mut empty = OverviewScreen::new(Config::default());
@@ -808,6 +792,7 @@ mod tests {
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
+        assert!(!empty_buffer.contains("Keys"));
     }
 
     #[test]
