@@ -55,6 +55,7 @@ Primary references:
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
   - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
   - historical revisions remain mutation-blocked, including both delete actions
+  - overview/session navigation now supports arrow traversal across screens: `Right` opens the selected session from overview, and `Left` returns from a session to overview
 
 ## How To Run + Demo
 
