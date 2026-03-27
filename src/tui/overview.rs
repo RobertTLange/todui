@@ -21,6 +21,8 @@ use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 
 const EVENT_POLL_MS: u64 = 250;
+const SUMMARY_PANEL_PERCENT: u16 = 15;
+const SUMMARY_PANEL_MIN_HEIGHT: u16 = 8;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -307,20 +309,14 @@ impl OverviewScreen {
         if self.sessions.is_empty() {
             frame.render_widget(self.empty_state(), chunks[1]);
         } else {
-            let body = if chunks[1].width >= 90 {
-                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(chunks[1])
-            } else {
-                Layout::horizontal([Constraint::Percentage(100)]).split(chunks[1])
-            };
-
-            let list_area = body[0];
+            let (list_area, summary_area, details_area) = self.body_areas(frame.area());
             frame.render_stateful_widget(
                 self.session_list(list_area.height),
                 list_area,
                 &mut self.list_state(),
             );
-            if let Some(details_area) = body.get(1).copied() {
+            frame.render_widget(self.summary_panel(), summary_area);
+            if let Some(details_area) = details_area {
                 frame.render_widget(self.details_panel(), details_area);
             }
         }
@@ -438,6 +434,35 @@ impl OverviewScreen {
                     .style(self.theme.surface_style(SurfaceTone::Neutral))
                     .border_style(self.theme.surface_border_style(SurfaceTone::Details))
                     .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
+    }
+
+    fn summary_panel(&self) -> Paragraph<'static> {
+        let stats = self.summary_stats();
+        let text = format!(
+            "total sessions: {} | tagged: {} | untagged: {}\ntotal todos: {} | open: {} | completed: {}\ncompletion rate: {}%\nnewest opened: {}\noldest opened: {}\navg revision: r{}",
+            stats.total_sessions,
+            stats.tagged_sessions,
+            stats.untagged_sessions,
+            stats.total_todos,
+            stats.open_todos,
+            stats.done_todos,
+            stats.completion_rate,
+            format_month_day_local(stats.newest_last_opened_at),
+            format_month_day_local(stats.oldest_last_opened_at),
+            stats.average_revision
+        );
+
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Summary")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
             )
             .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
@@ -573,12 +598,92 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
+        self.body_areas(area).0
+    }
+
+    fn body_areas(&self, area: Rect) -> (Rect, Rect, Option<Rect>) {
         let body = Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(area)[1];
         if body.width >= 90 {
-            Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(body)
-                [0]
+            let columns =
+                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+                    .split(body);
+            let left_column =
+                Layout::vertical(self.summary_split(columns[0].height)).split(columns[0]);
+            (left_column[0], left_column[1], Some(columns[1]))
         } else {
-            body
+            let stacked = Layout::vertical(self.summary_split(body.height)).split(body);
+            (stacked[0], stacked[1], None)
+        }
+    }
+
+    fn summary_split(&self, total_height: u16) -> [Constraint; 2] {
+        let proportional_height =
+            ((u32::from(total_height) * u32::from(SUMMARY_PANEL_PERCENT)).div_ceil(100)) as u16;
+        let summary_height = proportional_height.max(SUMMARY_PANEL_MIN_HEIGHT);
+        let list_height = total_height.saturating_sub(summary_height).max(1);
+        [
+            Constraint::Length(list_height),
+            Constraint::Length(summary_height),
+        ]
+    }
+
+    fn summary_stats(&self) -> OverviewSummaryStats {
+        let total_sessions = self.sessions.len();
+        let tagged_sessions = self
+            .sessions
+            .iter()
+            .filter(|session| session.tag.is_some())
+            .count();
+        let total_todos = self
+            .sessions
+            .iter()
+            .map(|session| session.todo_count)
+            .sum::<i64>();
+        let done_todos = self
+            .sessions
+            .iter()
+            .map(|session| session.done_count)
+            .sum::<i64>();
+        let open_todos = total_todos - done_todos;
+        let completion_rate = if total_todos == 0 {
+            0
+        } else {
+            ((done_todos * 100) + (total_todos / 2)) / total_todos
+        };
+        let newest_last_opened_at = self
+            .sessions
+            .iter()
+            .map(|session| session.last_opened_at)
+            .max()
+            .unwrap_or(0);
+        let oldest_last_opened_at = self
+            .sessions
+            .iter()
+            .map(|session| session.last_opened_at)
+            .min()
+            .unwrap_or(0);
+        let total_revisions = self
+            .sessions
+            .iter()
+            .map(|session| u64::from(session.current_revision))
+            .sum::<u64>();
+        let average_revision = if total_sessions == 0 {
+            0
+        } else {
+            ((total_revisions + (total_sessions as u64 / 2)) / total_sessions as u64) as u32
+        };
+
+        OverviewSummaryStats {
+            total_sessions,
+            tagged_sessions,
+            untagged_sessions: total_sessions.saturating_sub(tagged_sessions),
+            total_todos,
+            open_todos,
+            done_todos,
+            completion_rate,
+            newest_last_opened_at,
+            oldest_last_opened_at,
+            average_revision,
         }
     }
 
@@ -680,6 +785,20 @@ impl OverviewScreen {
             EditorField::Secondary => &mut self.session_editor.tag,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverviewSummaryStats {
+    total_sessions: usize,
+    tagged_sessions: usize,
+    untagged_sessions: usize,
+    total_todos: i64,
+    open_todos: i64,
+    done_todos: i64,
+    completion_rate: i64,
+    newest_last_opened_at: i64,
+    oldest_last_opened_at: i64,
+    average_revision: u32,
 }
 
 fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
@@ -854,17 +973,33 @@ mod tests {
     #[test]
     fn overview_render_covers_populated_and_empty_states() {
         let (_directory, _database, mut populated) = seeded_overview_screen();
-        let populated_buffer = render_buffer(&mut populated, 120, 24);
-        assert!(populated_buffer.contains("session overview"));
-        assert!(populated_buffer.contains("h = help"));
-        assert!(populated_buffer.contains("Tag"));
-        assert!(populated_buffer.contains("Slug"));
-        assert!(populated_buffer.contains("Last Opened"));
-        assert!(populated_buffer.contains("private"));
-        assert!(populated_buffer.contains("writing-sprint"));
-        assert!(populated_buffer.contains("Enter opens the session head."));
-        assert!(populated_buffer.contains("return here."));
-        assert!(!populated_buffer.contains("Keys"));
+        let wide_buffer = render_buffer(&mut populated, 120, 24);
+        assert!(wide_buffer.contains("session overview"));
+        assert!(wide_buffer.contains("h = help"));
+        assert!(wide_buffer.contains("Tag"));
+        assert!(wide_buffer.contains("Slug"));
+        assert!(wide_buffer.contains("Last Opened"));
+        assert!(wide_buffer.contains("private"));
+        assert!(wide_buffer.contains("writing-sprint"));
+        assert!(wide_buffer.contains("Summary"));
+        assert!(wide_buffer.contains("total sessions: 2"));
+        assert!(wide_buffer.contains("tagged: 2"));
+        assert!(wide_buffer.contains("untagged: 0"));
+        assert!(wide_buffer.contains("total todos: 1"));
+        assert!(wide_buffer.contains("open: 1"));
+        assert!(wide_buffer.contains("completed: 0"));
+        assert!(wide_buffer.contains("completion rate: 0%"));
+        assert!(wide_buffer.contains("newest opened:"));
+        assert!(wide_buffer.contains("oldest opened:"));
+        assert!(wide_buffer.contains("avg revision: r2"));
+        assert!(wide_buffer.contains("Enter opens the session head."));
+        assert!(wide_buffer.contains("return here."));
+        assert!(!wide_buffer.contains("Keys"));
+
+        let narrow_buffer = render_buffer(&mut populated, 80, 20);
+        assert!(narrow_buffer.contains("Sessions"));
+        assert!(narrow_buffer.contains("Summary"));
+        assert!(!narrow_buffer.contains("Details"));
 
         let (_directory, database) = Database::open_temp().expect("database");
         let mut empty = OverviewScreen::new(Config::default());
@@ -873,7 +1008,25 @@ mod tests {
         assert!(empty_buffer.contains("No sessions yet."));
         assert!(empty_buffer.contains("Press n to create one"));
         assert!(empty_buffer.contains("h = help"));
+        assert!(!empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_summary_stats_include_activity_mix() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let stats = screen.summary_stats();
+
+        assert_eq!(stats.total_sessions, 2);
+        assert_eq!(stats.tagged_sessions, 2);
+        assert_eq!(stats.untagged_sessions, 0);
+        assert_eq!(stats.total_todos, 1);
+        assert_eq!(stats.open_todos, 1);
+        assert_eq!(stats.done_todos, 0);
+        assert_eq!(stats.completion_rate, 0);
+        assert_eq!(stats.newest_last_opened_at, 1_711_275_800);
+        assert_eq!(stats.oldest_last_opened_at, 1_711_275_600);
+        assert_eq!(stats.average_revision, 2);
     }
 
     #[test]
