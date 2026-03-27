@@ -16,7 +16,7 @@ Source spec: [spec.md](spec.md)
 
 - No cloud sync.
 - No multi-user collaboration.
-- No due dates, tags, recurring tasks, deletion, dependencies, or NL parsing.
+- No due dates, recurring tasks, deletion, dependencies, or NL parsing.
 - No writable historical revisions.
 - No separate app-global timer screen.
 - No event-sourced history model in v1.
@@ -65,9 +65,10 @@ Source spec: [spec.md](spec.md)
 - Rust crate building a `todui` binary.
 - SQLite schema + migrations for sessions, todos, revisions, Pomodoro runs, and app state.
 - CLI commands:
-  - `todui session new <name> [--slug <slug>]`
+  - `todui session new <name> [--slug <slug>] [--tag <tag>]`
   - `todui session list`
   - `todui session history [<session>]`
+  - `todui session tag [<session>] [--set <tag> | --clear]`
   - `todui add <title> [--session <session>] [--note <text>]`
   - `todui done <todo-id> [--session <session>]`
   - `todui undone <todo-id> [--session <session>]`
@@ -96,7 +97,7 @@ Source spec: [spec.md](spec.md)
 ### Demo Flow
 
 1. Create session:
-   `todui session new "Writing Sprint"`
+   `todui session new "Writing Sprint" --tag work`
 2. Add todos:
    `todui add "Draft design spec" --session writing-sprint`
 3. Open TUI at head:

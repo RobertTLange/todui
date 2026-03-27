@@ -30,6 +30,7 @@ Examples:
 
 A session has:
 	•	identity: slug + display name
+	•	optional tag for overview grouping and CLI metadata
 	•	current live head
 	•	immutable revision history
 	•	zero or more todos
@@ -81,6 +82,7 @@ The app shall:
 	•	edit todo title and notes from CLI and TUI
 	•	delete todos from CLI and TUI
 	•	delete sessions from CLI and TUI
+	•	assign or clear an optional session tag from CLI and TUI overview
 	•	toggle todo completion from CLI and TUI
 	•	display timestamps in the TUI
 	•	export a markdown text version of a session
@@ -103,7 +105,6 @@ Do not implement these in v1:
 	•	cloud sync
 	•	multi-user collaboration
 	•	due dates
-	•	tags
 	•	recurring tasks
 	•	task dependencies
 	•	natural-language parsing
@@ -187,10 +188,11 @@ Binary name: todui
 8.1 Command summary
 
 todui
-todui session new <name> [--slug <slug>]
+todui session new <name> [--slug <slug>] [--tag <tag>]
 todui session delete [<session>]
 todui session list
 todui session history [<session>]
+todui session tag [<session>] [--set <tag> | --clear]
 
 todui add <title> [--session <session>] [--note <text>]
 todui delete <todo-id> [--session <session>]
@@ -231,6 +233,12 @@ todui session delete
 	•	with <session>: deletes that session
 	•	no args: deletes the most recently opened session
 	•	deletes the live session plus todos, revision snapshots, and Pomodoro runs
+
+todui session tag
+	•	with <session>: updates that session tag
+	•	no args: updates the most recently opened session
+	•	`--set` normalizes the tag to slug-style text
+	•	`--clear` removes the tag and returns the session to the `untagged` overview section
 
 todui export md
 	•	defaults to most recent session head
