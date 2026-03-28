@@ -10,6 +10,14 @@ use crate::domain::session::{
 use crate::error::{AppError, Result};
 
 impl Database {
+    pub fn has_any_sessions(&self) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sessions LIMIT 1)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? != 0)
+    }
+
     pub fn create_session(
         &mut self,
         name: &str,
@@ -64,6 +72,9 @@ impl Database {
              LEFT JOIN session_revisions
                ON session_revisions.session_id = sessions.id
               AND session_revisions.revision_number = sessions.current_revision
+             WHERE
+               COALESCE(session_revisions.todo_count, 0) = 0
+               OR COALESCE(session_revisions.todo_count, 0) > COALESCE(session_revisions.done_count, 0)
              ORDER BY
                sessions.tag IS NULL ASC,
                sessions.tag ASC,
@@ -558,6 +569,20 @@ mod tests {
         let private = database
             .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
             .expect("session");
+        let finished = database
+            .create_session("Archive Sprint", Some("archive"), None, 1_711_275_750)
+            .expect("session");
+        let finished_todo = database
+            .add_todo(&finished.name, "Ship it", "", None, 1_711_275_760)
+            .expect("todo");
+        database
+            .set_todo_status(
+                finished_todo.id,
+                Some(&finished.name),
+                crate::domain::todo::TodoStatus::Done,
+                1_711_275_770,
+            )
+            .expect("done");
         let inbox = database
             .create_session("Inbox", None, None, 1_711_275_900)
             .expect("session");
@@ -577,6 +602,7 @@ mod tests {
         assert_eq!(overview[2].last_opened_at, 1_711_275_900);
         assert_eq!(overview[1].todo_count, 2);
         assert_eq!(overview[1].done_count, 1);
+        assert!(overview.iter().all(|session| session.name != finished.name));
     }
 
     #[test]

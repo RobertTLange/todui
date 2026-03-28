@@ -81,6 +81,7 @@ struct OverviewScreen {
     sessions: Vec<SessionOverview>,
     expanded_sessions: Vec<ExpandedSessionState>,
     active_run: Option<PomodoroRun>,
+    has_any_sessions: bool,
     selected_index: usize,
     scroll_offset: usize,
     theme: Theme,
@@ -147,6 +148,7 @@ impl OverviewScreen {
             sessions: Vec::new(),
             expanded_sessions: Vec::new(),
             active_run: None,
+            has_any_sessions: false,
             selected_index: 0,
             scroll_offset: 0,
             theme: Theme::from_config(&config),
@@ -158,6 +160,7 @@ impl OverviewScreen {
     }
 
     fn reload(&mut self, database: &Database) -> Result<()> {
+        self.has_any_sessions = database.has_any_sessions()?;
         self.sessions = database.list_session_overview()?;
         self.active_run = database.get_active_pomodoro()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
@@ -463,10 +466,14 @@ impl OverviewScreen {
 
     fn top_bar(&self) -> Paragraph<'static> {
         let subtitle = if self.sessions.is_empty() {
-            String::from("No sessions yet")
+            if self.has_any_sessions {
+                String::from("No sessions with open todos")
+            } else {
+                String::from("No sessions yet")
+            }
         } else {
             format!(
-                "{} sessions | newest first by last-opened timestamp",
+                "{} visible sessions | tag first, then last opened",
                 self.sessions.len()
             )
         };
@@ -558,7 +565,13 @@ impl OverviewScreen {
     }
 
     fn empty_state(&self) -> Paragraph<'static> {
-        Paragraph::new("No sessions yet.\n\nPress n to create one from the TUI.")
+        let message = if self.has_any_sessions {
+            "No sessions with open todos.\n\nPress n to create one from the TUI."
+        } else {
+            "No sessions yet.\n\nPress n to create one from the TUI."
+        };
+
+        Paragraph::new(message)
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
@@ -1555,6 +1568,111 @@ mod tests {
         assert!(!empty_buffer.contains("Pomodoro"));
         assert!(!empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_hides_fully_completed_sessions_but_keeps_empty_ones() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let work = database
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
+            .expect("session");
+        let open_todo = database
+            .add_todo(&work.name, "Draft spec", "", None, 1_711_275_650)
+            .expect("todo");
+        let completed = database
+            .create_session("Finished Sprint", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let completed_todo = database
+            .add_todo(&completed.name, "Done task", "", None, 1_711_275_710)
+            .expect("todo");
+        database
+            .set_todo_status(
+                completed_todo.id,
+                Some(&completed.name),
+                TodoStatus::Done,
+                1_711_275_720,
+            )
+            .expect("done");
+        let empty = database
+            .create_session("Inbox", None, None, 1_711_275_900)
+            .expect("session");
+        database
+            .mark_session_opened(&work.name, 1_711_276_000)
+            .expect("opened");
+
+        let mut screen = OverviewScreen::new(Config::default());
+        screen.reload(&database).expect("reload");
+
+        assert_eq!(
+            screen
+                .sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![work.name.as_str(), empty.name.as_str()]
+        );
+        assert_eq!(
+            screen.selected_session_name().as_deref(),
+            Some("writing-sprint")
+        );
+        assert!(
+            screen
+                .sessions
+                .iter()
+                .all(|session| session.name != completed.name)
+        );
+        assert_eq!(screen.summary_stats().total_sessions, 2);
+        assert_eq!(screen.summary_stats().total_todos, 1);
+        assert_eq!(screen.summary_stats().open_todos, 1);
+        assert_eq!(screen.summary_stats().done_todos, 0);
+
+        database
+            .set_todo_status(
+                open_todo.id,
+                Some(&work.name),
+                TodoStatus::Done,
+                1_711_276_010,
+            )
+            .expect("done");
+        screen.reload(&database).expect("reload");
+
+        assert_eq!(
+            screen
+                .sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![empty.name.as_str()]
+        );
+        assert_eq!(screen.selected_session_name().as_deref(), Some("inbox"));
+    }
+
+    #[test]
+    fn overview_empty_state_distinguishes_completed_only_sessions() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let completed = database
+            .create_session("Finished Sprint", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let completed_todo = database
+            .add_todo(&completed.name, "Done task", "", None, 1_711_275_710)
+            .expect("todo");
+        database
+            .set_todo_status(
+                completed_todo.id,
+                Some(&completed.name),
+                TodoStatus::Done,
+                1_711_275_720,
+            )
+            .expect("done");
+
+        let mut screen = OverviewScreen::new(Config::default());
+        screen.reload(&database).expect("reload");
+
+        let buffer = render_buffer(&mut screen, 80, 20);
+        assert!(buffer.contains("No sessions with open todos."));
+        assert!(buffer.contains("Press n to create one"));
+        assert!(!buffer.contains("No sessions yet."));
+        assert!(!buffer.contains("Summary"));
     }
 
     #[test]
