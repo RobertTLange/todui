@@ -484,8 +484,8 @@ impl OverviewScreen {
                 Cell::from("Tag"),
                 Cell::from("Name"),
                 Cell::from("Rev"),
-                Cell::from("Open"),
-                Cell::from("Done"),
+                Cell::from("☐"),
+                Cell::from("☑"),
                 Cell::from("Last Opened"),
             ])
             .style(self.theme.surface_title_style(SurfaceTone::Open)),
