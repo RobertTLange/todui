@@ -159,7 +159,7 @@ mod tests {
     fn enforces_single_active_pomodoro() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         let run = database

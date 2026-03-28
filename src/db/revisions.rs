@@ -6,16 +6,16 @@ use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, Sessi
 use crate::error::{AppError, Result};
 
 impl Database {
-    pub fn list_revisions(&self, session_slug: &str) -> Result<Vec<RevisionSummary>> {
+    pub fn list_revisions(&self, session_name: &str) -> Result<Vec<RevisionSummary>> {
         let session_id: i64 = self
             .connection
             .query_row(
                 "SELECT id FROM sessions WHERE slug = ?1",
-                [session_slug],
+                [session_name],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(session_slug.to_string()))?;
+            .ok_or_else(|| AppError::SessionNotFound(session_name.to_string()))?;
 
         let mut statement = self.connection.prepare(
             "SELECT revision_number, created_at, reason, todo_count, done_count
@@ -29,7 +29,7 @@ impl Database {
 
     pub fn get_revision_todos(
         &self,
-        session_slug: &str,
+        session_name: &str,
         revision_number: u32,
     ) -> Result<Vec<RevisionTodo>> {
         let revision_id: i64 = self
@@ -39,12 +39,12 @@ impl Database {
                  FROM session_revisions revisions
                  JOIN sessions ON sessions.id = revisions.session_id
                  WHERE sessions.slug = ?1 AND revisions.revision_number = ?2",
-                params![session_slug, revision_number],
+                params![session_name, revision_number],
                 |row| row.get::<_, i64>(0),
             )
             .optional()?
             .ok_or_else(|| AppError::RevisionNotFound {
-                session: session_slug.to_string(),
+                session: session_name.to_string(),
                 revision: revision_number,
             })?;
 
@@ -60,20 +60,20 @@ impl Database {
 
     pub fn load_snapshot(
         &self,
-        session_slug: &str,
+        session_name: &str,
         revision: Option<u32>,
     ) -> Result<SessionSnapshot> {
-        let mut session = self.get_session_by_slug(session_slug)?;
+        let mut session = self.get_session_by_name(session_name)?;
         let revision_summary = match revision {
-            Some(revision_number) => self.revision_summary(session_slug, revision_number)?,
+            Some(revision_number) => self.revision_summary(session_name, revision_number)?,
             None => self.current_revision_summary(session.id)?,
         };
         if let Some(revision_number) = revision {
-            session.tag = self.revision_session_tag(session_slug, revision_number)?;
-            session.repo = self.revision_session_repo(session_slug, revision_number)?;
+            session.tag = self.revision_session_tag(session_name, revision_number)?;
+            session.repo = self.revision_session_repo(session_name, revision_number)?;
         }
         let todos = match revision {
-            Some(revision_number) => self.get_revision_todos(session_slug, revision_number)?,
+            Some(revision_number) => self.get_revision_todos(session_name, revision_number)?,
             None => self
                 .get_live_todos(session.id)?
                 .into_iter()
@@ -101,7 +101,7 @@ impl Database {
 
     pub fn revision_summary(
         &self,
-        session_slug: &str,
+        session_name: &str,
         revision_number: u32,
     ) -> Result<RevisionSummary> {
         self.connection
@@ -110,12 +110,12 @@ impl Database {
                  FROM session_revisions revisions
                  JOIN sessions ON sessions.id = revisions.session_id
                  WHERE sessions.slug = ?1 AND revisions.revision_number = ?2",
-                params![session_slug, revision_number],
+                params![session_name, revision_number],
                 map_revision_summary,
             )
             .map_err(|error| match error {
                 rusqlite::Error::QueryReturnedNoRows => AppError::RevisionNotFound {
-                    session: session_slug.to_string(),
+                    session: session_name.to_string(),
                     revision: revision_number,
                 },
                 other => AppError::Database(other),
@@ -124,7 +124,7 @@ impl Database {
 
     fn revision_session_tag(
         &self,
-        session_slug: &str,
+        session_name: &str,
         revision_number: u32,
     ) -> Result<Option<String>> {
         self.connection
@@ -133,12 +133,12 @@ impl Database {
                  FROM session_revisions revisions
                  JOIN sessions ON sessions.id = revisions.session_id
                  WHERE sessions.slug = ?1 AND revisions.revision_number = ?2",
-                params![session_slug, revision_number],
+                params![session_name, revision_number],
                 |row| row.get(0),
             )
             .map_err(|error| match error {
                 rusqlite::Error::QueryReturnedNoRows => AppError::RevisionNotFound {
-                    session: session_slug.to_string(),
+                    session: session_name.to_string(),
                     revision: revision_number,
                 },
                 other => AppError::Database(other),
@@ -147,7 +147,7 @@ impl Database {
 
     fn revision_session_repo(
         &self,
-        session_slug: &str,
+        session_name: &str,
         revision_number: u32,
     ) -> Result<Option<String>> {
         self.connection
@@ -156,12 +156,12 @@ impl Database {
                  FROM session_revisions revisions
                  JOIN sessions ON sessions.id = revisions.session_id
                  WHERE sessions.slug = ?1 AND revisions.revision_number = ?2",
-                params![session_slug, revision_number],
+                params![session_name, revision_number],
                 |row| row.get(0),
             )
             .map_err(|error| match error {
                 rusqlite::Error::QueryReturnedNoRows => AppError::RevisionNotFound {
-                    session: session_slug.to_string(),
+                    session: session_name.to_string(),
                     revision: revision_number,
                 },
                 other => AppError::Database(other),
@@ -198,21 +198,21 @@ mod tests {
     fn lists_revision_history() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         database
             .set_todo_status(
                 todo.id,
-                Some(&session.slug),
+                Some(&session.name),
                 TodoStatus::Done,
                 1_711_275_800,
             )
             .expect("done");
 
-        let revisions = database.list_revisions(&session.slug).expect("revisions");
+        let revisions = database.list_revisions(&session.name).expect("revisions");
         assert_eq!(revisions.len(), 3);
         assert_eq!(revisions[0].revision_number, 3);
         assert_eq!(revisions[2].revision_number, 1);
@@ -222,21 +222,21 @@ mod tests {
     fn loads_head_and_historical_snapshots() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "note", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "note", None, 1_711_275_700)
             .expect("todo");
         database
             .set_todo_status(
                 todo.id,
-                Some(&session.slug),
+                Some(&session.name),
                 TodoStatus::Done,
                 1_711_275_800,
             )
             .expect("done");
 
-        let head = database.load_snapshot(&session.slug, None).expect("head");
+        let head = database.load_snapshot(&session.name, None).expect("head");
         assert_eq!(head.todos.len(), 1);
         assert_eq!(head.session.tag.as_deref(), Some("work"));
         assert!(matches!(
@@ -245,7 +245,7 @@ mod tests {
         ));
 
         let historical = database
-            .load_snapshot(&session.slug, Some(1))
+            .load_snapshot(&session.name, Some(1))
             .expect("revision");
         assert!(historical.todos.is_empty());
         assert!(matches!(
@@ -259,11 +259,11 @@ mod tests {
     fn returns_revision_not_found_for_missing_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         let error = database
-            .revision_summary(&session.slug, 9)
+            .revision_summary(&session.name, 9)
             .expect_err("missing revision");
         assert!(matches!(
             error,
@@ -280,7 +280,6 @@ mod tests {
         let session = database
             .create_session(
                 "Writing Sprint",
-                None,
                 Some("work"),
                 Some("@SakanaAI/todui-keymove"),
                 1_711_275_600,
@@ -289,7 +288,7 @@ mod tests {
 
         database
             .update_session_metadata(
-                &session.slug,
+                &session.name,
                 Some("private"),
                 Some("@OpenAI/codex"),
                 1_711_275_700,
@@ -297,9 +296,9 @@ mod tests {
             .expect("metadata updated");
 
         let original = database
-            .load_snapshot(&session.slug, Some(1))
+            .load_snapshot(&session.name, Some(1))
             .expect("original revision");
-        let current = database.load_snapshot(&session.slug, None).expect("head");
+        let current = database.load_snapshot(&session.name, None).expect("head");
 
         assert_eq!(original.session.tag.as_deref(), Some("work"));
         assert_eq!(

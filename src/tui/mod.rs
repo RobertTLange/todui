@@ -13,7 +13,7 @@ pub mod widgets;
 pub enum TuiRoute {
     Overview,
     Session {
-        session_slug: Option<String>,
+        session_name: Option<String>,
         revision: Option<u32>,
     },
 }
@@ -36,15 +36,15 @@ fn run_loop(
         route = match route {
             TuiRoute::Overview => match overview::run_in_terminal(terminal, database, config)? {
                 overview::OverviewExit::Quit => break Ok(()),
-                overview::OverviewExit::OpenSession(session_slug) => TuiRoute::Session {
-                    session_slug: Some(session_slug),
+                overview::OverviewExit::OpenSession(session_name) => TuiRoute::Session {
+                    session_name: Some(session_name),
                     revision: None,
                 },
             },
             TuiRoute::Session {
-                session_slug,
+                session_name,
                 revision,
-            } => match screen::run_in_terminal(terminal, database, config, session_slug, revision)?
+            } => match screen::run_in_terminal(terminal, database, config, session_name, revision)?
             {
                 screen::SessionExit::Quit => break Ok(()),
                 screen::SessionExit::Overview => TuiRoute::Overview,

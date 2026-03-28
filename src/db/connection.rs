@@ -46,7 +46,7 @@ fn configure_connection(connection: &Connection) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
 
     use super::Database;
     use crate::db::migrations::LATEST_USER_VERSION;
@@ -149,6 +149,15 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("session tag column");
+        let session_name_exists: Option<String> = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('sessions') WHERE name = 'name'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("session name column lookup");
         let revision_tag_exists: String = reopened
             .connection
             .query_row(
@@ -199,6 +208,7 @@ mod tests {
             .expect("pomodoro session not null flag");
 
         assert_eq!(user_version, LATEST_USER_VERSION);
+        assert_eq!(session_name_exists, None);
         assert_eq!(session_tag_exists, "tag");
         assert_eq!(revision_tag_exists, "session_tag");
         assert_eq!(session_repo_exists, "repo");

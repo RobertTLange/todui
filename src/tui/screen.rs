@@ -32,14 +32,14 @@ const EVENT_POLL_MS: u64 = 250;
 pub fn run(
     database: &mut Database,
     config: &Config,
-    session_slug: Option<String>,
+    session_name: Option<String>,
     revision: Option<u32>,
 ) -> Result<()> {
     super::run(
         database,
         config,
         super::TuiRoute::Session {
-            session_slug,
+            session_name,
             revision,
         },
     )
@@ -49,13 +49,13 @@ pub(crate) fn run_in_terminal(
     terminal: &mut AppTerminal,
     database: &mut Database,
     config: &Config,
-    session_slug: Option<String>,
+    session_name: Option<String>,
     revision: Option<u32>,
 ) -> Result<SessionExit> {
-    let resolved_slug = database.resolve_session_slug(session_slug.as_deref())?;
-    database.mark_session_opened(&resolved_slug, now_utc_timestamp())?;
+    let resolved_name = database.resolve_session_name(session_name.as_deref())?;
+    database.mark_session_opened(&resolved_name, now_utc_timestamp())?;
 
-    let mut screen = SessionScreen::new(resolved_slug, revision, config.clone());
+    let mut screen = SessionScreen::new(resolved_name, revision, config.clone());
     screen.reload(database)?;
     event_loop(terminal, database, &mut screen)
 }
@@ -107,7 +107,7 @@ enum Overlay {
     Details,
     TodoEditor,
     DeleteTodo { id: i64, title: String },
-    DeleteSession { slug: String, name: String },
+    DeleteSession { name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -145,7 +145,7 @@ enum TodoEditorMode {
 
 #[derive(Debug)]
 struct SessionScreen {
-    session_slug: String,
+    session_name: String,
     revision: Option<u32>,
     snapshot: Option<SessionSnapshot>,
     revisions: Vec<RevisionSummary>,
@@ -165,9 +165,9 @@ struct SessionScreen {
 }
 
 impl SessionScreen {
-    fn new(session_slug: String, revision: Option<u32>, config: Config) -> Self {
+    fn new(session_name: String, revision: Option<u32>, config: Config) -> Self {
         Self {
-            session_slug,
+            session_name,
             revision,
             snapshot: None,
             revisions: Vec::new(),
@@ -189,14 +189,14 @@ impl SessionScreen {
 
     fn reload(&mut self, database: &Database) -> Result<()> {
         let selected_todo_id = self.current_todo().map(|todo| todo.todo_id);
-        let snapshot = database.load_snapshot(&self.session_slug, self.revision)?;
-        self.revisions = database.list_revisions(&self.session_slug)?;
+        let snapshot = database.load_snapshot(&self.session_name, self.revision)?;
+        self.revisions = database.list_revisions(&self.session_name)?;
         if self.is_read_only_snapshot(&snapshot) {
             self.active_run = None;
         } else {
             self.active_run = database.get_active_pomodoro()?;
         }
-        self.head_token = Some(database.session_head_token(&self.session_slug)?);
+        self.head_token = Some(database.session_head_token(&self.session_name)?);
         self.snapshot = Some(snapshot);
         self.reselect(selected_todo_id);
         if let Some(revision) = self.revision {
@@ -442,14 +442,14 @@ impl SessionScreen {
                 let overlay = self.overlay.clone();
                 match overlay {
                     Some(Overlay::DeleteTodo { id, .. }) => {
-                        database.delete_todo(id, Some(&self.session_slug), now_utc_timestamp())?;
+                        database.delete_todo(id, Some(&self.session_name), now_utc_timestamp())?;
                         self.reload(database)?;
                         self.overlay = None;
                         self.set_toast(String::from("Todo deleted"), ToastTone::Danger);
                         Ok(None)
                     }
-                    Some(Overlay::DeleteSession { slug, .. }) => {
-                        database.delete_session(&slug)?;
+                    Some(Overlay::DeleteSession { name }) => {
+                        database.delete_session(&name)?;
                         self.overlay = None;
                         Ok(Some(SessionExit::Overview))
                     }
@@ -551,7 +551,7 @@ impl SessionScreen {
             return Ok(());
         }
 
-        let latest = database.session_head_token(&self.session_slug)?;
+        let latest = database.session_head_token(&self.session_name)?;
         if self.head_token != Some(latest) {
             self.reload(database)?;
         }
@@ -576,7 +576,7 @@ impl SessionScreen {
         };
         database.set_todo_status(
             todo.todo_id,
-            Some(&self.session_slug),
+            Some(&self.session_name),
             next_status,
             now_utc_timestamp(),
         )?;
@@ -693,10 +693,10 @@ impl SessionScreen {
             frame.render_widget(Clear, area);
             frame.render_widget(self.delete_todo_modal(title), area);
         }
-        if let Some(Overlay::DeleteSession { slug, name }) = &self.overlay {
+        if let Some(Overlay::DeleteSession { name }) = &self.overlay {
             let area = centered_rect(frame.area(), 60, 9);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.delete_session_modal(slug, name), area);
+            frame.render_widget(self.delete_session_modal(name), area);
         }
         if let Some(toast) = &self.toast {
             let area = centered_rect(frame.area(), 50, 3);
@@ -738,14 +738,14 @@ impl SessionScreen {
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
         let mut lines = vec![Line::from(format!(
-            "todui | {} ({}) | {revision} | h = help",
-            snapshot.session.name, snapshot.session.slug
+            "todui | {} | {revision} | h = help",
+            snapshot.session.name
         ))];
         if self.is_read_only() {
             lines.push(Line::styled(
                 format!(
                     "Viewing session {} @ r{} — {} — read-only",
-                    snapshot.session.slug,
+                    snapshot.session.name,
                     snapshot.revision.revision_number,
                     format_full_local(snapshot.revision.created_at)
                 ),
@@ -799,7 +799,7 @@ impl SessionScreen {
                 todo.todo_id
             )
         } else {
-            format!("No todos in session {}", snapshot.session.slug)
+            format!("No todos in session {}", snapshot.session.name)
         };
 
         Paragraph::new(text)
@@ -865,9 +865,9 @@ impl SessionScreen {
         .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
-    fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
+    fn delete_session_modal(&self, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
-            "Delete session {name} ({slug})?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
+            "Delete session {name}?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
         .block(
@@ -1141,7 +1141,6 @@ impl SessionScreen {
         }
         let session = &self.snapshot().session;
         self.overlay = Some(Overlay::DeleteSession {
-            slug: session.slug.clone(),
             name: session.name.clone(),
         });
     }
@@ -1164,7 +1163,7 @@ impl SessionScreen {
 
         let saved = match self.todo_editor.mode {
             TodoEditorMode::Create => database.add_todo(
-                &self.session_slug,
+                &self.session_name,
                 title,
                 self.todo_editor.notes.trim(),
                 Some(self.todo_editor.repo.as_str()),
@@ -1172,7 +1171,7 @@ impl SessionScreen {
             ),
             TodoEditorMode::Edit { todo_id } => database.update_todo(
                 todo_id,
-                Some(&self.session_slug),
+                Some(&self.session_name),
                 title,
                 self.todo_editor.notes.trim(),
                 Some(self.todo_editor.repo.as_str()),
@@ -1512,12 +1511,12 @@ mod tests {
 
         for title in ["Open 1", "Open 2", "Open 3", "Done 1", "Done 2", "Done 3"] {
             let todo = database
-                .add_todo(&screen.session_slug, title, "", None, now)
+                .add_todo(&screen.session_name, title, "", None, now)
                 .expect("todo");
             if title.starts_with("Done") {
                 now += 10;
                 database
-                    .set_todo_status(todo.id, Some(&screen.session_slug), TodoStatus::Done, now)
+                    .set_todo_status(todo.id, Some(&screen.session_name), TodoStatus::Done, now)
                     .expect("done");
                 completed_ids.push(todo.id);
             }
@@ -1774,7 +1773,7 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert_eq!(exit, Some(SessionExit::Overview));
-        assert!(database.get_session_by_slug("writing-sprint").is_err());
+        assert!(database.get_session_by_name("writing-sprint").is_err());
     }
 
     #[test]
@@ -1856,7 +1855,7 @@ mod tests {
 
         external
             .add_todo(
-                &screen.session_slug,
+                &screen.session_name,
                 "Ship live refresh",
                 "",
                 None,
@@ -1887,7 +1886,7 @@ mod tests {
         screen.reload(&database).expect("load historical revision");
         external
             .add_todo(
-                &screen.session_slug,
+                &screen.session_name,
                 "Should stay hidden",
                 "",
                 None,
@@ -1913,11 +1912,11 @@ mod tests {
         let mut external = Database::open(&database_path).expect("external database");
 
         external
-            .create_session("Reading Sprint", None, None, None, 1_711_275_900)
+            .create_session("Reading Sprint", None, None, 1_711_275_900)
             .expect("external session");
         screen.handle_tick(&mut database).expect("tick");
 
-        assert_eq!(screen.session_slug, "writing-sprint");
+        assert_eq!(screen.session_name, "writing-sprint");
         assert_eq!(screen.snapshot().todos.len(), 2);
     }
 
@@ -1926,7 +1925,7 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_screen();
 
         let wide = render_buffer(&screen, 120, 24);
-        assert!(wide.contains("Writing Sprint"));
+        assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
         assert!(!wide.contains("Details"));
@@ -2131,16 +2130,16 @@ mod tests {
         let (directory, mut database) = Database::open_temp().expect("database");
         let database_path = directory.path().join("todui.db");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
         database
-            .add_todo(&session.slug, "Review bindings", "", None, 1_711_275_800)
+            .add_todo(&session.name, "Review bindings", "", None, 1_711_275_800)
             .expect("todo");
 
-        let mut screen = SessionScreen::new(session.slug, None, Config::default());
+        let mut screen = SessionScreen::new(session.name, None, Config::default());
         screen.reload(&database).expect("reload");
         (directory, database, screen, database_path)
     }

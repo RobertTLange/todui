@@ -36,7 +36,7 @@ impl RepoSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoTodoMatch {
     pub todo_id: i64,
-    pub session_slug: String,
+    pub session_name: String,
     pub title: String,
     pub status: TodoStatus,
     pub effective_repo: String,

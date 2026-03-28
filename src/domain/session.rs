@@ -3,7 +3,6 @@ use crate::error::{AppError, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
     pub id: i64,
-    pub slug: String,
     pub name: String,
     pub tag: Option<String>,
     pub repo: Option<String>,
@@ -15,7 +14,6 @@ pub struct Session {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
-    pub slug: String,
     pub name: String,
     pub tag: Option<String>,
     pub repo: Option<String>,
@@ -31,7 +29,6 @@ pub struct SessionHeadToken {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOverview {
-    pub slug: String,
     pub name: String,
     pub tag: Option<String>,
     pub repo: Option<String>,
@@ -47,25 +44,25 @@ pub struct SessionView {
     pub todos: Vec<crate::domain::todo::Todo>,
 }
 
-pub fn slugify(name: &str) -> String {
-    let mut slug = String::new();
+pub fn normalize_session_name(input: &str) -> String {
+    let mut normalized = String::new();
     let mut last_was_dash = false;
 
-    for character in name.chars().flat_map(char::to_lowercase) {
+    for character in input.chars().flat_map(char::to_lowercase) {
         if character.is_ascii_alphanumeric() {
-            slug.push(character);
+            normalized.push(character);
             last_was_dash = false;
-        } else if !last_was_dash && !slug.is_empty() {
-            slug.push('-');
+        } else if !last_was_dash && !normalized.is_empty() {
+            normalized.push('-');
             last_was_dash = true;
         }
     }
 
-    slug.trim_matches('-').to_string()
+    normalized.trim_matches('-').to_string()
 }
 
-pub fn validate_slug(slug: &str) -> Result<()> {
-    validate_slug_like(slug, true)
+pub fn validate_session_name(name: &str) -> Result<()> {
+    validate_slug_like(name, true)
 }
 
 pub fn normalize_tag(tag: Option<&str>) -> Result<Option<String>> {
@@ -76,7 +73,7 @@ pub fn normalize_tag(tag: Option<&str>) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    let normalized = slugify(raw_tag);
+    let normalized = normalize_session_name(raw_tag);
     if validate_slug_like(&normalized, false).is_ok() {
         Ok(Some(normalized))
     } else {
@@ -96,7 +93,7 @@ fn validate_slug_like(value: &str, is_slug: bool) -> Result<()> {
         Ok(())
     } else {
         if is_slug {
-            Err(AppError::InvalidSlug(value.to_string()))
+            Err(AppError::InvalidSessionName(value.to_string()))
         } else {
             Err(AppError::InvalidTag(value.to_string()))
         }
@@ -105,19 +102,22 @@ fn validate_slug_like(value: &str, is_slug: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_tag, slugify, validate_slug};
+    use super::{normalize_session_name, normalize_tag, validate_session_name};
 
     #[test]
-    fn slugifies_names() {
-        assert_eq!(slugify("Writing Sprint"), "writing-sprint");
-        assert_eq!(slugify("  Ghostty + Mouse "), "ghostty-mouse");
+    fn normalizes_session_names() {
+        assert_eq!(normalize_session_name("Writing Sprint"), "writing-sprint");
+        assert_eq!(
+            normalize_session_name("  Ghostty + Mouse "),
+            "ghostty-mouse"
+        );
     }
 
     #[test]
-    fn validates_slug_rules() {
-        assert!(validate_slug("writing-sprint").is_ok());
-        assert!(validate_slug("Writing-Sprint").is_err());
-        assert!(validate_slug("writing_sprint").is_err());
+    fn validates_session_name_rules() {
+        assert!(validate_session_name("writing-sprint").is_ok());
+        assert!(validate_session_name("Writing-Sprint").is_err());
+        assert!(validate_session_name("writing_sprint").is_err());
     }
 
     #[test]

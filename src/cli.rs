@@ -15,11 +15,11 @@ use crate::tui;
 
 const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, `repo` to search todos by GitHub repository, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @sakanaai/todui-keymove`\n  Search todos by repo: `todui repo https://github.com/SakanaAI/todui-keymove`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  `session list` prints tab-separated rows.\n  `repo` prints one matching todo per tab-separated row.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.";
 
-const SESSION_LONG_ABOUT: &str = "Create, list, tag, assign repos, delete, and inspect revision history for sessions.\n\nUse `todui session list` to discover available session slugs before calling `add`, `resume`, `repo`, or `export md`.";
+const SESSION_LONG_ABOUT: &str = "Create, list, tag, assign repos, delete, and inspect revision history for sessions.\n\nUse `todui session list` to discover available session names before calling `add`, `resume`, `repo`, or `export md`.";
 
 const SESSION_LONG_HELP: &str = "Examples:\n  todui session list\n  todui session new \"Writing Sprint\" --tag work --repo @sakanaai/todui-keymove\n  todui session history writing-sprint\n  todui session tag writing-sprint --set private\n  todui session repo writing-sprint --set https://github.com/SakanaAI/todui-keymove";
 
-const SESSION_LIST_LONG_ABOUT: &str = "Print one session per line in a tab-separated format for scripts and agents.\n\nColumns:\n  <slug>\\t<display-name>\\t<tag-or->\\t<last-opened-local-time>\\tr<current-revision>";
+const SESSION_LIST_LONG_ABOUT: &str = "Print one session per line in a tab-separated format for scripts and agents.\n\nColumns:\n  <session-name>\\t<tag-or->\\t<last-opened-local-time>\\tr<current-revision>";
 
 const SESSION_HISTORY_LONG_ABOUT: &str = "Print one revision per line in a tab-separated format for scripts and agents.\n\nColumns:\n  r<revision-number>\\t<created-at-local-time>\\t<reason>\\t<todo-count>\\t<done-count>";
 
@@ -33,7 +33,7 @@ const EDIT_LONG_HELP: &str = "Examples:\n  todui edit 7 --session writing-sprint
 
 const RESUME_LONG_ABOUT: &str = "Open a session in the full-screen TUI.\n\nWithout arguments, todui resumes the most recently opened session head. `--revision` opens a historical snapshot in read-only mode.";
 
-const REPO_LONG_ABOUT: &str = "List todos associated with a GitHub repository.\n\nAccepts a GitHub repo URL, `@owner/repo`, or plain `owner/repo`. Matches use the todo repo when present, otherwise the session repo.\n\nColumns:\n  <todo-id>\\t<session-slug>\\t<title>\\t<status>\\t<effective-repo>\\t<source>";
+const REPO_LONG_ABOUT: &str = "List todos associated with a GitHub repository.\n\nAccepts a GitHub repo URL, `@owner/repo`, or plain `owner/repo`. Matches use the todo repo when present, otherwise the session repo.\n\nColumns:\n  <todo-id>\\t<session-name>\\t<title>\\t<status>\\t<effective-repo>\\t<source>";
 
 const REPO_LONG_HELP: &str = "Examples:\n  todui repo @sakanaai/todui-keymove\n  todui repo https://github.com/SakanaAI/todui-keymove\n  todui repo sakanaai/todui-keymove";
 
@@ -74,7 +74,7 @@ pub enum Command {
         title: String,
         #[arg(
             long,
-            help = "Session slug. Defaults to the most recently opened session"
+            help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
         #[arg(long = "note", help = "Optional note text stored on the todo")]
@@ -91,7 +91,7 @@ pub enum Command {
         todo_id: i64,
         #[arg(
             long,
-            help = "Session slug. Defaults to the most recently opened session"
+            help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
     },
@@ -105,7 +105,7 @@ pub enum Command {
         todo_id: i64,
         #[arg(
             long,
-            help = "Session slug. Defaults to the most recently opened session"
+            help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
         #[arg(long, help = "Replace the todo title")]
@@ -133,7 +133,7 @@ pub enum Command {
         todo_id: i64,
         #[arg(
             long,
-            help = "Session slug. Defaults to the most recently opened session"
+            help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
     },
@@ -143,13 +143,13 @@ pub enum Command {
         todo_id: i64,
         #[arg(
             long,
-            help = "Session slug. Defaults to the most recently opened session"
+            help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
     },
     #[command(about = "Open a session in the TUI", long_about = RESUME_LONG_ABOUT)]
     Resume {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
         #[arg(long, help = "Open a specific revision read-only")]
         revision: Option<u32>,
@@ -174,10 +174,8 @@ pub enum Command {
 pub enum SessionCommand {
     #[command(about = "Create a new session")]
     New {
-        #[arg(help = "Human-readable session name")]
+        #[arg(help = "Session name; normalized and stored as lowercase-dash text")]
         name: String,
-        #[arg(long, help = "Override the generated slug")]
-        slug: Option<String>,
         #[arg(long, help = "Optional grouping tag stored on the session")]
         tag: Option<String>,
         #[arg(long, help = "Optional default GitHub repo for todos in this session")]
@@ -185,7 +183,7 @@ pub enum SessionCommand {
     },
     #[command(about = "Delete a session and all of its data")]
     Delete {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
     },
     #[command(
@@ -198,12 +196,12 @@ pub enum SessionCommand {
         long_about = SESSION_HISTORY_LONG_ABOUT
     )]
     History {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
     },
     #[command(about = "Set or clear the grouping tag for a session")]
     Tag {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
         #[arg(long, conflicts_with = "clear", help = "Assign a new tag value")]
         set: Option<String>,
@@ -212,7 +210,7 @@ pub enum SessionCommand {
     },
     #[command(about = "Set or clear the default GitHub repo for a session")]
     Repo {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
         #[arg(long, conflicts_with = "clear", help = "Assign a GitHub repo value")]
         set: Option<String>,
@@ -229,7 +227,7 @@ pub enum ExportCommand {
         after_long_help = EXPORT_MD_LONG_HELP
     )]
     Md {
-        #[arg(help = "Session slug. Defaults to the most recently opened session")]
+        #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
         #[arg(long, help = "Export a specific revision instead of the live head")]
         revision: Option<u32>,
@@ -329,9 +327,9 @@ fn execute_with_runner<W: Write>(
             note,
             repo,
         }) => {
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
+            let session_name = database.resolve_session_name(session.as_deref())?;
             let todo = database.add_todo(
-                &session_slug,
+                &session_name,
                 &title,
                 note.as_deref().unwrap_or(""),
                 repo.as_deref(),
@@ -395,7 +393,7 @@ fn execute_with_runner<W: Write>(
                     writer,
                     "{}\t{}\t{}\t{}\t{}\t{}",
                     todo.todo_id,
-                    todo.session_slug,
+                    todo.session_name,
                     todo.title,
                     match todo.status {
                         TodoStatus::Open => "open",
@@ -448,34 +446,27 @@ fn handle_session_command<W: Write>(
     command: SessionCommand,
 ) -> Result<()> {
     match command {
-        SessionCommand::New {
-            name,
-            slug,
-            tag,
-            repo,
-        } => {
+        SessionCommand::New { name, tag, repo } => {
             let session = database.create_session(
                 &name,
-                slug.as_deref(),
                 tag.as_deref(),
                 repo.as_deref(),
                 now_utc_timestamp(),
             )?;
-            writeln!(writer, "{}", session.slug)?;
+            writeln!(writer, "{}", session.name)?;
             Ok(())
         }
         SessionCommand::Delete { session } => {
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
-            let deleted = database.delete_session(&session_slug)?;
-            writeln!(writer, "{}\tdeleted", deleted.slug)?;
+            let session_name = database.resolve_session_name(session.as_deref())?;
+            let deleted = database.delete_session(&session_name)?;
+            writeln!(writer, "{}\tdeleted", deleted.name)?;
             Ok(())
         }
         SessionCommand::List => {
             for session in database.list_sessions()? {
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\tr{}",
-                    session.slug,
+                    "{}\t{}\t{}\tr{}",
                     session.name,
                     session.tag.as_deref().unwrap_or("-"),
                     format_export_local(session.last_opened_at),
@@ -485,8 +476,8 @@ fn handle_session_command<W: Write>(
             Ok(())
         }
         SessionCommand::History { session } => {
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
-            for revision in database.list_revisions(&session_slug)? {
+            let session_name = database.resolve_session_name(session.as_deref())?;
+            for revision in database.list_revisions(&session_name)? {
                 writeln!(
                     writer,
                     "r{}\t{}\t{}\t{}\t{}",
@@ -510,16 +501,16 @@ fn handle_session_command<W: Write>(
                 ));
             }
 
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
+            let session_name = database.resolve_session_name(session.as_deref())?;
             let updated = database.update_session_tag(
-                &session_slug,
+                &session_name,
                 if clear { None } else { set.as_deref() },
                 now_utc_timestamp(),
             )?;
             writeln!(
                 writer,
                 "{}\t{}",
-                updated.slug,
+                updated.name,
                 updated.tag.as_deref().unwrap_or("-")
             )?;
             Ok(())
@@ -535,16 +526,16 @@ fn handle_session_command<W: Write>(
                 ));
             }
 
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
+            let session_name = database.resolve_session_name(session.as_deref())?;
             let updated = database.update_session_repo(
-                &session_slug,
+                &session_name,
                 if clear { None } else { set.as_deref() },
                 now_utc_timestamp(),
             )?;
             writeln!(
                 writer,
                 "{}\t{}",
-                updated.slug,
+                updated.name,
                 updated.repo.as_deref().unwrap_or("-")
             )?;
             Ok(())
@@ -700,7 +691,6 @@ mod dispatch_tests {
                 command: Some(Command::Session {
                     command: SessionCommand::New {
                         name: String::from("Writing Sprint"),
-                        slug: None,
                         tag: None,
                         repo: None,
                     },
@@ -736,8 +726,8 @@ fn handle_export_command<W: Write>(
             include_notes,
             open_only,
         } => {
-            let session_slug = database.resolve_session_slug(session.as_deref())?;
-            let snapshot = database.load_snapshot(&session_slug, revision)?;
+            let session_name = database.resolve_session_name(session.as_deref())?;
+            let snapshot = database.load_snapshot(&session_name, revision)?;
             let body = markdown::render(
                 &snapshot,
                 &MarkdownOptions {
@@ -942,7 +932,7 @@ mod execute_tests {
             String::from_utf8(delete_output).expect("utf8"),
             "writing-sprint\tdeleted\n"
         );
-        assert!(database.get_session_by_slug("writing-sprint").is_err());
+        assert!(database.get_session_by_name("writing-sprint").is_err());
     }
 }
 
@@ -952,27 +942,13 @@ mod tests {
 
     #[test]
     fn parses_session_new_command() {
-        let cli = parse_from([
-            "todui",
-            "session",
-            "new",
-            "Writing Sprint",
-            "--slug",
-            "writing",
-        ]);
+        let cli = parse_from(["todui", "session", "new", "Writing Sprint"]);
 
         match cli.command.expect("command") {
             Command::Session {
-                command:
-                    SessionCommand::New {
-                        name,
-                        slug,
-                        tag,
-                        repo,
-                    },
+                command: SessionCommand::New { name, tag, repo },
             } => {
                 assert_eq!(name, "Writing Sprint");
-                assert_eq!(slug.as_deref(), Some("writing"));
                 assert_eq!(tag, None);
                 assert_eq!(repo, None);
             }

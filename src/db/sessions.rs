@@ -4,8 +4,8 @@ use crate::db::Database;
 use crate::domain::github::normalize_optional_repo;
 use crate::domain::revision::RevisionSummary;
 use crate::domain::session::{
-    Session, SessionHeadToken, SessionOverview, SessionSummary, normalize_tag, slugify,
-    validate_slug,
+    Session, SessionHeadToken, SessionOverview, SessionSummary, normalize_session_name,
+    normalize_tag, validate_session_name,
 };
 use crate::error::{AppError, Result};
 
@@ -13,21 +13,20 @@ impl Database {
     pub fn create_session(
         &mut self,
         name: &str,
-        slug: Option<&str>,
         tag: Option<&str>,
         repo: Option<&str>,
         now: i64,
     ) -> Result<Session> {
-        let resolved_slug = slug.map(str::to_owned).unwrap_or_else(|| slugify(name));
+        let resolved_name = normalize_session_name(name);
         let resolved_tag = normalize_tag(tag)?;
         let resolved_repo = normalize_optional_repo(repo)?;
-        validate_slug(&resolved_slug)?;
+        validate_session_name(&resolved_name)?;
 
         let transaction = self.connection.transaction()?;
         transaction.execute(
-            "INSERT INTO sessions (slug, name, created_at, updated_at, last_opened_at, current_revision, tag, repo)
-             VALUES (?1, ?2, ?3, ?3, ?3, 0, ?4, ?5)",
-            params![resolved_slug, name, now, resolved_tag, resolved_repo],
+            "INSERT INTO sessions (slug, created_at, updated_at, last_opened_at, current_revision, tag, repo)
+             VALUES (?1, ?2, ?2, ?2, 0, ?3, ?4)",
+            params![resolved_name, now, resolved_tag, resolved_repo],
         )?;
         let session_id = transaction.last_insert_rowid();
         let revision = create_revision_snapshot(&transaction, session_id, "session created", now)?;
@@ -35,15 +34,15 @@ impl Database {
             "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
             params![revision.revision_number, session_id],
         )?;
-        set_last_session_slug(&transaction, &resolved_slug)?;
+        set_last_session_name(&transaction, &resolved_name)?;
         transaction.commit()?;
 
-        self.get_session_by_slug(&resolved_slug)
+        self.get_session_by_name(&resolved_name)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let mut statement = self.connection.prepare(
-            "SELECT slug, name, tag, repo, last_opened_at, current_revision
+            "SELECT slug, tag, repo, last_opened_at, current_revision
              FROM sessions
              ORDER BY last_opened_at DESC, id DESC",
         )?;
@@ -55,7 +54,6 @@ impl Database {
         let mut statement = self.connection.prepare(
             "SELECT
                 sessions.slug,
-                sessions.name,
                 sessions.tag,
                 sessions.repo,
                 sessions.last_opened_at,
@@ -72,17 +70,17 @@ impl Database {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_session_by_slug(&self, slug: &str) -> Result<Session> {
+    pub fn get_session_by_name(&self, name: &str) -> Result<Session> {
         self.connection
             .query_row(
-                "SELECT id, slug, name, tag, repo, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, tag, repo, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  WHERE slug = ?1",
-                [slug],
+                [name],
                 map_session,
             )
             .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => AppError::SessionNotFound(slug.to_string()),
+                rusqlite::Error::QueryReturnedNoRows => AppError::SessionNotFound(name.to_string()),
                 other => AppError::Database(other),
             })
     }
@@ -90,7 +88,7 @@ impl Database {
     pub fn get_most_recent_session(&self) -> Result<Session> {
         self.connection
             .query_row(
-                "SELECT id, slug, name, tag, repo, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, tag, repo, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  ORDER BY last_opened_at DESC, id DESC
                  LIMIT 1",
@@ -103,47 +101,47 @@ impl Database {
             })
     }
 
-    pub fn resolve_session_slug(&self, slug: Option<&str>) -> Result<String> {
-        match slug {
+    pub fn resolve_session_name(&self, name: Option<&str>) -> Result<String> {
+        match name {
             Some(value) => Ok(value.to_string()),
-            None => Ok(self.get_most_recent_session()?.slug),
+            None => Ok(self.get_most_recent_session()?.name),
         }
     }
 
-    pub fn mark_session_opened(&mut self, slug: &str, now: i64) -> Result<Session> {
+    pub fn mark_session_opened(&mut self, name: &str, now: i64) -> Result<Session> {
         let transaction = self.connection.transaction()?;
         let session_id: i64 = transaction
-            .query_row("SELECT id FROM sessions WHERE slug = ?1", [slug], |row| {
+            .query_row("SELECT id FROM sessions WHERE slug = ?1", [name], |row| {
                 row.get::<_, i64>(0)
             })
             .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+            .ok_or_else(|| AppError::SessionNotFound(name.to_string()))?;
 
         transaction.execute(
             "UPDATE sessions SET last_opened_at = ?1 WHERE id = ?2",
             params![now, session_id],
         )?;
-        set_last_session_slug(&transaction, slug)?;
+        set_last_session_name(&transaction, name)?;
         transaction.commit()?;
 
-        self.get_session_by_slug(slug)
+        self.get_session_by_name(name)
     }
 
-    pub fn delete_session(&mut self, slug: &str) -> Result<Session> {
+    pub fn delete_session(&mut self, name: &str) -> Result<Session> {
         let transaction = self.connection.transaction()?;
         let session = transaction
             .query_row(
-                "SELECT id, slug, name, tag, repo, created_at, updated_at, last_opened_at, current_revision
+                "SELECT id, slug, tag, repo, created_at, updated_at, last_opened_at, current_revision
                  FROM sessions
                  WHERE slug = ?1",
-                [slug],
+                [name],
                 map_session,
             )
             .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+            .ok_or_else(|| AppError::SessionNotFound(name.to_string()))?;
 
         transaction.execute("DELETE FROM sessions WHERE id = ?1", [session.id])?;
-        sync_last_session_slug(&transaction)?;
+        sync_last_session_name(&transaction)?;
         transaction.commit()?;
 
         Ok(session)
@@ -151,55 +149,44 @@ impl Database {
 
     pub fn edit_session(
         &mut self,
-        slug: &str,
+        current_name: &str,
         name: &str,
         tag: Option<&str>,
         repo: Option<&str>,
         now: i64,
     ) -> Result<Session> {
-        let trimmed_name = name.trim();
-        let next_slug = slugify(trimmed_name);
+        let next_name = normalize_session_name(name);
         let resolved_tag = normalize_tag(tag)?;
         let resolved_repo = normalize_optional_repo(repo)?;
-        validate_slug(&next_slug)?;
+        validate_session_name(&next_name)?;
 
         let transaction = self.connection.transaction()?;
-        let (session_id, current_name, current_tag, current_repo): (
+        let (session_id, stored_name, current_tag, current_repo): (
             i64,
             String,
             Option<String>,
             Option<String>,
         ) = transaction
             .query_row(
-                "SELECT id, name, tag, repo FROM sessions WHERE slug = ?1",
-                [slug],
+                "SELECT id, slug, tag, repo FROM sessions WHERE slug = ?1",
+                [current_name],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+            .ok_or_else(|| AppError::SessionNotFound(current_name.to_string()))?;
         let repo_changed = current_repo != resolved_repo;
 
-        if current_name == trimmed_name
-            && current_tag == resolved_tag
-            && current_repo == resolved_repo
-            && slug == next_slug
+        if stored_name == next_name && current_tag == resolved_tag && current_repo == resolved_repo
         {
             transaction.commit()?;
-            return self.get_session_by_slug(slug);
+            return self.get_session_by_name(current_name);
         }
 
         transaction.execute(
             "UPDATE sessions
-             SET slug = ?1, name = ?2, tag = ?3, repo = ?4, updated_at = ?5
-             WHERE id = ?6",
-            params![
-                next_slug,
-                trimmed_name,
-                resolved_tag,
-                resolved_repo,
-                now,
-                session_id
-            ],
+             SET slug = ?1, tag = ?2, repo = ?3, updated_at = ?4
+             WHERE id = ?5",
+            params![next_name, resolved_tag, resolved_repo, now, session_id],
         )?;
         if repo_changed {
             transaction.execute(
@@ -207,7 +194,7 @@ impl Database {
                 params![resolved_repo, now, session_id],
             )?;
         }
-        update_last_session_slug_if_needed(&transaction, slug, &next_slug)?;
+        update_last_session_name_if_needed(&transaction, current_name, &next_name)?;
         let revision = create_revision_snapshot(&transaction, session_id, "session edited", now)?;
         transaction.execute(
             "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
@@ -215,12 +202,12 @@ impl Database {
         )?;
         transaction.commit()?;
 
-        self.get_session_by_slug(&next_slug)
+        self.get_session_by_name(&next_name)
     }
 
     pub fn update_session_metadata(
         &mut self,
-        slug: &str,
+        name: &str,
         tag: Option<&str>,
         repo: Option<&str>,
         now: i64,
@@ -232,11 +219,11 @@ impl Database {
             transaction
                 .query_row(
                     "SELECT id, tag, repo FROM sessions WHERE slug = ?1",
-                    [slug],
+                    [name],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?
-                .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+                .ok_or_else(|| AppError::SessionNotFound(name.to_string()))?;
 
         let Some(reason) = session_metadata_revision_reason(
             current_tag.as_deref(),
@@ -245,7 +232,7 @@ impl Database {
             resolved_repo.as_deref(),
         ) else {
             transaction.commit()?;
-            return self.get_session_by_slug(slug);
+            return self.get_session_by_name(name);
         };
 
         transaction.execute(
@@ -259,36 +246,36 @@ impl Database {
         )?;
         transaction.commit()?;
 
-        self.get_session_by_slug(slug)
+        self.get_session_by_name(name)
     }
 
     pub fn update_session_tag(
         &mut self,
-        slug: &str,
+        name: &str,
         tag: Option<&str>,
         now: i64,
     ) -> Result<Session> {
-        let current = self.get_session_by_slug(slug)?;
-        self.update_session_metadata(slug, tag, current.repo.as_deref(), now)
+        let current = self.get_session_by_name(name)?;
+        self.update_session_metadata(name, tag, current.repo.as_deref(), now)
     }
 
     pub fn update_session_repo(
         &mut self,
-        slug: &str,
+        name: &str,
         repo: Option<&str>,
         now: i64,
     ) -> Result<Session> {
-        let current = self.get_session_by_slug(slug)?;
-        self.update_session_metadata(slug, current.tag.as_deref(), repo, now)
+        let current = self.get_session_by_name(name)?;
+        self.update_session_metadata(name, current.tag.as_deref(), repo, now)
     }
 
-    pub fn session_head_token(&self, slug: &str) -> Result<SessionHeadToken> {
+    pub fn session_head_token(&self, name: &str) -> Result<SessionHeadToken> {
         self.connection
             .query_row(
                 "SELECT current_revision, updated_at
                  FROM sessions
                  WHERE slug = ?1",
-                [slug],
+                [name],
                 |row| {
                     Ok(SessionHeadToken {
                         current_revision: row.get(0)?,
@@ -297,7 +284,7 @@ impl Database {
                 },
             )
             .map_err(|error| match error {
-                rusqlite::Error::QueryReturnedNoRows => AppError::SessionNotFound(slug.to_string()),
+                rusqlite::Error::QueryReturnedNoRows => AppError::SessionNotFound(name.to_string()),
                 other => AppError::Database(other),
             })
     }
@@ -382,19 +369,19 @@ pub(crate) fn create_revision_snapshot(
     })
 }
 
-fn set_last_session_slug(transaction: &Transaction<'_>, slug: &str) -> Result<()> {
+fn set_last_session_name(transaction: &Transaction<'_>, name: &str) -> Result<()> {
     transaction.execute(
         "INSERT INTO app_state (key, value)
-         VALUES ('last_session_slug', ?1)
+         VALUES ('last_session_name', ?1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [slug],
+        [name],
     )?;
 
     Ok(())
 }
 
-fn sync_last_session_slug(transaction: &Transaction<'_>) -> Result<()> {
-    let most_recent_slug: Option<String> = transaction
+fn sync_last_session_name(transaction: &Transaction<'_>) -> Result<()> {
+    let most_recent_name: Option<String> = transaction
         .query_row(
             "SELECT slug
              FROM sessions
@@ -405,30 +392,30 @@ fn sync_last_session_slug(transaction: &Transaction<'_>) -> Result<()> {
         )
         .optional()?;
 
-    if let Some(slug) = most_recent_slug {
-        set_last_session_slug(transaction, &slug)?;
+    if let Some(name) = most_recent_name {
+        set_last_session_name(transaction, &name)?;
     } else {
-        transaction.execute("DELETE FROM app_state WHERE key = 'last_session_slug'", [])?;
+        transaction.execute("DELETE FROM app_state WHERE key = 'last_session_name'", [])?;
     }
 
     Ok(())
 }
 
-fn update_last_session_slug_if_needed(
+fn update_last_session_name_if_needed(
     transaction: &Transaction<'_>,
-    current_slug: &str,
-    next_slug: &str,
+    current_name: &str,
+    next_name: &str,
 ) -> Result<()> {
-    let last_session_slug: Option<String> = transaction
+    let last_session_name: Option<String> = transaction
         .query_row(
-            "SELECT value FROM app_state WHERE key = 'last_session_slug'",
+            "SELECT value FROM app_state WHERE key = 'last_session_name'",
             [],
             |row| row.get(0),
         )
         .optional()?;
 
-    if last_session_slug.as_deref() == Some(current_slug) {
-        set_last_session_slug(transaction, next_slug)?;
+    if last_session_name.as_deref() == Some(current_name) {
+        set_last_session_name(transaction, next_name)?;
     }
 
     Ok(())
@@ -437,38 +424,35 @@ fn update_last_session_slug_if_needed(
 fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
         id: row.get(0)?,
-        slug: row.get(1)?,
-        name: row.get(2)?,
-        tag: row.get(3)?,
-        repo: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
-        last_opened_at: row.get(7)?,
-        current_revision: row.get(8)?,
+        name: row.get(1)?,
+        tag: row.get(2)?,
+        repo: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        last_opened_at: row.get(6)?,
+        current_revision: row.get(7)?,
     })
 }
 
 fn map_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
-        slug: row.get(0)?,
-        name: row.get(1)?,
-        tag: row.get(2)?,
-        repo: row.get(3)?,
-        last_opened_at: row.get(4)?,
-        current_revision: row.get(5)?,
+        name: row.get(0)?,
+        tag: row.get(1)?,
+        repo: row.get(2)?,
+        last_opened_at: row.get(3)?,
+        current_revision: row.get(4)?,
     })
 }
 
 fn map_session_overview(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOverview> {
     Ok(SessionOverview {
-        slug: row.get(0)?,
-        name: row.get(1)?,
-        tag: row.get(2)?,
-        repo: row.get(3)?,
-        last_opened_at: row.get(4)?,
-        current_revision: row.get(5)?,
-        todo_count: row.get(6)?,
-        done_count: row.get(7)?,
+        name: row.get(0)?,
+        tag: row.get(1)?,
+        repo: row.get(2)?,
+        last_opened_at: row.get(3)?,
+        current_revision: row.get(4)?,
+        todo_count: row.get(5)?,
+        done_count: row.get(6)?,
     })
 }
 
@@ -508,22 +492,16 @@ mod tests {
     fn creates_and_lists_sessions() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let created = database
-            .create_session(
-                "Writing Sprint",
-                None,
-                Some("Work Projects"),
-                None,
-                1_711_275_600,
-            )
+            .create_session("Writing Sprint", Some("Work Projects"), None, 1_711_275_600)
             .expect("session");
 
-        assert_eq!(created.slug, "writing-sprint");
+        assert_eq!(created.name, "writing-sprint");
         assert_eq!(created.tag.as_deref(), Some("work-projects"));
         assert_eq!(created.current_revision, 1);
 
         let listed = database.list_sessions().expect("sessions");
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].slug, "writing-sprint");
+        assert_eq!(listed[0].name, "writing-sprint");
         assert_eq!(listed[0].tag.as_deref(), Some("work-projects"));
     }
 
@@ -531,23 +509,23 @@ mod tests {
     fn resolves_recent_session_and_marks_opened() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
-            .create_session("Reading Sprint", None, None, None, 1_711_275_700)
+            .create_session("Reading Sprint", None, None, 1_711_275_700)
             .expect("session");
 
         assert_eq!(
-            database.resolve_session_slug(None).expect("recent"),
+            database.resolve_session_name(None).expect("recent"),
             "reading-sprint"
         );
 
         let marked = database
             .mark_session_opened("writing-sprint", 1_711_275_800)
             .expect("marked");
-        assert_eq!(marked.slug, "writing-sprint");
+        assert_eq!(marked.name, "writing-sprint");
         assert_eq!(
-            database.resolve_session_slug(None).expect("recent"),
+            database.resolve_session_name(None).expect("recent"),
             "writing-sprint"
         );
     }
@@ -556,37 +534,37 @@ mod tests {
     fn lists_overview_rows_in_recent_order_with_counts() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&writing.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&writing.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
         database
-            .add_todo(&writing.slug, "Review keybindings", "", None, 1_711_275_660)
+            .add_todo(&writing.name, "Review keybindings", "", None, 1_711_275_660)
             .expect("todo");
         database
             .set_todo_status(
                 1,
-                Some(&writing.slug),
+                Some(&writing.name),
                 crate::domain::todo::TodoStatus::Done,
                 1_711_275_670,
             )
             .expect("done");
 
         let reading = database
-            .create_session("Reading Sprint", None, None, None, 1_711_275_700)
+            .create_session("Reading Sprint", None, None, 1_711_275_700)
             .expect("session");
         database
-            .mark_session_opened(&writing.slug, 1_711_275_800)
+            .mark_session_opened(&writing.name, 1_711_275_800)
             .expect("opened");
 
         let overview = database.list_session_overview().expect("overview");
         assert_eq!(overview.len(), 2);
-        assert_eq!(overview[0].slug, writing.slug);
+        assert_eq!(overview[0].name, writing.name);
         assert_eq!(overview[0].tag.as_deref(), Some("work"));
         assert_eq!(overview[0].todo_count, 2);
         assert_eq!(overview[0].done_count, 1);
-        assert_eq!(overview[1].slug, reading.slug);
+        assert_eq!(overview[1].name, reading.name);
         assert_eq!(overview[1].tag, None);
     }
 
@@ -594,17 +572,17 @@ mod tests {
     fn deleting_session_cascades_and_updates_recent_pointer() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&writing.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&writing.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
 
         let reading = database
-            .create_session("Reading Sprint", None, Some("private"), None, 1_711_275_700)
+            .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
             .expect("session");
         let todo = database
-            .add_todo(&reading.slug, "Review paper", "", None, 1_711_275_750)
+            .add_todo(&reading.name, "Review paper", "", None, 1_711_275_750)
             .expect("todo");
         let run = database
             .start_pomodoro(
@@ -614,16 +592,16 @@ mod tests {
             )
             .expect("run");
 
-        let deleted = database.delete_session(&reading.slug).expect("delete");
-        assert_eq!(deleted.slug, reading.slug);
-        assert!(database.get_session_by_slug(&reading.slug).is_err());
+        let deleted = database.delete_session(&reading.name).expect("delete");
+        assert_eq!(deleted.name, reading.name);
+        assert!(database.get_session_by_name(&reading.name).is_err());
         assert!(database.get_todo(todo.id).is_err());
         let run = database.get_pomodoro_run(run.id).expect("run");
         assert_eq!(run.todo_id, None);
         assert_eq!(run.session_id, None);
         assert_eq!(
-            database.resolve_session_slug(None).expect("recent"),
-            writing.slug
+            database.resolve_session_name(None).expect("recent"),
+            writing.name
         );
     }
 
@@ -631,13 +609,13 @@ mod tests {
     fn deleting_last_session_clears_recent_pointer() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
-        database.delete_session(&session.slug).expect("delete");
+        database.delete_session(&session.name).expect("delete");
 
         assert!(matches!(
-            database.resolve_session_slug(None),
+            database.resolve_session_name(None),
             Err(crate::error::AppError::NoRecentSession)
         ));
     }
@@ -646,17 +624,17 @@ mod tests {
     fn session_head_token_changes_for_same_session_mutations_only() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("writing session");
         let initial = database
-            .session_head_token(&writing.slug)
+            .session_head_token(&writing.name)
             .expect("initial head token");
 
         database
-            .add_todo(&writing.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&writing.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let after_todo = database
-            .session_head_token(&writing.slug)
+            .session_head_token(&writing.name)
             .expect("updated head token");
         assert_ne!(after_todo, initial);
         assert_eq!(
@@ -668,10 +646,10 @@ mod tests {
         );
 
         database
-            .create_session("Reading Sprint", None, None, None, 1_711_275_800)
+            .create_session("Reading Sprint", None, None, 1_711_275_800)
             .expect("reading session");
         let after_other_session = database
-            .session_head_token(&writing.slug)
+            .session_head_token(&writing.name)
             .expect("unchanged token");
         assert_eq!(after_other_session, after_todo);
     }
@@ -680,18 +658,18 @@ mod tests {
     fn updates_and_clears_session_tag_with_new_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         let updated = database
-            .update_session_tag(&session.slug, Some("Private Projects"), 1_711_275_700)
+            .update_session_tag(&session.name, Some("Private Projects"), 1_711_275_700)
             .expect("set tag");
         assert_eq!(updated.tag.as_deref(), Some("private-projects"));
         assert_eq!(updated.current_revision, 2);
         assert_eq!(updated.updated_at, 1_711_275_700);
 
         let cleared = database
-            .update_session_tag(&session.slug, None, 1_711_275_800)
+            .update_session_tag(&session.name, None, 1_711_275_800)
             .expect("clear tag");
         assert_eq!(cleared.tag, None);
         assert_eq!(cleared.current_revision, 3);
@@ -702,12 +680,12 @@ mod tests {
     fn updates_and_clears_session_repo_with_new_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
 
         let updated = database
             .update_session_repo(
-                &session.slug,
+                &session.name,
                 Some("https://github.com/SakanaAI/todui-keymove"),
                 1_711_275_700,
             )
@@ -716,7 +694,7 @@ mod tests {
         assert_eq!(updated.current_revision, 2);
 
         let cleared = database
-            .update_session_repo(&session.slug, None, 1_711_275_800)
+            .update_session_repo(&session.name, None, 1_711_275_800)
             .expect("clear repo");
         assert_eq!(cleared.repo, None);
         assert_eq!(cleared.current_revision, 3);
@@ -728,18 +706,17 @@ mod tests {
         let session = database
             .create_session(
                 "Writing Sprint",
-                None,
                 Some("work"),
                 Some("@SakanaAI/todui"),
                 1_711_275_600,
             )
             .expect("session");
         let inherited = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
         let explicit = database
             .add_todo(
-                &session.slug,
+                &session.name,
                 "Review bindings",
                 "",
                 Some("@OpenAI/codex"),
@@ -748,11 +725,11 @@ mod tests {
             .expect("todo");
 
         database
-            .mark_session_opened(&session.slug, 1_711_275_700)
+            .mark_session_opened(&session.name, 1_711_275_700)
             .expect("opened");
         let updated = database
             .edit_session(
-                &session.slug,
+                &session.name,
                 "Deep Work",
                 Some("Private"),
                 Some("@SakanaAI/todui-keymove"),
@@ -760,17 +737,16 @@ mod tests {
             )
             .expect("edited session");
 
-        assert_eq!(updated.name, "Deep Work");
-        assert_eq!(updated.slug, "deep-work");
+        assert_eq!(updated.name, "deep-work");
         assert_eq!(updated.tag.as_deref(), Some("private"));
         assert_eq!(updated.repo.as_deref(), Some("sakanaai/todui-keymove"));
         assert_eq!(updated.current_revision, 4);
         assert_eq!(updated.updated_at, 1_711_275_800);
         assert_eq!(
-            database.resolve_session_slug(None).expect("recent"),
+            database.resolve_session_name(None).expect("recent"),
             "deep-work"
         );
-        assert!(database.get_session_by_slug("writing-sprint").is_err());
+        assert!(database.get_session_by_name("writing-sprint").is_err());
 
         let inherited = database.get_todo(inherited.id).expect("todo");
         let explicit = database.get_todo(explicit.id).expect("todo");
@@ -782,23 +758,23 @@ mod tests {
     fn editing_session_to_existing_slug_is_rejected() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         database
-            .create_session("Reading Sprint", None, None, None, 1_711_275_700)
+            .create_session("Reading Sprint", None, None, 1_711_275_700)
             .expect("session");
 
         let error = database
-            .edit_session(&writing.slug, "Reading Sprint", None, None, 1_711_275_800)
-            .expect_err("duplicate slug");
+            .edit_session(&writing.name, "Reading Sprint", None, None, 1_711_275_800)
+            .expect_err("duplicate name");
 
         assert!(matches!(error, crate::error::AppError::Database(_)));
         assert_eq!(
             database
-                .get_session_by_slug(&writing.slug)
+                .get_session_by_name(&writing.name)
                 .expect("session")
                 .name,
-            "Writing Sprint"
+            "writing-sprint"
         );
     }
 
@@ -808,18 +784,17 @@ mod tests {
         let session = database
             .create_session(
                 "Writing Sprint",
-                None,
                 Some("work"),
                 Some("@SakanaAI/todui"),
                 1_711_275_600,
             )
             .expect("session");
         let inherited = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
         let explicit = database
             .add_todo(
-                &session.slug,
+                &session.name,
                 "Review bindings",
                 "",
                 Some("@OpenAI/codex"),
@@ -829,7 +804,7 @@ mod tests {
 
         let updated = database
             .edit_session(
-                &session.slug,
+                &session.name,
                 "Research Sprint",
                 Some("Deep Work"),
                 Some("@SakanaAI/todui"),
@@ -837,7 +812,7 @@ mod tests {
             )
             .expect("edited session");
 
-        assert_eq!(updated.slug, "research-sprint");
+        assert_eq!(updated.name, "research-sprint");
         assert_eq!(database.get_todo(inherited.id).expect("todo").repo, None);
         assert_eq!(
             database

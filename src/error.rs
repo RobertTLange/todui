@@ -28,8 +28,8 @@ pub enum AppError {
     },
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
-    #[error("invalid session slug: {0}")]
-    InvalidSlug(String),
+    #[error("invalid session name: {0}")]
+    InvalidSessionName(String),
     #[error("invalid session tag: {0}")]
     InvalidTag(String),
     #[error("invalid GitHub repository reference: {0}")]

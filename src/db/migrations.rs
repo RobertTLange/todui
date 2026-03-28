@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-pub const LATEST_USER_VERSION: i32 = 4;
+pub const LATEST_USER_VERSION: i32 = 5;
 
 const MIGRATION_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -147,6 +147,10 @@ ALTER TABLE session_revisions ADD COLUMN session_repo TEXT;
 ALTER TABLE session_revision_todos ADD COLUMN repo TEXT;
 "#;
 
+const MIGRATION_V5_SQL: &str = r#"
+ALTER TABLE sessions DROP COLUMN name;
+"#;
+
 pub fn apply(connection: &Connection, current_version: i32) -> Result<()> {
     if current_version < 1 {
         connection.execute_batch(MIGRATION_V1_SQL)?;
@@ -163,6 +167,10 @@ pub fn apply(connection: &Connection, current_version: i32) -> Result<()> {
     if current_version < 4 {
         connection.execute_batch(MIGRATION_V4_SQL)?;
         connection.pragma_update(None, "user_version", 4)?;
+    }
+    if current_version < 5 {
+        connection.execute_batch(MIGRATION_V5_SQL)?;
+        connection.pragma_update(None, "user_version", 5)?;
     }
 
     Ok(())

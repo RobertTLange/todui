@@ -45,7 +45,7 @@ fn session_help_describes_subcommands() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Use `todui session list` to discover available session slugs before calling `add`, `resume`, `repo`, or `export md`.",
+            "Use `todui session list` to discover available session names before calling `add`, `resume`, `repo`, or `export md`.",
         ))
         .stdout(predicate::str::contains("Create a new session"))
         .stdout(predicate::str::contains(
@@ -76,7 +76,7 @@ fn session_list_help_explains_output_shape() {
             "Print one session per line in a tab-separated format for scripts and agents.",
         ))
         .stdout(predicate::str::contains(
-            "<slug>\\t<display-name>\\t<tag-or->\\t<last-opened-local-time>\\tr<current-revision>",
+            "<session-name>\\t<tag-or->\\t<last-opened-local-time>\\tr<current-revision>",
         ));
 }
 
@@ -109,7 +109,7 @@ fn repo_help_explains_search_output_and_inputs() {
             "List todos associated with a GitHub repository.",
         ))
         .stdout(predicate::str::contains(
-            "<todo-id>\\t<session-slug>\\t<title>\\t<status>\\t<effective-repo>\\t<source>",
+            "<todo-id>\\t<session-name>\\t<title>\\t<status>\\t<effective-repo>\\t<source>",
         ))
         .stdout(predicate::str::contains(
             "todui repo @sakanaai/todui-keymove",
@@ -127,7 +127,7 @@ fn export_markdown_help_explains_defaults_and_flags() {
             "Use this command when an agent needs todo titles or note bodies from the CLI.",
         ))
         .stdout(predicate::str::contains(
-            "Session slug. Defaults to the most recently opened session",
+            "Session name. Defaults to the most recently opened session",
         ))
         .stdout(predicate::str::contains(
             "Export a specific revision instead of the live head",
