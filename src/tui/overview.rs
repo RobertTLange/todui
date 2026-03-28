@@ -85,13 +85,14 @@ struct OverviewScreen {
 enum OverviewOverlay {
     Help,
     SessionEditor(SessionEditorMode),
+    SessionMetadata,
     DeleteSession { slug: String, name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionEditorMode {
     Create,
-    EditMetadata { slug: String, name: String },
+    EditMetadata { slug: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +168,15 @@ impl OverviewScreen {
                 }
                 return Ok(None);
             }
+            Some(OverviewOverlay::SessionMetadata) => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i')
+                ) {
+                    self.overlay = None;
+                }
+                return Ok(None);
+            }
             Some(OverviewOverlay::SessionEditor(_)) => {
                 return self.handle_session_editor_key(database, key);
             }
@@ -186,8 +196,12 @@ impl OverviewScreen {
                 self.open_session_editor();
                 None
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char('e') | KeyCode::Char('t') => {
                 self.open_session_metadata_editor();
+                None
+            }
+            KeyCode::Char('i') => {
+                self.open_session_metadata();
                 None
             }
             KeyCode::Char('D') => {
@@ -294,18 +308,13 @@ impl OverviewScreen {
             }
             KeyCode::Tab => {
                 self.session_editor.focused_field = match self.overlay {
-                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => {
-                        match self.session_editor.focused_field {
-                            EditorField::Primary => EditorField::Secondary,
-                            EditorField::Secondary => EditorField::Tertiary,
-                            EditorField::Tertiary => EditorField::Primary,
-                        }
-                    }
-                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
+                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+                    | Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
                         ..
                     })) => match self.session_editor.focused_field {
                         EditorField::Primary => EditorField::Secondary,
-                        EditorField::Secondary | EditorField::Tertiary => EditorField::Primary,
+                        EditorField::Secondary => EditorField::Tertiary,
+                        EditorField::Tertiary => EditorField::Primary,
                     },
                     _ => self.session_editor.focused_field,
                 };
@@ -407,6 +416,11 @@ impl OverviewScreen {
             frame.render_widget(Clear, area);
             frame.render_widget(self.help_overlay(), area);
         }
+        if matches!(self.overlay, Some(OverviewOverlay::SessionMetadata)) {
+            let area = centered_rect(frame.area(), 60, 13);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.session_metadata_modal(), area);
+        }
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 60, 11);
             frame.render_widget(Clear, area);
@@ -490,21 +504,7 @@ impl OverviewScreen {
 
     fn details_panel(&self) -> Paragraph<'static> {
         let text = self
-            .sessions
-            .get(self.selected_index)
-            .map(|session| {
-                format!(
-                    "name: {}\nslug: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
-                    session.name,
-                    session.slug,
-                    session.tag.as_deref().unwrap_or("untagged"),
-                    session.repo.as_deref().unwrap_or("-"),
-                    format_full_local(session.last_opened_at),
-                    session.current_revision,
-                    session.todo_count - session.done_count,
-                    session.done_count
-                )
-            })
+            .selected_session_metadata_text()
             .unwrap_or_else(|| String::from("Select a session to inspect its summary."));
 
         Paragraph::new(text)
@@ -565,7 +565,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit repo/tag: t\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -602,12 +602,12 @@ impl OverviewScreen {
             ),
             Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata { .. })) => (
                 "Edit Session Metadata",
-                "Tag",
-                self.session_editor.tag.as_str(),
+                "Name",
+                self.session_editor.name.as_str(),
+                Some("Tag"),
+                Some(self.session_editor.tag.as_str()),
                 Some("Repo"),
                 Some(self.session_editor.repo.as_str()),
-                None,
-                None,
                 "Empty clears  Enter save  Esc cancel",
             ),
             _ => ("Session", "Value", "", None, None, None, None, "Esc cancel"),
@@ -627,6 +627,24 @@ impl OverviewScreen {
                 footer_hint,
             },
         )
+    }
+
+    fn session_metadata_modal(&self) -> Paragraph<'static> {
+        let text = self.selected_session_metadata_text().unwrap_or_else(|| {
+            String::from("Select a session to inspect its summary.\n\nEsc close")
+        });
+
+        Paragraph::new(format!("{text}\n\nEsc close"))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Session Metadata")
+                    .style(self.theme.surface_style(SurfaceTone::Overlay))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
     fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
@@ -802,16 +820,22 @@ impl OverviewScreen {
         self.overlay = Some(OverviewOverlay::SessionEditor(
             SessionEditorMode::EditMetadata {
                 slug: session.slug.clone(),
-                name: session.name.clone(),
             },
         ));
         self.session_editor = SessionEditorState {
-            name: String::new(),
+            name: session.name.clone(),
             tag: session.tag.clone().unwrap_or_default(),
             repo: session.repo.clone().unwrap_or_default(),
             focused_field: EditorField::Primary,
             error: None,
         };
+    }
+
+    fn open_session_metadata(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        self.overlay = Some(OverviewOverlay::SessionMetadata);
     }
 
     fn open_delete_session(&mut self) {
@@ -859,8 +883,15 @@ impl OverviewScreen {
             Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
                 slug, ..
             })) => {
-                match database.update_session_metadata(
+                let name = self.session_editor.name.trim();
+                if name.is_empty() {
+                    self.session_editor.error = Some(String::from("Session name is required"));
+                    return Ok(None);
+                }
+
+                match database.edit_session(
                     slug,
+                    name,
                     Some(self.session_editor.tag.as_str()),
                     Some(self.session_editor.repo.as_str()),
                     now_utc_timestamp(),
@@ -882,28 +913,26 @@ impl OverviewScreen {
 
     fn current_editor_field_mut(&mut self) -> &mut String {
         match self.session_editor.focused_field {
-            EditorField::Primary => {
-                if matches!(
-                    self.overlay,
-                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
-                ) {
-                    &mut self.session_editor.name
-                } else {
-                    &mut self.session_editor.tag
-                }
-            }
-            EditorField::Secondary => {
-                if matches!(
-                    self.overlay,
-                    Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
-                ) {
-                    &mut self.session_editor.tag
-                } else {
-                    &mut self.session_editor.repo
-                }
-            }
+            EditorField::Primary => &mut self.session_editor.name,
+            EditorField::Secondary => &mut self.session_editor.tag,
             EditorField::Tertiary => &mut self.session_editor.repo,
         }
+    }
+
+    fn selected_session_metadata_text(&self) -> Option<String> {
+        self.sessions.get(self.selected_index).map(|session| {
+            format!(
+                "name: {}\nslug: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
+                session.name,
+                session.slug,
+                session.tag.as_deref().unwrap_or("untagged"),
+                session.repo.as_deref().unwrap_or("-"),
+                format_full_local(session.last_opened_at),
+                session.current_revision,
+                session.todo_count - session.done_count,
+                session.done_count
+            )
+        })
     }
 }
 
@@ -1311,11 +1340,25 @@ mod tests {
     fn overview_edits_selected_session_metadata() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
+        let reading_todo = database
+            .add_todo("reading-sprint", "Review paper", "", None, 1_711_275_810)
+            .expect("todo");
 
         screen
-            .handle_key(&mut database, key(KeyCode::Char('t')))
+            .handle_key(&mut database, key(KeyCode::Char('e')))
             .unwrap();
         assert!(render_buffer(&mut screen, 120, 24).contains("Edit Session Metadata"));
+        for _ in 0..14 {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "Research Sprint".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
         for _ in 0..7 {
             screen
                 .handle_key(&mut database, key(KeyCode::Backspace))
@@ -1338,7 +1381,14 @@ mod tests {
 
         assert_eq!(
             database
-                .get_session_by_slug("reading-sprint")
+                .get_session_by_slug("research-sprint")
+                .expect("session")
+                .name,
+            "Research Sprint"
+        );
+        assert_eq!(
+            database
+                .get_session_by_slug("research-sprint")
                 .expect("session")
                 .tag
                 .as_deref(),
@@ -1346,12 +1396,40 @@ mod tests {
         );
         assert_eq!(
             database
-                .get_session_by_slug("reading-sprint")
+                .get_session_by_slug("research-sprint")
                 .expect("session")
                 .repo
                 .as_deref(),
             Some("exampleorg/todui-keymove")
         );
+        assert_eq!(
+            database
+                .get_todo(reading_todo.id)
+                .expect("todo")
+                .repo
+                .as_deref(),
+            Some("exampleorg/todui-keymove")
+        );
+        assert!(database.get_session_by_slug("reading-sprint").is_err());
+    }
+
+    #[test]
+    fn overview_i_opens_and_closes_metadata_popup() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .unwrap();
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("Session Metadata"));
+        assert!(buffer.contains("name: Reading Sprint"));
+        assert!(buffer.contains("slug: reading-sprint"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .unwrap();
+        assert!(!render_buffer(&mut screen, 120, 24).contains("Session Metadata"));
     }
 
     #[test]
