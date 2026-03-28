@@ -72,7 +72,7 @@ pub(crate) enum OverviewExit {
 #[derive(Debug)]
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
-    expanded_session: Option<ExpandedSessionState>,
+    expanded_sessions: Vec<ExpandedSessionState>,
     active_run: Option<PomodoroRun>,
     selected_index: usize,
     scroll_offset: usize,
@@ -138,7 +138,7 @@ impl OverviewScreen {
     fn new(config: Config) -> Self {
         Self {
             sessions: Vec::new(),
-            expanded_session: None,
+            expanded_sessions: Vec::new(),
             active_run: None,
             selected_index: 0,
             scroll_offset: 0,
@@ -154,7 +154,7 @@ impl OverviewScreen {
         self.sessions = database.list_session_overview()?;
         self.active_run = database.get_active_pomodoro()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
-        self.sync_expanded_session(database)?;
+        self.sync_expanded_sessions(database)?;
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
     }
@@ -902,17 +902,18 @@ impl OverviewScreen {
         };
 
         if self
-            .expanded_session
-            .as_ref()
-            .is_some_and(|expanded| expanded.name == session_name)
+            .expanded_sessions
+            .iter()
+            .any(|expanded| expanded.name == session_name)
         {
-            self.expanded_session = None;
+            self.expanded_sessions
+                .retain(|expanded| expanded.name != session_name);
             self.ensure_selection_visible(self.visible_rows());
             return Ok(());
         }
 
         let session = database.get_session_by_name(&session_name)?;
-        self.expanded_session = Some(ExpandedSessionState {
+        self.expanded_sessions.push(ExpandedSessionState {
             name: session_name,
             todos: database.get_live_todos(session.id)?,
         });
@@ -963,10 +964,10 @@ impl OverviewScreen {
                     now_utc_timestamp(),
                 ) {
                     Ok(session) => {
-                        if let Some(expanded) = &mut self.expanded_session
-                            && expanded.name == *current_name
-                        {
-                            expanded.name = session.name.clone();
+                        for expanded in &mut self.expanded_sessions {
+                            if expanded.name == *current_name {
+                                expanded.name = session.name.clone();
+                            }
                         }
                         self.reload(database)?;
                         self.close_session_editor();
@@ -990,30 +991,24 @@ impl OverviewScreen {
         }
     }
 
-    fn sync_expanded_session(&mut self, database: &Database) -> Result<()> {
-        let Some(expanded_name) = self
-            .expanded_session
-            .as_ref()
-            .map(|expanded| expanded.name.clone())
-        else {
-            return Ok(());
-        };
+    fn sync_expanded_sessions(&mut self, database: &Database) -> Result<()> {
+        let mut refreshed_sessions = Vec::with_capacity(self.expanded_sessions.len());
+        for expanded in &self.expanded_sessions {
+            if self
+                .sessions
+                .iter()
+                .all(|session| session.name != expanded.name)
+            {
+                continue;
+            }
 
-        if self
-            .sessions
-            .iter()
-            .all(|session| session.name != expanded_name)
-        {
-            self.expanded_session = None;
-            return Ok(());
+            let session = database.get_session_by_name(&expanded.name)?;
+            refreshed_sessions.push(ExpandedSessionState {
+                name: expanded.name.clone(),
+                todos: database.get_live_todos(session.id)?,
+            });
         }
-
-        let session = database.get_session_by_name(&expanded_name)?;
-        let todos = database.get_live_todos(session.id)?;
-        self.expanded_session = Some(ExpandedSessionState {
-            name: expanded_name,
-            todos,
-        });
+        self.expanded_sessions = refreshed_sessions;
         Ok(())
     }
 
@@ -1060,9 +1055,9 @@ impl OverviewScreen {
     }
 
     fn expanded_todos_for_session(&self, session_name: &str) -> Option<&[Todo]> {
-        self.expanded_session
-            .as_ref()
-            .filter(|expanded| expanded.name == session_name)
+        self.expanded_sessions
+            .iter()
+            .find(|expanded| expanded.name == session_name)
             .map(|expanded| expanded.todos.as_slice())
     }
 
@@ -1075,10 +1070,10 @@ impl OverviewScreen {
     }
 
     fn expanded_row_count(&self) -> usize {
-        self.expanded_session
-            .as_ref()
+        self.expanded_sessions
+            .iter()
             .map(|expanded| expanded.todos.len().max(1))
-            .unwrap_or(0)
+            .sum()
     }
 
     fn selected_session_metadata_text(&self) -> Option<String> {
@@ -1252,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_enter_toggles_inline_todos_and_keeps_navigation_session_scoped() {
+    fn overview_enter_toggles_inline_todos_for_multiple_sessions() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
 
@@ -1273,9 +1268,19 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("expand second");
-        let switched = render_buffer(&mut screen, 120, 24);
-        assert!(switched.contains("[ ] Draft spec"));
-        assert!(!switched.contains("No todos yet"));
+        let expanded = render_buffer(&mut screen, 120, 24);
+        assert!(expanded.contains("[ ] Draft spec"));
+        assert!(expanded.contains("No todos yet"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Up))
+            .expect("move back");
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("collapse first");
+        let partially_collapsed = render_buffer(&mut screen, 120, 24);
+        assert!(partially_collapsed.contains("[ ] Draft spec"));
+        assert!(!partially_collapsed.contains("No todos yet"));
     }
 
     #[test]
