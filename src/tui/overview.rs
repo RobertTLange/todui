@@ -6,8 +6,8 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -26,6 +26,13 @@ use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 const EVENT_POLL_MS: u64 = 250;
 const SUMMARY_PANEL_PERCENT: u16 = 15;
 const SUMMARY_PANEL_MIN_HEIGHT: u16 = 8;
+const TAG_COLUMN_WIDTH: usize = 10;
+const REV_COLUMN_WIDTH: usize = 5;
+const OPEN_COLUMN_WIDTH: usize = 5;
+const DONE_COLUMN_WIDTH: usize = 5;
+const LAST_OPENED_COLUMN_WIDTH: usize = 11;
+const SESSION_COLUMN_SPACING: usize = 5;
+const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -416,11 +423,7 @@ impl OverviewScreen {
             frame.render_widget(self.empty_state(), chunks[1]);
         } else {
             let (list_area, summary_area, details_area) = self.body_areas(chunks[1]);
-            frame.render_stateful_widget(
-                self.session_list(list_area.height),
-                list_area,
-                &mut self.list_state(),
-            );
+            frame.render_widget(self.session_list(list_area), list_area);
             frame.render_widget(self.summary_panel(), summary_area);
             if let Some(details_area) = details_area {
                 frame.render_widget(self.details_panel(), details_area);
@@ -483,48 +486,28 @@ impl OverviewScreen {
         .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn session_list(&self, height: u16) -> Table<'static> {
-        let visible_rows = self.visible_rows_for_height(height);
-        let rows = self
-            .display_rows()
-            .into_iter()
-            .skip(self.scroll_offset)
-            .take(visible_rows)
-            .map(|row| self.table_row(row))
-            .collect::<Vec<_>>();
+    fn session_list(&self, area: Rect) -> Paragraph<'static> {
+        let visible_rows = self.visible_rows_for_height(area.height);
+        let inner_width = usize::from(area.width.saturating_sub(2));
+        let mut lines = vec![session_header_line(&self.theme, inner_width)];
+        lines.extend(
+            self.display_rows()
+                .into_iter()
+                .skip(self.scroll_offset)
+                .take(visible_rows)
+                .map(|row| self.display_row_line(row, inner_width)),
+        );
 
-        Table::new(
-            rows,
-            [
-                Constraint::Length(10),
-                Constraint::Fill(1),
-                Constraint::Length(5),
-                Constraint::Length(5),
-                Constraint::Length(5),
-                Constraint::Length(11),
-            ],
-        )
-        .header(
-            Row::new([
-                Cell::from("Tag"),
-                Cell::from("Name"),
-                Cell::from("Rev"),
-                Cell::from("☐"),
-                Cell::from("☑"),
-                Cell::from("Last Opened"),
-            ])
-            .style(self.theme.surface_title_style(SurfaceTone::Open)),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Sessions")
-                .style(self.theme.surface_style(SurfaceTone::Neutral))
-                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
-                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
-        )
-        .column_spacing(1)
-        .row_highlight_style(self.theme.selection_style(SelectionTone::Open))
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Sessions")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn details_panel(&self) -> Paragraph<'static> {
@@ -745,16 +728,6 @@ impl OverviewScreen {
         self.scroll_offset = min(self.scroll_offset, max_scroll);
     }
 
-    fn list_state(&self) -> TableState {
-        let mut state = TableState::default();
-        if let Some(selected_display_index) = self.selected_display_index()
-            && selected_display_index >= self.scroll_offset
-        {
-            state.select(Some(selected_display_index - self.scroll_offset));
-        }
-        state
-    }
-
     fn list_area(&self, area: Rect) -> Rect {
         self.body_areas(self.root_chunks(area)[1]).0
     }
@@ -915,7 +888,7 @@ impl OverviewScreen {
         let session = database.get_session_by_name(&session_name)?;
         self.expanded_sessions.push(ExpandedSessionState {
             name: session_name,
-            todos: database.get_live_todos(session.id)?,
+            todos: open_preview_todos(database.get_live_todos(session.id)?),
         });
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
@@ -1005,7 +978,7 @@ impl OverviewScreen {
             let session = database.get_session_by_name(&expanded.name)?;
             refreshed_sessions.push(ExpandedSessionState {
                 name: expanded.name.clone(),
-                todos: database.get_live_todos(session.id)?,
+                todos: open_preview_todos(database.get_live_todos(session.id)?),
             });
         }
         self.expanded_sessions = refreshed_sessions;
@@ -1030,21 +1003,25 @@ impl OverviewScreen {
         rows
     }
 
-    fn table_row(&self, row: OverviewDisplayRow) -> Row<'static> {
+    fn display_row_line(&self, row: OverviewDisplayRow, inner_width: usize) -> Line<'static> {
         match row {
-            OverviewDisplayRow::Session(session_index) => {
-                session_table_row(&self.sessions[session_index], &self.theme)
-            }
+            OverviewDisplayRow::Session(session_index) => session_row_line(
+                &self.sessions[session_index],
+                &self.theme,
+                inner_width,
+                session_index == self.selected_index,
+            ),
             OverviewDisplayRow::Todo {
                 session_index,
                 todo_index,
-            } => todo_preview_row(
+            } => todo_preview_line(
                 &self
                     .expanded_todos_for_session(&self.sessions[session_index].name)
                     .expect("expanded todos for row")[todo_index],
                 &self.theme,
+                inner_width,
             ),
-            OverviewDisplayRow::EmptyTodos(_) => empty_todo_preview_row(&self.theme),
+            OverviewDisplayRow::EmptyTodos(_) => empty_todo_preview_line(&self.theme, inner_width),
         }
     }
 
@@ -1106,59 +1083,163 @@ struct OverviewSummaryStats {
     average_revision: u32,
 }
 
-fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
-    Row::new([
-        Cell::from(session.tag.clone().unwrap_or_else(|| String::from("-"))).style(
+fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
+    let widths = session_column_widths(inner_width);
+    Line::from(vec![
+        Span::styled(
+            fit_cell("Tag", widths.tag),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell("Name", widths.name),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell("Rev", widths.rev),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell("☐", widths.open),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell("☑", widths.done),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell("Last Opened", widths.last_opened),
+            theme.surface_title_style(SurfaceTone::Open),
+        ),
+    ])
+}
+
+fn session_row_line(
+    session: &SessionOverview,
+    theme: &Theme,
+    inner_width: usize,
+    is_selected: bool,
+) -> Line<'static> {
+    let widths = session_column_widths(inner_width);
+    let mut line = Line::from(vec![
+        Span::styled(
+            fit_cell(session.tag.as_deref().unwrap_or("-"), widths.tag),
             if session.tag.is_some() {
                 theme.text_style(TextTone::Tag)
             } else {
                 theme.text_style(TextTone::Muted)
             },
         ),
-        Cell::from(session.name.clone()),
-        Cell::from(format!("r{}", session.current_revision))
-            .style(theme.text_style(TextTone::Meta)),
-        Cell::from((session.todo_count - session.done_count).to_string())
-            .style(theme.text_style(TextTone::Open)),
-        Cell::from(session.done_count.to_string()).style(theme.text_style(TextTone::Completed)),
-        Cell::from(format_month_day_local(session.last_opened_at))
-            .style(theme.text_style(TextTone::Muted)),
-    ])
-}
-
-fn todo_preview_row(todo: &Todo, theme: &Theme) -> Row<'static> {
-    let (checkbox, tone, status) = match todo.status {
-        TodoStatus::Open => ("[ ]", TextTone::Open, "open"),
-        TodoStatus::Done => ("[x]", TextTone::Completed, "done"),
-    };
-
-    Row::new([
-        Cell::from(""),
-        Cell::from(format!("  {checkbox} {}", todo.title)).style(theme.text_style(tone)),
-        Cell::from(status).style(theme.text_style(tone)),
-        Cell::from(""),
-        Cell::from(""),
-        Cell::from(format_month_day_local(todo_preview_timestamp(todo)))
-            .style(theme.text_style(TextTone::Muted)),
-    ])
-}
-
-fn empty_todo_preview_row(theme: &Theme) -> Row<'static> {
-    Row::new([
-        Cell::from(""),
-        Cell::from("  No todos yet").style(theme.text_style(TextTone::Muted)),
-        Cell::from(""),
-        Cell::from(""),
-        Cell::from(""),
-        Cell::from(""),
-    ])
-}
-
-fn todo_preview_timestamp(todo: &Todo) -> i64 {
-    match todo.status {
-        TodoStatus::Open => todo.updated_at,
-        TodoStatus::Done => todo.completed_at.unwrap_or(todo.updated_at),
+        Span::raw(" "),
+        Span::raw(fit_cell(&session.name, widths.name)),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell(&format!("r{}", session.current_revision), widths.rev),
+            theme.text_style(TextTone::Meta),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell(
+                &(session.todo_count - session.done_count).to_string(),
+                widths.open,
+            ),
+            theme.text_style(TextTone::Open),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell(&session.done_count.to_string(), widths.done),
+            theme.text_style(TextTone::Completed),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_cell(
+                &format_month_day_local(session.last_opened_at),
+                widths.last_opened,
+            ),
+            theme.text_style(TextTone::Muted),
+        ),
+    ]);
+    if is_selected {
+        line = line.style(theme.selection_style(SelectionTone::Open));
     }
+    line
+}
+
+fn todo_preview_line(todo: &Todo, theme: &Theme, inner_width: usize) -> Line<'static> {
+    let title_width = inner_width
+        .saturating_sub(TODO_PREVIEW_TIME_WIDTH + 1)
+        .max(1);
+    let time_width = inner_width.saturating_sub(title_width);
+    let title = fit_cell(&format!("  [ ] {}", todo.title), title_width);
+    let time = right_align_cell(&format_month_day_local(todo.created_at), time_width);
+
+    Line::from(vec![
+        Span::styled(title, theme.text_style(TextTone::Focus)),
+        Span::styled(time, theme.text_style(TextTone::Muted)),
+    ])
+}
+
+fn empty_todo_preview_line(theme: &Theme, inner_width: usize) -> Line<'static> {
+    Line::from(Span::styled(
+        fit_cell("  No open todos", inner_width),
+        theme.text_style(TextTone::Muted),
+    ))
+}
+
+fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
+    let name_width = inner_width.saturating_sub(
+        TAG_COLUMN_WIDTH
+            + REV_COLUMN_WIDTH
+            + OPEN_COLUMN_WIDTH
+            + DONE_COLUMN_WIDTH
+            + LAST_OPENED_COLUMN_WIDTH
+            + SESSION_COLUMN_SPACING,
+    );
+    SessionColumnWidths {
+        tag: TAG_COLUMN_WIDTH,
+        name: name_width.max(1),
+        rev: REV_COLUMN_WIDTH,
+        open: OPEN_COLUMN_WIDTH,
+        done: DONE_COLUMN_WIDTH,
+        last_opened: LAST_OPENED_COLUMN_WIDTH,
+    }
+}
+
+fn fit_cell(text: &str, width: usize) -> String {
+    let mut value = text.chars().take(width).collect::<String>();
+    let padding = width.saturating_sub(value.chars().count());
+    value.push_str(&" ".repeat(padding));
+    value
+}
+
+fn right_align_cell(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let value = text.chars().take(width).collect::<String>();
+    let padding = width.saturating_sub(value.chars().count());
+    format!("{}{}", " ".repeat(padding), value)
+}
+
+fn open_preview_todos(todos: Vec<Todo>) -> Vec<Todo> {
+    todos
+        .into_iter()
+        .filter(|todo| matches!(todo.status, TodoStatus::Open))
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionColumnWidths {
+    tag: usize,
+    name: usize,
+    rev: usize,
+    open: usize,
+    done: usize,
+    last_opened: usize,
 }
 
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
@@ -1200,10 +1281,14 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
-    use super::{OverviewExit, OverviewScreen, list_row_index};
+    use super::{OverviewExit, OverviewScreen, list_row_index, todo_preview_line};
     use crate::config::Config;
     use crate::db::Database;
     use crate::domain::pomodoro::PomodoroKind;
+    use crate::domain::todo::Todo;
+    use crate::domain::todo::TodoStatus;
+    use crate::timestamp::format_month_day_local;
+    use crate::tui::theme::{TextTone, Theme};
 
     #[test]
     fn overview_screen_handles_navigation_and_open() {
@@ -1255,7 +1340,7 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("expand");
         let expanded = render_buffer(&mut screen, 120, 24);
-        assert!(expanded.contains("No todos yet"));
+        assert!(expanded.contains("No open todos"));
 
         screen
             .handle_key(&mut database, key(KeyCode::Down))
@@ -1270,7 +1355,7 @@ mod tests {
             .expect("expand second");
         let expanded = render_buffer(&mut screen, 120, 24);
         assert!(expanded.contains("[ ] Draft spec"));
-        assert!(expanded.contains("No todos yet"));
+        assert!(expanded.contains("No open todos"));
 
         screen
             .handle_key(&mut database, key(KeyCode::Up))
@@ -1280,7 +1365,72 @@ mod tests {
             .expect("collapse first");
         let partially_collapsed = render_buffer(&mut screen, 120, 24);
         assert!(partially_collapsed.contains("[ ] Draft spec"));
-        assert!(!partially_collapsed.contains("No todos yet"));
+        assert!(!partially_collapsed.contains("No open todos"));
+    }
+
+    #[test]
+    fn overview_expanded_todo_preview_shows_only_open_todos_with_right_aligned_time() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        let long_title =
+            String::from("very-long-inline-preview-title-abcdefghijklmnopqrstuvwxyz-1234567890");
+        let long_todo = database
+            .add_todo("writing-sprint", &long_title, "", None, 1_711_275_900)
+            .expect("long todo");
+        let done_todo = database
+            .add_todo(
+                "writing-sprint",
+                "done todo should stay hidden",
+                "",
+                None,
+                1_711_275_930,
+            )
+            .expect("done todo");
+        database
+            .set_todo_status(
+                done_todo.id,
+                Some("writing-sprint"),
+                TodoStatus::Done,
+                1_711_275_960,
+            )
+            .expect("mark done");
+
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move");
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("expand");
+
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("very-long-inline-preview-title"));
+        assert!(buffer.contains(&format_month_day_local(long_todo.created_at)));
+        assert!(!buffer.contains("done todo should stay hidden"));
+    }
+
+    #[test]
+    fn overview_expanded_todo_preview_uses_distinct_focus_tone() {
+        let theme = Theme::default();
+        let line = todo_preview_line(
+            &Todo {
+                id: 1,
+                session_id: 1,
+                title: String::from("Draft spec"),
+                notes: String::new(),
+                repo: None,
+                status: TodoStatus::Open,
+                position: 1,
+                created_at: 1_711_275_900,
+                updated_at: 1_711_275_900,
+                completed_at: None,
+            },
+            &theme,
+            50,
+        );
+
+        assert_eq!(line.spans[0].style.fg, theme.text_style(TextTone::Focus).fg);
+        assert_eq!(line.spans[1].style.fg, theme.text_style(TextTone::Muted).fg);
     }
 
     #[test]
