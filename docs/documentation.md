@@ -48,14 +48,14 @@ Primary references:
 - Milestone 2-5 implementation choices:
   - bare `todui` now opens a real ratatui+crossterm session overview, while `resume` stays the direct session opener
   - sessions now carry one optional normalized tag, the overview groups sections by tag, and `untagged` is shown last
-  - the overview is browse-first for session opening, but tag editing now also lives there: `t` edits the selected session tag without entering the session
+  - the overview is browse-first for session opening, but session metadata editing also lives there: `e` edits the selected session name/tag/repo, `t` remains an alias, and `i` opens a metadata popup
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
   - Pomodoro ownership is now global rather than session-scoped: runs may be unlinked or linked to one todo, the idle box is hidden by default, and the active footer appears in overview plus live session views
   - historical revisions no longer render Pomodoro UI
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
   - CLI help text now includes agent-readable recipes, output shapes, recent-session defaults, and an explicit note that CLI todo inspection flows through `export md` rather than a dedicated `todo show` command
-  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag, and `n` in a live session creates a todo with title + notes
+  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag/repo, and `n` in a live session creates a todo with title + notes
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
   - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
   - CLI session management now includes `todui session new --tag ...`, `todui session tag [session] --set ...`, `todui session tag [session] --clear`, and `todui session list` / markdown export both surface session tags
@@ -123,9 +123,11 @@ TUI create flow:
 
 - `todui`
 - `n` to create a session from the overview
-- `Tab` inside the overview session modal to move between name and optional tag
+- `Tab` inside the overview session modal to move between name, optional tag, and optional repo
 - `Enter` to open the new session head
-- `t` in overview to edit or clear the selected session tag
+- `e` in overview to edit the selected session name, tag, and repo
+- `t` in overview as the same edit-session shortcut alias
+- `i` in overview to open a centered metadata popup for the selected session
 - `n` again to add a todo with optional notes inside the session view
 - `i` or `Right` inside the session view to open the selected todo details
 - `Left` inside the session view to close details first, then return to the overview when no details box is open
