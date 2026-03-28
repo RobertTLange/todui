@@ -125,7 +125,9 @@ TUI create flow:
 - `todui`
 - `n` to create a session from the overview
 - `Tab` inside the overview session modal to move between name, optional tag, and optional repo
-- `Enter` to open the new session head
+- `Enter` to create the new session and open its head
+- `Enter` in the populated overview to expand or collapse the selected session's todos inline
+- `Right` or `l` in overview to open the selected session head
 - `e` in overview to edit the selected session name, tag, and repo
 - `t` in overview as the same edit-session shortcut alias
 - `i` in overview to open a centered metadata popup for the selected session
