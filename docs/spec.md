@@ -295,7 +295,9 @@ Shows:
 	•	current revision
 	•	open/done counts
 
-Enter or Right opens the selected session head.
+Enter expands or collapses the selected session's live todos inline.
+
+Right opens the selected session head.
 
 9.2.2 Session view
 

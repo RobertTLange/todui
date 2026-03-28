@@ -121,7 +121,7 @@ todui export md writing-sprint --format gfm
 
 Scope:
 
-- Implement bare `todui` overview flow that lists sessions and opens the selected session head.
+- Implement bare `todui` overview flow that lists sessions, expands live todos inline, and opens the selected session head via explicit navigation.
 - Implement `todui resume` head flow.
 - Build top bar, list pane, details overlay, footer.
 - Implement selection, keyboard navigation, Vim aliases, mouse row select, checkbox toggle hitbox.
