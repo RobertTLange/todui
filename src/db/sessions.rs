@@ -64,7 +64,11 @@ impl Database {
              LEFT JOIN session_revisions
                ON session_revisions.session_id = sessions.id
               AND session_revisions.revision_number = sessions.current_revision
-             ORDER BY sessions.last_opened_at DESC, sessions.id DESC",
+             ORDER BY
+               sessions.tag IS NULL ASC,
+               sessions.tag ASC,
+               sessions.last_opened_at DESC,
+               sessions.id DESC",
         )?;
         let rows = statement.query_map([], map_session_overview)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -531,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_overview_rows_in_recent_order_with_counts() {
+    fn lists_overview_rows_in_tag_then_recent_order_with_counts() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let writing = database
             .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
@@ -551,21 +555,28 @@ mod tests {
             )
             .expect("done");
 
-        let reading = database
-            .create_session("Reading Sprint", None, None, 1_711_275_700)
+        let private = database
+            .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let inbox = database
+            .create_session("Inbox", None, None, 1_711_275_900)
             .expect("session");
         database
             .mark_session_opened(&writing.name, 1_711_275_800)
             .expect("opened");
 
         let overview = database.list_session_overview().expect("overview");
-        assert_eq!(overview.len(), 2);
-        assert_eq!(overview[0].name, writing.name);
-        assert_eq!(overview[0].tag.as_deref(), Some("work"));
-        assert_eq!(overview[0].todo_count, 2);
-        assert_eq!(overview[0].done_count, 1);
-        assert_eq!(overview[1].name, reading.name);
-        assert_eq!(overview[1].tag, None);
+        assert_eq!(overview.len(), 3);
+        assert_eq!(overview[0].name, private.name);
+        assert_eq!(overview[0].tag.as_deref(), Some("private"));
+        assert_eq!(overview[1].name, writing.name);
+        assert_eq!(overview[1].tag.as_deref(), Some("work"));
+        assert_eq!(overview[1].last_opened_at, 1_711_275_800);
+        assert_eq!(overview[2].name, inbox.name);
+        assert_eq!(overview[2].tag, None);
+        assert_eq!(overview[2].last_opened_at, 1_711_275_900);
+        assert_eq!(overview[1].todo_count, 2);
+        assert_eq!(overview[1].done_count, 1);
     }
 
     #[test]
