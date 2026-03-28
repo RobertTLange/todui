@@ -1558,6 +1558,43 @@ mod tests {
     }
 
     #[test]
+    fn overview_orders_sessions_by_tag_then_recent_date() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let work = database
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
+            .expect("session");
+        let private = database
+            .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let inbox = database
+            .create_session("Inbox", None, None, 1_711_275_900)
+            .expect("session");
+        database
+            .mark_session_opened(&work.name, 1_711_276_000)
+            .expect("opened");
+
+        let mut screen = OverviewScreen::new(Config::default());
+        screen.reload(&database).expect("reload");
+
+        assert_eq!(
+            screen
+                .sessions
+                .iter()
+                .map(|session| session.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                private.name.as_str(),
+                work.name.as_str(),
+                inbox.name.as_str()
+            ]
+        );
+        assert_eq!(
+            screen.selected_session_name().as_deref(),
+            Some("reading-sprint")
+        );
+    }
+
+    #[test]
     fn overview_shows_active_pomodoro_footer() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
 
