@@ -290,7 +290,8 @@ No separate todui tui command is required in v1.
 Default screen when launched as `todui`.
 
 Shows:
-	•	all sessions in one flat list, ordered by tag ascending, then last_opened_at descending within each tag
+	•	all sessions in one flat list, showing only sessions with at least one open todo plus empty sessions
+	•	ordered by tag ascending, then last_opened_at descending within each tag
 	•	untagged sessions shown after tagged sessions
 	•	session name
 	•	current revision

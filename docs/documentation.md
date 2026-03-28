@@ -47,7 +47,7 @@ Primary references:
   - CLI outputs stay compact and scriptable: identifiers / tab-separated summaries to stdout, errors via process exit path
 - Milestone 2-5 implementation choices:
   - bare `todui` now opens a real ratatui+crossterm session overview, while `resume` stays the direct session opener
-  - sessions now carry one optional normalized tag, and the flat overview list sorts by tag first, with `untagged` shown last
+  - sessions now carry one optional normalized tag, the flat overview hides fully completed non-empty sessions, and the remaining rows sort by tag first with `untagged` shown last
   - session identity is now one normalized session name everywhere; the old display-name-vs-slug split is gone
   - the overview is browse-first for session opening, but session metadata editing also lives there: `e` edits the selected session name/tag/repo, `t` remains an alias, and `i` opens a metadata popup
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
