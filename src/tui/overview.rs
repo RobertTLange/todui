@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
+use crate::domain::todo::{Todo, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_full_local, format_month_day_local};
@@ -71,6 +72,7 @@ pub(crate) enum OverviewExit {
 #[derive(Debug)]
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
+    expanded_session: Option<ExpandedSessionState>,
     active_run: Option<PomodoroRun>,
     selected_index: usize,
     scroll_offset: usize,
@@ -93,6 +95,22 @@ enum OverviewOverlay {
 enum SessionEditorMode {
     Create,
     EditMetadata { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpandedSessionState {
+    name: String,
+    todos: Vec<Todo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverviewDisplayRow {
+    Session(usize),
+    Todo {
+        session_index: usize,
+        todo_index: usize,
+    },
+    EmptyTodos(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +138,7 @@ impl OverviewScreen {
     fn new(config: Config) -> Self {
         Self {
             sessions: Vec::new(),
+            expanded_session: None,
             active_run: None,
             selected_index: 0,
             scroll_offset: 0,
@@ -135,6 +154,7 @@ impl OverviewScreen {
         self.sessions = database.list_session_overview()?;
         self.active_run = database.get_active_pomodoro()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
+        self.sync_expanded_session(database)?;
         self.ensure_selection_visible(self.visible_rows());
         Ok(())
     }
@@ -258,7 +278,11 @@ impl OverviewScreen {
                 self.move_selection(self.visible_rows() as isize);
                 None
             }
-            KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => {
+            KeyCode::Enter => {
+                self.toggle_selected_session_todos(database)?;
+                None
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.selected_session_name().map(OverviewExit::OpenSession)
             }
             _ => None,
@@ -369,9 +393,10 @@ impl OverviewScreen {
             MouseEventKind::Down(MouseButton::Left) => {
                 let list_area = self.list_area(self.last_area);
                 if let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
-                    && index < self.sessions.len()
+                    && let Some(OverviewDisplayRow::Session(session_index)) =
+                        self.display_rows().get(index).copied()
                 {
-                    self.selected_index = index;
+                    self.selected_index = session_index;
                     self.ensure_selection_visible(self.visible_rows());
                 }
             }
@@ -461,11 +486,11 @@ impl OverviewScreen {
     fn session_list(&self, height: u16) -> Table<'static> {
         let visible_rows = self.visible_rows_for_height(height);
         let rows = self
-            .sessions
-            .iter()
+            .display_rows()
+            .into_iter()
             .skip(self.scroll_offset)
             .take(visible_rows)
-            .map(|session| session_table_row(session, &self.theme))
+            .map(|row| self.table_row(row))
             .collect::<Vec<_>>();
 
         Table::new(
@@ -565,7 +590,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nOpen session: Enter, Right, l\nNew session: n\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nExpand todos: Enter\nOpen session: Right, l\nNew session: n\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -696,17 +721,36 @@ impl OverviewScreen {
     }
 
     fn ensure_selection_visible(&mut self, visible_rows: usize) {
-        if self.selected_index < self.scroll_offset {
-            self.scroll_offset = self.selected_index;
-        } else if self.selected_index >= self.scroll_offset + visible_rows {
-            self.scroll_offset = self.selected_index + 1 - visible_rows;
+        let Some(selected_display_index) = self.selected_display_index() else {
+            self.scroll_offset = 0;
+            return;
+        };
+
+        if selected_display_index < self.scroll_offset {
+            self.scroll_offset = selected_display_index;
+        } else if selected_display_index >= self.scroll_offset + visible_rows {
+            self.scroll_offset = selected_display_index + 1 - visible_rows;
         }
+
+        let expanded_child_rows = self.expanded_child_row_count(self.selected_index);
+        if expanded_child_rows > 0 && expanded_child_rows < visible_rows {
+            let expanded_end = selected_display_index + expanded_child_rows;
+            let min_offset = expanded_end.saturating_add(1).saturating_sub(visible_rows);
+            if self.scroll_offset < min_offset {
+                self.scroll_offset = min(min_offset, selected_display_index);
+            }
+        }
+
+        let max_scroll = self.display_rows().len().saturating_sub(visible_rows);
+        self.scroll_offset = min(self.scroll_offset, max_scroll);
     }
 
     fn list_state(&self) -> TableState {
         let mut state = TableState::default();
-        if !self.sessions.is_empty() {
-            state.select(Some(self.selected_index.saturating_sub(self.scroll_offset)));
+        if let Some(selected_display_index) = self.selected_display_index()
+            && selected_display_index >= self.scroll_offset
+        {
+            state.select(Some(selected_display_index - self.scroll_offset));
         }
         state
     }
@@ -852,6 +896,30 @@ impl OverviewScreen {
         self.session_editor = SessionEditorState::default();
     }
 
+    fn toggle_selected_session_todos(&mut self, database: &Database) -> Result<()> {
+        let Some(session_name) = self.selected_session_name() else {
+            return Ok(());
+        };
+
+        if self
+            .expanded_session
+            .as_ref()
+            .is_some_and(|expanded| expanded.name == session_name)
+        {
+            self.expanded_session = None;
+            self.ensure_selection_visible(self.visible_rows());
+            return Ok(());
+        }
+
+        let session = database.get_session_by_name(&session_name)?;
+        self.expanded_session = Some(ExpandedSessionState {
+            name: session_name,
+            todos: database.get_live_todos(session.id)?,
+        });
+        self.ensure_selection_visible(self.visible_rows());
+        Ok(())
+    }
+
     fn submit_session_editor(&mut self, database: &mut Database) -> Result<Option<OverviewExit>> {
         match &self.overlay {
             Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create)) => {
@@ -894,7 +962,12 @@ impl OverviewScreen {
                     Some(self.session_editor.repo.as_str()),
                     now_utc_timestamp(),
                 ) {
-                    Ok(_) => {
+                    Ok(session) => {
+                        if let Some(expanded) = &mut self.expanded_session
+                            && expanded.name == *current_name
+                        {
+                            expanded.name = session.name.clone();
+                        }
                         self.reload(database)?;
                         self.close_session_editor();
                         Ok(None)
@@ -917,10 +990,101 @@ impl OverviewScreen {
         }
     }
 
+    fn sync_expanded_session(&mut self, database: &Database) -> Result<()> {
+        let Some(expanded_name) = self
+            .expanded_session
+            .as_ref()
+            .map(|expanded| expanded.name.clone())
+        else {
+            return Ok(());
+        };
+
+        if self
+            .sessions
+            .iter()
+            .all(|session| session.name != expanded_name)
+        {
+            self.expanded_session = None;
+            return Ok(());
+        }
+
+        let session = database.get_session_by_name(&expanded_name)?;
+        let todos = database.get_live_todos(session.id)?;
+        self.expanded_session = Some(ExpandedSessionState {
+            name: expanded_name,
+            todos,
+        });
+        Ok(())
+    }
+
+    fn display_rows(&self) -> Vec<OverviewDisplayRow> {
+        let mut rows = Vec::with_capacity(self.sessions.len() + self.expanded_row_count());
+        for (session_index, session) in self.sessions.iter().enumerate() {
+            rows.push(OverviewDisplayRow::Session(session_index));
+            if let Some(todos) = self.expanded_todos_for_session(&session.name) {
+                if todos.is_empty() {
+                    rows.push(OverviewDisplayRow::EmptyTodos(session_index));
+                } else {
+                    rows.extend((0..todos.len()).map(|todo_index| OverviewDisplayRow::Todo {
+                        session_index,
+                        todo_index,
+                    }));
+                }
+            }
+        }
+        rows
+    }
+
+    fn table_row(&self, row: OverviewDisplayRow) -> Row<'static> {
+        match row {
+            OverviewDisplayRow::Session(session_index) => {
+                session_table_row(&self.sessions[session_index], &self.theme)
+            }
+            OverviewDisplayRow::Todo {
+                session_index,
+                todo_index,
+            } => todo_preview_row(
+                &self
+                    .expanded_todos_for_session(&self.sessions[session_index].name)
+                    .expect("expanded todos for row")[todo_index],
+                &self.theme,
+            ),
+            OverviewDisplayRow::EmptyTodos(_) => empty_todo_preview_row(&self.theme),
+        }
+    }
+
+    fn selected_display_index(&self) -> Option<usize> {
+        self.display_rows().iter().position(|row| {
+            matches!(row, OverviewDisplayRow::Session(session_index) if *session_index == self.selected_index)
+        })
+    }
+
+    fn expanded_todos_for_session(&self, session_name: &str) -> Option<&[Todo]> {
+        self.expanded_session
+            .as_ref()
+            .filter(|expanded| expanded.name == session_name)
+            .map(|expanded| expanded.todos.as_slice())
+    }
+
+    fn expanded_child_row_count(&self, session_index: usize) -> usize {
+        self.sessions
+            .get(session_index)
+            .and_then(|session| self.expanded_todos_for_session(&session.name))
+            .map(|todos| todos.len().max(1))
+            .unwrap_or(0)
+    }
+
+    fn expanded_row_count(&self) -> usize {
+        self.expanded_session
+            .as_ref()
+            .map(|expanded| expanded.todos.len().max(1))
+            .unwrap_or(0)
+    }
+
     fn selected_session_metadata_text(&self) -> Option<String> {
         self.sessions.get(self.selected_index).map(|session| {
             format!(
-                "session: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
+                "session: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter expands the session todos.\nUse Right or l to open the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
                 session.name,
                 session.tag.as_deref().unwrap_or("untagged"),
                 session.repo.as_deref().unwrap_or("-"),
@@ -965,6 +1129,41 @@ fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
         Cell::from(format_month_day_local(session.last_opened_at))
             .style(theme.text_style(TextTone::Muted)),
     ])
+}
+
+fn todo_preview_row(todo: &Todo, theme: &Theme) -> Row<'static> {
+    let (checkbox, tone, status) = match todo.status {
+        TodoStatus::Open => ("[ ]", TextTone::Open, "open"),
+        TodoStatus::Done => ("[x]", TextTone::Completed, "done"),
+    };
+
+    Row::new([
+        Cell::from(""),
+        Cell::from(format!("  {checkbox} {}", todo.title)).style(theme.text_style(tone)),
+        Cell::from(status).style(theme.text_style(tone)),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(format_month_day_local(todo_preview_timestamp(todo)))
+            .style(theme.text_style(TextTone::Muted)),
+    ])
+}
+
+fn empty_todo_preview_row(theme: &Theme) -> Row<'static> {
+    Row::new([
+        Cell::from(""),
+        Cell::from("  No todos yet").style(theme.text_style(TextTone::Muted)),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+        Cell::from(""),
+    ])
+}
+
+fn todo_preview_timestamp(todo: &Todo) -> i64 {
+    match todo.status {
+        TodoStatus::Open => todo.updated_at,
+        TodoStatus::Done => todo.completed_at.unwrap_or(todo.updated_at),
+    }
 }
 
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
@@ -1040,10 +1239,43 @@ mod tests {
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
+        assert!(exit.is_none());
+        let expanded = render_buffer(&mut screen, 120, 24);
+        assert!(expanded.contains("[ ] Draft spec"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert!(exit.is_none());
+        let collapsed = render_buffer(&mut screen, 120, 24);
+        assert!(!collapsed.contains("[ ] Draft spec"));
+    }
+
+    #[test]
+    fn overview_enter_toggles_inline_todos_and_keeps_navigation_session_scoped() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("expand");
+        let expanded = render_buffer(&mut screen, 120, 24);
+        assert!(expanded.contains("No todos yet"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move");
         assert_eq!(
-            exit,
-            Some(OverviewExit::OpenSession(String::from("writing-sprint")))
+            screen.selected_session_name().as_deref(),
+            Some("writing-sprint")
         );
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("expand second");
+        let switched = render_buffer(&mut screen, 120, 24);
+        assert!(switched.contains("[ ] Draft spec"));
+        assert!(!switched.contains("No todos yet"));
     }
 
     #[test]
@@ -1147,7 +1379,8 @@ mod tests {
         assert!(wide_buffer.contains("newest opened:"));
         assert!(wide_buffer.contains("oldest opened:"));
         assert!(wide_buffer.contains("avg revision: r2"));
-        assert!(wide_buffer.contains("Enter opens the session head."));
+        assert!(wide_buffer.contains("Enter expands the session todos."));
+        assert!(wide_buffer.contains("Use Right or l to open the session head."));
         assert!(wide_buffer.contains("return here."));
         assert!(!wide_buffer.contains("Pomodoro"));
         assert!(!wide_buffer.contains("Keys"));
@@ -1289,10 +1522,13 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('h')))
             .unwrap();
         assert!(render_buffer(&mut screen, 120, 24).contains("Help"));
+        assert!(render_buffer(&mut screen, 120, 24).contains("Expand todos"));
         assert!(render_buffer(&mut screen, 120, 24).contains("Open session"));
 
         screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
-        assert!(!render_buffer(&mut screen, 120, 24).contains("Open session"));
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(!buffer.contains("Expand todos"));
+        assert!(!buffer.contains("Open session"));
     }
 
     #[test]
@@ -1426,6 +1662,29 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('i')))
             .unwrap();
         assert!(!render_buffer(&mut screen, 120, 24).contains("Session Metadata"));
+    }
+
+    #[test]
+    fn overview_mouse_click_ignores_inline_todo_rows() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("expand");
+
+        let list_area = screen.list_area(screen.last_area);
+        let todo_row = list_area.y + 3;
+
+        let exit = screen.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, todo_row));
+        assert!(exit.is_none());
+        assert_eq!(
+            screen.selected_session_name().as_deref(),
+            Some("writing-sprint")
+        );
     }
 
     #[test]
