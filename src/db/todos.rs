@@ -9,7 +9,7 @@ use crate::error::{AppError, Result};
 impl Database {
     pub fn add_todo(
         &mut self,
-        session_slug: &str,
+        session_name: &str,
         title: &str,
         notes: &str,
         repo: Option<&str>,
@@ -20,11 +20,11 @@ impl Database {
         let session_id = transaction
             .query_row(
                 "SELECT id FROM sessions WHERE slug = ?1",
-                [session_slug],
+                [session_name],
                 |row| row.get(0),
             )
             .optional()?
-            .ok_or_else(|| AppError::SessionNotFound(session_slug.to_string()))?;
+            .ok_or_else(|| AppError::SessionNotFound(session_name.to_string()))?;
 
         let position: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(position), 0) + 1 FROM todos WHERE session_id = ?1",
@@ -57,7 +57,7 @@ impl Database {
     pub fn set_todo_status(
         &mut self,
         todo_id: i64,
-        session_slug: Option<&str>,
+        session_name: Option<&str>,
         status: TodoStatus,
         now: i64,
     ) -> Result<Todo> {
@@ -71,16 +71,16 @@ impl Database {
             .optional()?
             .ok_or(AppError::TodoNotFound(todo_id))?;
 
-        if let Some(expected_session_slug) = session_slug {
-            let actual_slug: String = transaction.query_row(
+        if let Some(expected_session_name) = session_name {
+            let actual_name: String = transaction.query_row(
                 "SELECT slug FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| row.get(0),
             )?;
-            if actual_slug != expected_session_slug {
+            if actual_name != expected_session_name {
                 return Err(AppError::TodoSessionMismatch {
                     todo_id,
-                    session: expected_session_slug.to_string(),
+                    session: expected_session_name.to_string(),
                 });
             }
         }
@@ -116,7 +116,7 @@ impl Database {
     pub fn update_todo(
         &mut self,
         todo_id: i64,
-        session_slug: Option<&str>,
+        session_name: Option<&str>,
         title: &str,
         notes: &str,
         repo: Option<&str>,
@@ -138,16 +138,16 @@ impl Database {
             .optional()?
             .ok_or(AppError::TodoNotFound(todo_id))?;
 
-        if let Some(expected_session_slug) = session_slug {
-            let actual_slug: String = transaction.query_row(
+        if let Some(expected_session_name) = session_name {
+            let actual_name: String = transaction.query_row(
                 "SELECT slug FROM sessions WHERE id = ?1",
                 [session_id],
                 |row| row.get(0),
             )?;
-            if actual_slug != expected_session_slug {
+            if actual_name != expected_session_name {
                 return Err(AppError::TodoSessionMismatch {
                     todo_id,
-                    session: expected_session_slug.to_string(),
+                    session: expected_session_name.to_string(),
                 });
             }
         }
@@ -177,7 +177,7 @@ impl Database {
     pub fn delete_todo(
         &mut self,
         todo_id: i64,
-        session_slug: Option<&str>,
+        session_name: Option<&str>,
         now: i64,
     ) -> Result<Todo> {
         let transaction = self.connection.transaction()?;
@@ -192,16 +192,16 @@ impl Database {
             .optional()?
             .ok_or(AppError::TodoNotFound(todo_id))?;
 
-        if let Some(expected_session_slug) = session_slug {
-            let actual_slug: String = transaction.query_row(
+        if let Some(expected_session_name) = session_name {
+            let actual_name: String = transaction.query_row(
                 "SELECT slug FROM sessions WHERE id = ?1",
                 [todo.session_id],
                 |row| row.get(0),
             )?;
-            if actual_slug != expected_session_slug {
+            if actual_name != expected_session_name {
                 return Err(AppError::TodoSessionMismatch {
                     todo_id,
-                    session: expected_session_slug.to_string(),
+                    session: expected_session_name.to_string(),
                 });
             }
         }
@@ -305,7 +305,7 @@ fn map_repo_todo_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoTodoMatc
 
     Ok(RepoTodoMatch {
         todo_id: row.get(0)?,
-        session_slug: row.get(1)?,
+        session_name: row.get(1)?,
         title: row.get(2)?,
         status,
         effective_repo: row.get(4)?,
@@ -331,16 +331,16 @@ mod tests {
     fn adds_todos_and_tracks_revisions() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
 
         assert_eq!(todo.position, 1);
 
         let updated_session = database
-            .get_session_by_slug(&session.slug)
+            .get_session_by_name(&session.name)
             .expect("session");
         assert_eq!(updated_session.current_revision, 2);
     }
@@ -349,16 +349,16 @@ mod tests {
     fn toggles_done_and_undone_timestamps() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
 
         let done = database
             .set_todo_status(
                 todo.id,
-                Some(&session.slug),
+                Some(&session.name),
                 TodoStatus::Done,
                 1_711_275_800,
             )
@@ -369,7 +369,7 @@ mod tests {
         let reopened = database
             .set_todo_status(
                 todo.id,
-                Some(&session.slug),
+                Some(&session.name),
                 TodoStatus::Open,
                 1_711_275_900,
             )
@@ -382,16 +382,16 @@ mod tests {
     fn edits_todo_title_and_notes_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "cover db", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "cover db", None, 1_711_275_700)
             .expect("todo");
 
         let edited = database
             .update_todo(
                 todo.id,
-                Some(&session.slug),
+                Some(&session.name),
                 "Draft final spec",
                 "",
                 Some("@ExampleOrg/todui-keymove"),
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(edited.updated_at, 1_711_275_800);
         assert_eq!(
             database
-                .get_session_by_slug(&session.slug)
+                .get_session_by_name(&session.name)
                 .expect("session")
                 .current_revision,
             3
@@ -416,20 +416,20 @@ mod tests {
     fn deletes_todo_reorders_positions_and_tracks_revision() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let first = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let second = database
-            .add_todo(&session.slug, "Review bindings", "", None, 1_711_275_800)
+            .add_todo(&session.name, "Review bindings", "", None, 1_711_275_800)
             .expect("todo");
         let third = database
-            .add_todo(&session.slug, "Ship release", "", None, 1_711_275_900)
+            .add_todo(&session.name, "Ship release", "", None, 1_711_275_900)
             .expect("todo");
 
         let deleted = database
-            .delete_todo(first.id, Some(&session.slug), 1_711_276_000)
+            .delete_todo(first.id, Some(&session.name), 1_711_276_000)
             .expect("delete todo");
         assert_eq!(deleted.id, first.id);
 
@@ -442,7 +442,7 @@ mod tests {
         assert!(database.get_todo(first.id).is_err());
         assert_eq!(
             database
-                .get_session_by_slug(&session.slug)
+                .get_session_by_name(&session.name)
                 .expect("session")
                 .current_revision,
             5
@@ -453,10 +453,10 @@ mod tests {
     fn deleting_todo_does_not_affect_global_pomodoro() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let run = database
             .start_pomodoro(
@@ -467,7 +467,7 @@ mod tests {
             .expect("run");
 
         database
-            .delete_todo(todo.id, Some(&session.slug), 1_711_275_900)
+            .delete_todo(todo.id, Some(&session.name), 1_711_275_900)
             .expect("delete todo");
 
         let run = database.get_pomodoro_run(run.id).expect("run");
@@ -485,17 +485,16 @@ mod tests {
             .create_session(
                 "Writing Sprint",
                 None,
-                None,
                 Some("https://github.com/ExampleOrg/todui-keymove"),
                 1_711_275_600,
             )
             .expect("session");
         let inherited = database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_700)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
             .expect("todo");
         let override_todo = database
             .add_todo(
-                &session.slug,
+                &session.name,
                 "Review CLI",
                 "",
                 Some("@OpenAI/codex"),

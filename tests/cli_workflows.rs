@@ -115,7 +115,7 @@ fn cli_session_tag_updates_and_lists_tag_column() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "writing-sprint\tWriting Sprint\tprivate-projects\t",
+            "writing-sprint\tprivate-projects\t",
         ));
 
     env.command()

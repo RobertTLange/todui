@@ -14,9 +14,9 @@ pub struct MarkdownOptions {
 
 pub fn render(snapshot: &SessionSnapshot, options: &MarkdownOptions) -> String {
     let mut lines = vec![
-        format!("# Session: {}", snapshot.session.slug),
+        format!("# Session: {}", snapshot.session.name),
         String::new(),
-        format!("- slug: {}", snapshot.session.slug),
+        format!("- session: {}", snapshot.session.name),
     ];
     if let Some(tag) = &snapshot.session.tag {
         lines.push(format!("- tag: {tag}"));
@@ -105,8 +105,7 @@ mod tests {
         let snapshot = SessionSnapshot {
             session: Session {
                 id: 1,
-                slug: String::from("writing-sprint"),
-                name: String::from("Writing Sprint"),
+                name: String::from("writing-sprint"),
                 tag: Some(String::from("work")),
                 repo: None,
                 created_at: 1,

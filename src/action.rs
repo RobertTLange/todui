@@ -2,10 +2,10 @@
 pub enum Action {
     OpenRecentSession,
     OpenSession {
-        slug: String,
+        name: String,
     },
     OpenRevision {
-        slug: String,
+        name: String,
         revision: u32,
     },
     CloseOverlay,
@@ -29,7 +29,7 @@ pub enum Action {
         notes: String,
     },
     AddTodo {
-        session_slug: String,
+        session_name: String,
         title: String,
         notes: String,
     },

@@ -86,13 +86,13 @@ enum OverviewOverlay {
     Help,
     SessionEditor(SessionEditorMode),
     SessionMetadata,
-    DeleteSession { slug: String, name: String },
+    DeleteSession { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SessionEditorMode {
     Create,
-    EditMetadata { slug: String },
+    EditMetadata { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +259,7 @@ impl OverviewScreen {
                 None
             }
             KeyCode::Right | KeyCode::Enter | KeyCode::Char('l') => {
-                self.selected_session_slug().map(OverviewExit::OpenSession)
+                self.selected_session_name().map(OverviewExit::OpenSession)
             }
             _ => None,
         };
@@ -346,11 +346,11 @@ impl OverviewScreen {
                 Ok(None)
             }
             KeyCode::Enter => {
-                let slug = match &self.overlay {
-                    Some(OverviewOverlay::DeleteSession { slug, .. }) => slug.clone(),
+                let name = match &self.overlay {
+                    Some(OverviewOverlay::DeleteSession { name }) => name.clone(),
                     _ => return Ok(None),
                 };
-                database.delete_session(&slug)?;
+                database.delete_session(&name)?;
                 self.reload(database)?;
                 self.overlay = None;
                 Ok(None)
@@ -426,10 +426,10 @@ impl OverviewScreen {
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(), area);
         }
-        if let Some(OverviewOverlay::DeleteSession { slug, name }) = &self.overlay {
+        if let Some(OverviewOverlay::DeleteSession { name }) = &self.overlay {
             let area = centered_rect(frame.area(), 58, 9);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.delete_session_modal(slug, name), area);
+            frame.render_widget(self.delete_session_modal(name), area);
         }
     }
 
@@ -482,7 +482,7 @@ impl OverviewScreen {
         .header(
             Row::new([
                 Cell::from("Tag"),
-                Cell::from("Slug"),
+                Cell::from("Name"),
                 Cell::from("Rev"),
                 Cell::from("Open"),
                 Cell::from("Done"),
@@ -647,9 +647,9 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn delete_session_modal(&self, slug: &str, name: &str) -> Paragraph<'static> {
+    fn delete_session_modal(&self, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
-            "Delete session {name} ({slug})?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
+            "Delete session {name}?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
         ))
         .wrap(Wrap { trim: false })
         .block(
@@ -663,10 +663,10 @@ impl OverviewScreen {
         .style(self.theme.surface_style(SurfaceTone::Danger))
     }
 
-    fn selected_session_slug(&self) -> Option<String> {
+    fn selected_session_name(&self) -> Option<String> {
         self.sessions
             .get(self.selected_index)
-            .map(|session| session.slug.clone())
+            .map(|session| session.name.clone())
     }
 
     fn visible_rows(&self) -> usize {
@@ -819,7 +819,7 @@ impl OverviewScreen {
         };
         self.overlay = Some(OverviewOverlay::SessionEditor(
             SessionEditorMode::EditMetadata {
-                slug: session.slug.clone(),
+                name: session.name.clone(),
             },
         ));
         self.session_editor = SessionEditorState {
@@ -843,7 +843,6 @@ impl OverviewScreen {
             return;
         };
         self.overlay = Some(OverviewOverlay::DeleteSession {
-            slug: session.slug.clone(),
             name: session.name.clone(),
         });
     }
@@ -864,7 +863,6 @@ impl OverviewScreen {
 
                 match database.create_session(
                     name,
-                    None,
                     Some(self.session_editor.tag.as_str()),
                     Some(self.session_editor.repo.as_str()),
                     now_utc_timestamp(),
@@ -872,7 +870,7 @@ impl OverviewScreen {
                     Ok(session) => {
                         self.reload(database)?;
                         self.close_session_editor();
-                        Ok(Some(OverviewExit::OpenSession(session.slug)))
+                        Ok(Some(OverviewExit::OpenSession(session.name)))
                     }
                     Err(error) => {
                         self.session_editor.error = Some(error.to_string());
@@ -881,17 +879,17 @@ impl OverviewScreen {
                 }
             }
             Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata {
-                slug, ..
+                name: current_name,
             })) => {
-                let name = self.session_editor.name.trim();
-                if name.is_empty() {
+                let next_name = self.session_editor.name.trim();
+                if next_name.is_empty() {
                     self.session_editor.error = Some(String::from("Session name is required"));
                     return Ok(None);
                 }
 
                 match database.edit_session(
-                    slug,
-                    name,
+                    current_name,
+                    next_name,
                     Some(self.session_editor.tag.as_str()),
                     Some(self.session_editor.repo.as_str()),
                     now_utc_timestamp(),
@@ -922,9 +920,8 @@ impl OverviewScreen {
     fn selected_session_metadata_text(&self) -> Option<String> {
         self.sessions.get(self.selected_index).map(|session| {
             format!(
-                "name: {}\nslug: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
+                "session: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter opens the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
                 session.name,
-                session.slug,
                 session.tag.as_deref().unwrap_or("untagged"),
                 session.repo.as_deref().unwrap_or("-"),
                 format_full_local(session.last_opened_at),
@@ -959,7 +956,7 @@ fn session_table_row(session: &SessionOverview, theme: &Theme) -> Row<'static> {
                 theme.text_style(TextTone::Muted)
             },
         ),
-        Cell::from(session.slug.clone()),
+        Cell::from(session.name.clone()),
         Cell::from(format!("r{}", session.current_revision))
             .style(theme.text_style(TextTone::Meta)),
         Cell::from((session.todo_count - session.done_count).to_string())
@@ -1020,7 +1017,7 @@ mod tests {
         screen.last_area = Rect::new(0, 0, 120, 24);
 
         assert_eq!(
-            screen.selected_session_slug().as_deref(),
+            screen.selected_session_name().as_deref(),
             Some("reading-sprint")
         );
 
@@ -1028,7 +1025,7 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Down))
             .unwrap();
         assert_eq!(
-            screen.selected_session_slug().as_deref(),
+            screen.selected_session_name().as_deref(),
             Some("writing-sprint")
         );
 
@@ -1080,7 +1077,7 @@ mod tests {
         assert_eq!(exit, Some(OverviewExit::OpenSession(String::from("inbox"))));
         assert_eq!(
             database
-                .get_session_by_slug("inbox")
+                .get_session_by_name("inbox")
                 .expect("new session")
                 .tag
                 .as_deref(),
@@ -1088,10 +1085,10 @@ mod tests {
         );
         assert_eq!(
             database
-                .get_session_by_slug("inbox")
+                .get_session_by_name("inbox")
                 .expect("new session")
                 .name,
-            "Inbox"
+            "inbox"
         );
     }
 
@@ -1110,7 +1107,7 @@ mod tests {
         assert!(exit.is_none());
         let buffer = render_buffer(&mut screen, 120, 24);
         assert!(buffer.contains("Session name is required"));
-        assert!(database.get_session_by_slug("inbox").is_err());
+        assert!(database.get_session_by_name("inbox").is_err());
     }
 
     #[test]
@@ -1123,7 +1120,7 @@ mod tests {
         let exit = screen.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 4, row));
         assert!(exit.is_none());
         assert_eq!(
-            screen.selected_session_slug().as_deref(),
+            screen.selected_session_name().as_deref(),
             Some("writing-sprint")
         );
     }
@@ -1135,7 +1132,7 @@ mod tests {
         assert!(wide_buffer.contains("session overview"));
         assert!(wide_buffer.contains("h = help"));
         assert!(wide_buffer.contains("Tag"));
-        assert!(wide_buffer.contains("Slug"));
+        assert!(wide_buffer.contains("Session"));
         assert!(wide_buffer.contains("Last Opened"));
         assert!(wide_buffer.contains("private"));
         assert!(wide_buffer.contains("writing-sprint"));
@@ -1245,10 +1242,10 @@ mod tests {
     fn overview_honors_custom_pomodoro_keybinding() {
         let (_directory, mut database) = Database::open_temp().expect("database");
         let session = database
-            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
 
         let mut config = Config::default();
@@ -1312,9 +1309,9 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert!(exit.is_none());
-        assert!(database.get_session_by_slug("reading-sprint").is_err());
+        assert!(database.get_session_by_name("reading-sprint").is_err());
         assert_eq!(
-            screen.selected_session_slug().as_deref(),
+            screen.selected_session_name().as_deref(),
             Some("writing-sprint")
         );
     }
@@ -1330,10 +1327,10 @@ mod tests {
         screen.handle_key(&mut database, key(KeyCode::Esc)).unwrap();
 
         assert_eq!(
-            screen.selected_session_slug().as_deref(),
+            screen.selected_session_name().as_deref(),
             Some("reading-sprint")
         );
-        assert!(database.get_session_by_slug("reading-sprint").is_ok());
+        assert!(database.get_session_by_name("reading-sprint").is_ok());
     }
 
     #[test]
@@ -1381,14 +1378,14 @@ mod tests {
 
         assert_eq!(
             database
-                .get_session_by_slug("research-sprint")
+                .get_session_by_name("research-sprint")
                 .expect("session")
                 .name,
-            "Research Sprint"
+            "research-sprint"
         );
         assert_eq!(
             database
-                .get_session_by_slug("research-sprint")
+                .get_session_by_name("research-sprint")
                 .expect("session")
                 .tag
                 .as_deref(),
@@ -1396,7 +1393,7 @@ mod tests {
         );
         assert_eq!(
             database
-                .get_session_by_slug("research-sprint")
+                .get_session_by_name("research-sprint")
                 .expect("session")
                 .repo
                 .as_deref(),
@@ -1410,7 +1407,7 @@ mod tests {
                 .as_deref(),
             Some("exampleorg/todui-keymove")
         );
-        assert!(database.get_session_by_slug("reading-sprint").is_err());
+        assert!(database.get_session_by_name("reading-sprint").is_err());
     }
 
     #[test]
@@ -1423,8 +1420,7 @@ mod tests {
             .unwrap();
         let buffer = render_buffer(&mut screen, 120, 24);
         assert!(buffer.contains("Session Metadata"));
-        assert!(buffer.contains("name: Reading Sprint"));
-        assert!(buffer.contains("slug: reading-sprint"));
+        assert!(buffer.contains("session: reading-sprint"));
 
         screen
             .handle_key(&mut database, key(KeyCode::Char('i')))
@@ -1445,16 +1441,16 @@ mod tests {
     fn seeded_overview_screen() -> (tempfile::TempDir, Database, OverviewScreen) {
         let (directory, mut database) = Database::open_temp().expect("database");
         let writing = database
-            .create_session("Writing Sprint", None, Some("work"), None, 1_711_275_600)
+            .create_session("Writing Sprint", Some("work"), None, 1_711_275_600)
             .expect("session");
         database
-            .add_todo(&writing.slug, "Draft spec", "", None, 1_711_275_650)
+            .add_todo(&writing.name, "Draft spec", "", None, 1_711_275_650)
             .expect("todo");
         let reading = database
-            .create_session("Reading Sprint", None, Some("private"), None, 1_711_275_700)
+            .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
             .expect("session");
         database
-            .mark_session_opened(&reading.slug, 1_711_275_800)
+            .mark_session_opened(&reading.name, 1_711_275_800)
             .expect("opened");
 
         let mut screen = OverviewScreen::new(Config::default());
