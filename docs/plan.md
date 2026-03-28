@@ -99,7 +99,7 @@ Scope:
 
 Acceptance criteria:
 
-- Sessions created by slug/name rules.
+- Sessions created with one canonical normalized session name.
 - `todui add` without `--session` uses most recent session; errors cleanly if none exists.
 - Toggle done/undone updates timestamps correctly.
 - CLI stdout/stderr and exit codes follow spec.

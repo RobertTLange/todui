@@ -29,7 +29,7 @@ Examples:
 	•	errands
 
 A session has:
-	•	identity: slug + display name
+	•	identity: one canonical session name
 	•	optional tag for overview grouping and CLI metadata
 	•	current live head
 	•	immutable revision history
@@ -187,7 +187,7 @@ Binary name: todui
 8.1 Command summary
 
 todui
-todui session new <name> [--slug <slug>] [--tag <tag>]
+todui session new <name> [--tag <tag>]
 todui session delete [<session>]
 todui session list
 todui session history [<session>]
@@ -247,13 +247,13 @@ todui export md
 
 8.3 Session identifier rules
 
-CLI accepts session slug, not numeric DB id.
+CLI accepts the session name, not numeric DB id.
 
-Slug rules:
+Session name rules:
 	•	lowercase
 	•	alphanumeric plus -
 	•	unique
-	•	auto-generate from name if not provided
+	•	normalize the provided name before storage and display
 
 8.4 CLI stdout/stderr rules
 	•	command result data goes to stdout
@@ -291,7 +291,7 @@ Default screen when launched as `todui`.
 
 Shows:
 	•	all sessions ordered by last_opened_at descending
-	•	display name and slug
+	•	session name
 	•	current revision
 	•	open/done counts
 
@@ -331,8 +331,7 @@ Top bar
 
 Shows:
 	•	app name
-	•	session display name
-	•	session slug
+	•	session name
 	•	revision indicator (HEAD or r17)
 	•	active timer badge if present
 	•	filter/search indicator if future support is added
@@ -555,7 +554,6 @@ Use STRICT tables for core entities.
 CREATE TABLE sessions (
   id                INTEGER PRIMARY KEY,
   slug              TEXT NOT NULL UNIQUE,
-  name              TEXT NOT NULL,
   created_at        INTEGER NOT NULL,
   updated_at        INTEGER NOT NULL,
   last_opened_at    INTEGER NOT NULL,
@@ -636,7 +634,7 @@ CREATE TABLE app_state (
 ) STRICT;
 
 Required keys:
-	•	last_session_slug
+	•	last_session_name
 
 14. Revision model
 
@@ -876,7 +874,7 @@ Example:
 
 # Session: writing-sprint
 
-- slug: writing-sprint
+- session: writing-sprint
 - revision: 17
 - exported-at: 2026-03-24 12:03
 - session-updated-at: 2026-03-24 11:48
@@ -984,8 +982,8 @@ Representative actions:
 
 enum Action {
     OpenRecentSession,
-    OpenSession { slug: String },
-    OpenRevision { slug: String, revision: u32 },
+    OpenSession { name: String },
+    OpenRevision { name: String, revision: u32 },
     CloseOverlay,
     Quit,
 
@@ -1000,7 +998,7 @@ enum Action {
     NewTodo,
     EditTodo { id: i64 },
     SaveTodo { id: i64, title: String, notes: String },
-    AddTodo { session_slug: String, title: String, notes: String },
+    AddTodo { session_name: String, title: String, notes: String },
     ToggleTodo { id: i64 },
 
     OpenHistory,
@@ -1089,9 +1087,9 @@ This cleanup matters because Ratatui/Crossterm apps that fail to restore termina
 
 Minimum repository API:
 
-create_session(name, slug) -> Session
+create_session(name) -> Session
 list_sessions() -> Vec<SessionSummary>
-get_session_by_slug(slug) -> Session
+get_session_by_name(name) -> Session
 mark_session_opened(session_id, now)
 
 add_todo(session_id, title, notes, now) -> Todo
@@ -1201,7 +1199,7 @@ v1 only needs:
 25. Testing plan
 
 25.1 Unit tests
-	•	slug generation
+	•	session-name normalization
 	•	timestamp formatting
 	•	markdown export formatting
 	•	timer remaining-time math

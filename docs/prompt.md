@@ -65,7 +65,7 @@ Source spec: [spec.md](spec.md)
 - Rust crate building a `todui` binary.
 - SQLite schema + migrations for sessions, todos, revisions, Pomodoro runs, and app state.
 - CLI commands:
-  - `todui session new <name> [--slug <slug>] [--tag <tag>]`
+  - `todui session new <name> [--tag <tag>]`
   - `todui session list`
   - `todui session history [<session>]`
   - `todui session tag [<session>] [--set <tag> | --clear]`
