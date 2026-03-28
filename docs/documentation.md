@@ -48,6 +48,7 @@ Primary references:
 - Milestone 2-5 implementation choices:
   - bare `todui` now opens a real ratatui+crossterm session overview, while `resume` stays the direct session opener
   - sessions now carry one optional normalized tag, the overview groups sections by tag, and `untagged` is shown last
+  - session identity is now one normalized session name everywhere; the old display-name-vs-slug split is gone
   - the overview is browse-first for session opening, but session metadata editing also lives there: `e` edits the selected session name/tag/repo, `t` remains an alias, and `i` opens a metadata popup
   - revision viewing reuses the same screen with immutable snapshot data and a read-only banner/toast path
   - Pomodoro math is derived from persisted timestamps plus in-process redraw cadence; no per-second DB writes
@@ -55,7 +56,7 @@ Primary references:
   - historical revisions no longer render Pomodoro UI
   - config currently drives theme mode/accent, Pomodoro durations, and additive key aliases for the configured v1 actions
   - CLI help text now includes agent-readable recipes, output shapes, recent-session defaults, and an explicit note that CLI todo inspection flows through `export md` rather than a dedicated `todo show` command
-  - in-TUI creation now uses modal forms: `n` in overview creates a session from its display name plus optional tag/repo, and `n` in a live session creates a todo with title + notes
+  - in-TUI creation now uses modal forms: `n` in overview creates a session from one canonical name plus optional tag/repo, and `n` in a live session creates a todo with title + notes
   - todo editing now reuses that modal path: `e` edits the selected live todo in TUI, and `todui edit` performs partial title/note updates from CLI
   - delete is now supported end-to-end: `todui delete <id>` removes one todo with a new snapshot revision, `todui session delete [session]` hard-deletes a session, and TUI uses explicit confirmation modals for both
   - CLI session management now includes `todui session new --tag ...`, `todui session tag [session] --set ...`, `todui session tag [session] --clear`, and `todui session list` / markdown export both surface session tags
