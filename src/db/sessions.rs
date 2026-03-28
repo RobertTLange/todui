@@ -149,6 +149,75 @@ impl Database {
         Ok(session)
     }
 
+    pub fn edit_session(
+        &mut self,
+        slug: &str,
+        name: &str,
+        tag: Option<&str>,
+        repo: Option<&str>,
+        now: i64,
+    ) -> Result<Session> {
+        let trimmed_name = name.trim();
+        let next_slug = slugify(trimmed_name);
+        let resolved_tag = normalize_tag(tag)?;
+        let resolved_repo = normalize_optional_repo(repo)?;
+        validate_slug(&next_slug)?;
+
+        let transaction = self.connection.transaction()?;
+        let (session_id, current_name, current_tag, current_repo): (
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = transaction
+            .query_row(
+                "SELECT id, name, tag, repo FROM sessions WHERE slug = ?1",
+                [slug],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?
+            .ok_or_else(|| AppError::SessionNotFound(slug.to_string()))?;
+        let repo_changed = current_repo != resolved_repo;
+
+        if current_name == trimmed_name
+            && current_tag == resolved_tag
+            && current_repo == resolved_repo
+            && slug == next_slug
+        {
+            transaction.commit()?;
+            return self.get_session_by_slug(slug);
+        }
+
+        transaction.execute(
+            "UPDATE sessions
+             SET slug = ?1, name = ?2, tag = ?3, repo = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![
+                next_slug,
+                trimmed_name,
+                resolved_tag,
+                resolved_repo,
+                now,
+                session_id
+            ],
+        )?;
+        if repo_changed {
+            transaction.execute(
+                "UPDATE todos SET repo = ?1, updated_at = ?2 WHERE session_id = ?3",
+                params![resolved_repo, now, session_id],
+            )?;
+        }
+        update_last_session_slug_if_needed(&transaction, slug, &next_slug)?;
+        let revision = create_revision_snapshot(&transaction, session_id, "session edited", now)?;
+        transaction.execute(
+            "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
+            params![revision.revision_number, session_id],
+        )?;
+        transaction.commit()?;
+
+        self.get_session_by_slug(&next_slug)
+    }
+
     pub fn update_session_metadata(
         &mut self,
         slug: &str,
@@ -340,6 +409,26 @@ fn sync_last_session_slug(transaction: &Transaction<'_>) -> Result<()> {
         set_last_session_slug(transaction, &slug)?;
     } else {
         transaction.execute("DELETE FROM app_state WHERE key = 'last_session_slug'", [])?;
+    }
+
+    Ok(())
+}
+
+fn update_last_session_slug_if_needed(
+    transaction: &Transaction<'_>,
+    current_slug: &str,
+    next_slug: &str,
+) -> Result<()> {
+    let last_session_slug: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM app_state WHERE key = 'last_session_slug'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if last_session_slug.as_deref() == Some(current_slug) {
+        set_last_session_slug(transaction, next_slug)?;
     }
 
     Ok(())
@@ -631,5 +720,132 @@ mod tests {
             .expect("clear repo");
         assert_eq!(cleared.repo, None);
         assert_eq!(cleared.current_revision, 3);
+    }
+
+    #[test]
+    fn edits_session_name_slug_and_rewrites_all_todo_repos() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session(
+                "Writing Sprint",
+                None,
+                Some("work"),
+                Some("@SakanaAI/todui"),
+                1_711_275_600,
+            )
+            .expect("session");
+        let inherited = database
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .expect("todo");
+        let explicit = database
+            .add_todo(
+                &session.slug,
+                "Review bindings",
+                "",
+                Some("@OpenAI/codex"),
+                1_711_275_660,
+            )
+            .expect("todo");
+
+        database
+            .mark_session_opened(&session.slug, 1_711_275_700)
+            .expect("opened");
+        let updated = database
+            .edit_session(
+                &session.slug,
+                "Deep Work",
+                Some("Private"),
+                Some("@SakanaAI/todui-keymove"),
+                1_711_275_800,
+            )
+            .expect("edited session");
+
+        assert_eq!(updated.name, "Deep Work");
+        assert_eq!(updated.slug, "deep-work");
+        assert_eq!(updated.tag.as_deref(), Some("private"));
+        assert_eq!(updated.repo.as_deref(), Some("sakanaai/todui-keymove"));
+        assert_eq!(updated.current_revision, 4);
+        assert_eq!(updated.updated_at, 1_711_275_800);
+        assert_eq!(
+            database.resolve_session_slug(None).expect("recent"),
+            "deep-work"
+        );
+        assert!(database.get_session_by_slug("writing-sprint").is_err());
+
+        let inherited = database.get_todo(inherited.id).expect("todo");
+        let explicit = database.get_todo(explicit.id).expect("todo");
+        assert_eq!(inherited.repo.as_deref(), Some("sakanaai/todui-keymove"));
+        assert_eq!(explicit.repo.as_deref(), Some("sakanaai/todui-keymove"));
+    }
+
+    #[test]
+    fn editing_session_to_existing_slug_is_rejected() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let writing = database
+            .create_session("Writing Sprint", None, None, None, 1_711_275_600)
+            .expect("session");
+        database
+            .create_session("Reading Sprint", None, None, None, 1_711_275_700)
+            .expect("session");
+
+        let error = database
+            .edit_session(&writing.slug, "Reading Sprint", None, None, 1_711_275_800)
+            .expect_err("duplicate slug");
+
+        assert!(matches!(error, crate::error::AppError::Database(_)));
+        assert_eq!(
+            database
+                .get_session_by_slug(&writing.slug)
+                .expect("session")
+                .name,
+            "Writing Sprint"
+        );
+    }
+
+    #[test]
+    fn editing_session_name_without_repo_change_keeps_todo_repos() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session(
+                "Writing Sprint",
+                None,
+                Some("work"),
+                Some("@SakanaAI/todui"),
+                1_711_275_600,
+            )
+            .expect("session");
+        let inherited = database
+            .add_todo(&session.slug, "Draft spec", "", None, 1_711_275_650)
+            .expect("todo");
+        let explicit = database
+            .add_todo(
+                &session.slug,
+                "Review bindings",
+                "",
+                Some("@OpenAI/codex"),
+                1_711_275_660,
+            )
+            .expect("todo");
+
+        let updated = database
+            .edit_session(
+                &session.slug,
+                "Research Sprint",
+                Some("Deep Work"),
+                Some("@SakanaAI/todui"),
+                1_711_275_700,
+            )
+            .expect("edited session");
+
+        assert_eq!(updated.slug, "research-sprint");
+        assert_eq!(database.get_todo(inherited.id).expect("todo").repo, None);
+        assert_eq!(
+            database
+                .get_todo(explicit.id)
+                .expect("todo")
+                .repo
+                .as_deref(),
+            Some("openai/codex")
+        );
     }
 }
