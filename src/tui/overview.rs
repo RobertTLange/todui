@@ -140,6 +140,7 @@ struct SessionEditorState {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct GeneralNotesEditorState {
     text: String,
+    cursor: usize,
 }
 
 impl Default for SessionEditorState {
@@ -426,7 +427,7 @@ impl OverviewScreen {
                 Ok(None)
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.notes_editor.text.push('\n');
+                self.insert_notes_editor_char('\n');
                 Ok(None)
             }
             KeyCode::Enter => {
@@ -442,15 +443,31 @@ impl OverviewScreen {
                 Ok(None)
             }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.notes_editor.text.push('\n');
+                self.insert_notes_editor_char('\n');
                 Ok(None)
             }
             KeyCode::Backspace => {
-                self.notes_editor.text.pop();
+                self.backspace_notes_editor_char();
+                Ok(None)
+            }
+            KeyCode::Left => {
+                self.move_notes_cursor_left();
+                Ok(None)
+            }
+            KeyCode::Right => {
+                self.move_notes_cursor_right();
+                Ok(None)
+            }
+            KeyCode::Up => {
+                self.move_notes_cursor_vertical(-1);
+                Ok(None)
+            }
+            KeyCode::Down => {
+                self.move_notes_cursor_vertical(1);
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.notes_editor.text.push(character);
+                self.insert_notes_editor_char(character);
                 Ok(None)
             }
             _ => Ok(None),
@@ -770,8 +787,10 @@ impl OverviewScreen {
 
     fn general_notes_editor_modal(&self) -> Paragraph<'static> {
         let mut body = self.notes_editor.text.clone();
-        body.push('|');
-        body.push_str("\n\nEnter save  Shift+Enter newline  Ctrl+J newline  Esc cancel");
+        body.insert(self.notes_editor.cursor, '|');
+        body.push_str(
+            "\n\nEnter save  Shift+Enter newline  Ctrl+J newline  Arrows move  Esc cancel",
+        );
 
         Paragraph::new(body)
             .wrap(Wrap { trim: false })
@@ -998,6 +1017,7 @@ impl OverviewScreen {
         self.overlay = Some(OverviewOverlay::GeneralNotesEditor);
         self.notes_editor = GeneralNotesEditorState {
             text: self.overview_notes.clone(),
+            cursor: self.overview_notes.len(),
         };
     }
 
@@ -1018,6 +1038,40 @@ impl OverviewScreen {
     fn close_general_notes_editor(&mut self) {
         self.overlay = None;
         self.notes_editor = GeneralNotesEditorState::default();
+    }
+
+    fn insert_notes_editor_char(&mut self, character: char) {
+        self.notes_editor
+            .text
+            .insert(self.notes_editor.cursor, character);
+        self.notes_editor.cursor += character.len_utf8();
+    }
+
+    fn backspace_notes_editor_char(&mut self) {
+        if self.notes_editor.cursor == 0 {
+            return;
+        }
+
+        let start = previous_char_boundary(&self.notes_editor.text, self.notes_editor.cursor);
+        self.notes_editor
+            .text
+            .replace_range(start..self.notes_editor.cursor, "");
+        self.notes_editor.cursor = start;
+    }
+
+    fn move_notes_cursor_left(&mut self) {
+        self.notes_editor.cursor =
+            previous_char_boundary(&self.notes_editor.text, self.notes_editor.cursor);
+    }
+
+    fn move_notes_cursor_right(&mut self) {
+        self.notes_editor.cursor =
+            next_char_boundary(&self.notes_editor.text, self.notes_editor.cursor);
+    }
+
+    fn move_notes_cursor_vertical(&mut self, delta: isize) {
+        self.notes_editor.cursor =
+            move_cursor_vertical(&self.notes_editor.text, self.notes_editor.cursor, delta);
     }
 
     fn toggle_selected_session_todos(&mut self, database: &Database) -> Result<()> {
@@ -1389,6 +1443,80 @@ fn open_preview_todos(todos: Vec<Todo>) -> Vec<Todo> {
         .into_iter()
         .filter(|todo| matches!(todo.status, TodoStatus::Open))
         .collect()
+}
+
+fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return text.len();
+    }
+
+    cursor
+        + text[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0)
+}
+
+fn move_cursor_vertical(text: &str, cursor: usize, delta: isize) -> usize {
+    let line_starts = note_line_starts(text);
+    let current_line = line_starts
+        .partition_point(|start| *start <= cursor)
+        .saturating_sub(1);
+    let target_line = if delta.is_negative() {
+        current_line.saturating_sub(delta.unsigned_abs())
+    } else {
+        min(
+            current_line + delta as usize,
+            line_starts.len().saturating_sub(1),
+        )
+    };
+
+    if target_line == current_line {
+        return cursor;
+    }
+
+    let current_column = text[line_starts[current_line]..cursor].chars().count();
+    let target_start = line_starts[target_line];
+    let target_end = if target_line + 1 < line_starts.len() {
+        line_starts[target_line + 1].saturating_sub(1)
+    } else {
+        text.len()
+    };
+
+    target_start + byte_offset_for_char_column(&text[target_start..target_end], current_column)
+}
+
+fn note_line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, character) in text.char_indices() {
+        if character == '\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn byte_offset_for_char_column(text: &str, column: usize) -> usize {
+    if column == 0 {
+        return 0;
+    }
+
+    for (current_column, (index, _)) in text.char_indices().enumerate() {
+        if current_column == column {
+            return index;
+        }
+    }
+
+    text.len()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2202,6 +2330,54 @@ mod tests {
             database.get_overview_notes().expect("notes"),
             "# Focus\nLine two"
         );
+    }
+
+    #[test]
+    fn overview_arrow_keys_move_within_notes_editor() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+        for character in "ab".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type first line");
+        }
+        screen
+            .handle_key(&mut database, ctrl_key(KeyCode::Char('j')))
+            .expect("newline");
+        for character in "cd".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type second line");
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left");
+        screen
+            .handle_key(&mut database, key(KeyCode::Up))
+            .expect("move up");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('X')))
+            .expect("insert on first line");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move down");
+        screen
+            .handle_key(&mut database, key(KeyCode::Right))
+            .expect("move right");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('Y')))
+            .expect("insert on second line");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("save");
+
+        assert_eq!(database.get_overview_notes().expect("notes"), "aXb\ncdY");
     }
 
     #[test]

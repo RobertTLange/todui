@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 
-use crate::tui::theme::{SurfaceTone, TextTone, Theme};
+use crate::tui::theme::{TextTone, Theme};
 
 pub fn render_markdown(theme: &Theme, source: &str, width: u16) -> Text<'static> {
     if width == 0 {
@@ -27,9 +27,7 @@ fn render_markdown_line(theme: &Theme, line: &str) -> Line<'static> {
     }
 
     if let Some((level, content)) = heading_content(trimmed) {
-        let mut heading = Line::from(parse_inline(theme, content, heading_style(theme, level)));
-        heading.style = theme.text_style(TextTone::Meta);
-        return heading;
+        return Line::from(parse_inline(theme, content, heading_style(theme, level)));
     }
 
     if let Some(content) = trimmed
@@ -72,11 +70,11 @@ fn heading_content(line: &str) -> Option<(usize, &str)> {
 
 fn heading_style(theme: &Theme, level: usize) -> Style {
     let tone = match level {
-        1 | 2 => SurfaceTone::Details,
-        3 | 4 => SurfaceTone::Open,
-        _ => SurfaceTone::Neutral,
+        1 | 2 => TextTone::Focus,
+        3 | 4 => TextTone::Tag,
+        _ => TextTone::Open,
     };
-    theme.surface_title_style(tone)
+    theme.text_style(tone).add_modifier(Modifier::BOLD)
 }
 
 fn parse_inline(theme: &Theme, source: &str, base_style: Style) -> Vec<Span<'static>> {
@@ -155,7 +153,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::render_markdown;
-    use crate::tui::theme::Theme;
+    use crate::tui::theme::{SurfaceTone, Theme};
 
     #[test]
     fn renders_headers_and_bold_text() {
@@ -175,6 +173,17 @@ mod tests {
                 .style
                 .add_modifier
                 .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn heading_color_differs_from_general_notes_header_color() {
+        let theme = Theme::default();
+        let rendered = render_markdown(&theme, "# Heading", 40);
+
+        assert_ne!(
+            rendered.lines[0].spans[0].style.fg,
+            theme.surface_title_style(SurfaceTone::Details).fg
         );
     }
 }
