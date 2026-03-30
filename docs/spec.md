@@ -8,6 +8,7 @@ This spec assumes Rust + Ratatui + Crossterm + SQLite. That is a good fit here b
 
 Build a local-first terminal app named todui with:
 	•	a full-screen TUI for browsing and editing to-do sessions
+	•	an app-wide overview notes panel that stores raw markdown and renders styled markdown in the TUI
 	•	a CLI for creating sessions, resuming sessions, adding/editing todos, inspecting history, and exporting markdown
 	•	session-specific revision history
 	•	optional Pomodoro support with a shared active footer in overview and live session views
@@ -86,6 +87,7 @@ The app shall:
 	•	display timestamps in the TUI
 	•	export a markdown text version of a session
 	•	show active Pomodoro status in overview and live session views
+	•	edit one app-wide overview notes document from the overview TUI
 
 3.2 UX goals
 

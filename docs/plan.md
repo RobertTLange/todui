@@ -55,6 +55,7 @@ Fixed decisions; do not re-open unless spec changes:
 - Markdown export default = GFM.
 - Sessions may carry one optional tag; overview groups by tag and shows `untagged` last.
 - Pomodoro runs are global, with an active footer shown in overview and live session views.
+- Overview includes one app-wide general notes panel; notes are TUI-only, persisted in SQLite app state, and rendered as markdown in the overview.
 - Keyboard-first, mouse-complete, modeless navigation.
 - SQLite config = WAL + foreign keys on + busy timeout + STRICT tables.
 - Timestamps stored as UTC Unix epoch integers.
@@ -205,6 +206,7 @@ Scope:
 
 - Load config TOML for theme + Pomodoro defaults + key overrides.
 - Finalize semantic theme tokens and status rendering.
+- Add overview general notes editing + markdown rendering in the TUI.
 - Complete export options: `--timestamps`, `--include-notes`, `--open-only`, `--revision`.
 - Add/expand unit, repo, CLI, and TUI tests from spec.
 - Add hard-delete support for todos and sessions in CLI and TUI, with TUI confirmation.
@@ -213,6 +215,7 @@ Scope:
 Acceptance criteria:
 
 - Config overrides default values cleanly.
+- Overview persists and renders one app-wide notes document without adding CLI surface area.
 - Export behavior matches option matrix in spec.
 - Test suite covers critical v1 flows.
 - Todo delete preserves ordering invariants and revision history.

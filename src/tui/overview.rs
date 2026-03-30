@@ -21,11 +21,10 @@ use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::markdown::render_markdown;
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
-const SUMMARY_PANEL_PERCENT: u16 = 15;
-const SUMMARY_PANEL_MIN_HEIGHT: u16 = 8;
 const TAG_COLUMN_WIDTH: usize = 10;
 const REV_COLUMN_WIDTH: usize = 5;
 const OPEN_COLUMN_WIDTH: usize = 5;
@@ -33,6 +32,8 @@ const DONE_COLUMN_WIDTH: usize = 5;
 const LAST_OPENED_COLUMN_WIDTH: usize = 11;
 const SESSION_COLUMN_SPACING: usize = 5;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
+const NOTES_EDITOR_WIDTH: u16 = 72;
+const NOTES_EDITOR_HEIGHT: u16 = 18;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -81,6 +82,7 @@ struct OverviewScreen {
     sessions: Vec<SessionOverview>,
     expanded_sessions: Vec<ExpandedSessionState>,
     active_run: Option<PomodoroRun>,
+    overview_notes: String,
     has_any_sessions: bool,
     selected_index: usize,
     scroll_offset: usize,
@@ -89,12 +91,14 @@ struct OverviewScreen {
     last_area: Rect,
     overlay: Option<OverviewOverlay>,
     session_editor: SessionEditorState,
+    notes_editor: GeneralNotesEditorState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OverviewOverlay {
     Help,
     SessionEditor(SessionEditorMode),
+    GeneralNotesEditor,
     SessionMetadata,
     DeleteSession { name: String },
 }
@@ -130,6 +134,11 @@ struct SessionEditorState {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GeneralNotesEditorState {
+    text: String,
+}
+
 impl Default for SessionEditorState {
     fn default() -> Self {
         Self {
@@ -148,6 +157,7 @@ impl OverviewScreen {
             sessions: Vec::new(),
             expanded_sessions: Vec::new(),
             active_run: None,
+            overview_notes: String::new(),
             has_any_sessions: false,
             selected_index: 0,
             scroll_offset: 0,
@@ -156,6 +166,7 @@ impl OverviewScreen {
             last_area: Rect::default(),
             overlay: None,
             session_editor: SessionEditorState::default(),
+            notes_editor: GeneralNotesEditorState::default(),
         }
     }
 
@@ -163,6 +174,7 @@ impl OverviewScreen {
         self.has_any_sessions = database.has_any_sessions()?;
         self.sessions = database.list_session_overview()?;
         self.active_run = database.get_active_pomodoro()?;
+        self.overview_notes = database.get_overview_notes()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
         self.sync_expanded_sessions(database)?;
         self.ensure_selection_visible(self.visible_rows());
@@ -210,6 +222,9 @@ impl OverviewScreen {
             Some(OverviewOverlay::SessionEditor(_)) => {
                 return self.handle_session_editor_key(database, key);
             }
+            Some(OverviewOverlay::GeneralNotesEditor) => {
+                return self.handle_notes_editor_key(database, key);
+            }
             Some(OverviewOverlay::DeleteSession { .. }) => {
                 return self.handle_delete_key(database, key);
             }
@@ -224,6 +239,10 @@ impl OverviewScreen {
             }
             KeyCode::Char('n') => {
                 self.open_session_editor();
+                None
+            }
+            KeyCode::Char('m') => {
+                self.open_general_notes_editor();
                 None
             }
             KeyCode::Char('e') | KeyCode::Char('t') => {
@@ -393,6 +412,48 @@ impl OverviewScreen {
         }
     }
 
+    fn handle_notes_editor_key(
+        &mut self,
+        database: &mut Database,
+        key: KeyEvent,
+    ) -> Result<Option<OverviewExit>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_general_notes_editor();
+                Ok(None)
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.notes_editor.text.push('\n');
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                database.save_overview_notes(self.notes_editor.text.trim_end_matches('\n'))?;
+                self.reload(database)?;
+                self.close_general_notes_editor();
+                Ok(None)
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                database.save_overview_notes(self.notes_editor.text.trim_end_matches('\n'))?;
+                self.reload(database)?;
+                self.close_general_notes_editor();
+                Ok(None)
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.notes_editor.text.push('\n');
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                self.notes_editor.text.pop();
+                Ok(None)
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.notes_editor.text.push(character);
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<OverviewExit> {
         if self.overlay.is_some() {
             return None;
@@ -421,14 +482,17 @@ impl OverviewScreen {
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
         frame.render_widget(self.top_bar(), chunks[0]);
+        let body_areas = self.body_areas(chunks[1]);
 
         if self.sessions.is_empty() {
-            frame.render_widget(self.empty_state(), chunks[1]);
+            frame.render_widget(self.empty_state(), body_areas.list);
+            frame.render_widget(self.notes_panel(body_areas.notes), body_areas.notes);
+            frame.render_widget(self.summary_panel(), body_areas.summary);
         } else {
-            let (list_area, summary_area, details_area) = self.body_areas(chunks[1]);
-            frame.render_widget(self.session_list(list_area), list_area);
-            frame.render_widget(self.summary_panel(), summary_area);
-            if let Some(details_area) = details_area {
+            frame.render_widget(self.session_list(body_areas.list), body_areas.list);
+            frame.render_widget(self.notes_panel(body_areas.notes), body_areas.notes);
+            frame.render_widget(self.summary_panel(), body_areas.summary);
+            if let Some(details_area) = body_areas.details {
                 frame.render_widget(self.details_panel(), details_area);
             }
         }
@@ -456,6 +520,11 @@ impl OverviewScreen {
             let area = centered_rect(frame.area(), 60, 11);
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(), area);
+        }
+        if matches!(self.overlay, Some(OverviewOverlay::GeneralNotesEditor)) {
+            let area = centered_rect(frame.area(), NOTES_EDITOR_WIDTH, NOTES_EDITOR_HEIGHT);
+            frame.render_widget(Clear, area);
+            frame.render_widget(self.general_notes_editor_modal(), area);
         }
         if let Some(OverviewOverlay::DeleteSession { name }) = &self.overlay {
             let area = centered_rect(frame.area(), 58, 9);
@@ -535,20 +604,48 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
+    fn notes_panel(&self, area: Rect) -> Paragraph<'static> {
+        let content = if self.overview_notes.trim().is_empty() {
+            ratatui::text::Text::from(vec![
+                Line::from("No overview notes yet."),
+                Line::from(String::new()),
+                Line::from("Press m to edit overview notes."),
+            ])
+        } else {
+            render_markdown(
+                &self.theme,
+                &self.overview_notes,
+                area.width.saturating_sub(2),
+            )
+        };
+
+        Paragraph::new(content)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("General Notes")
+                    .style(self.theme.surface_style(SurfaceTone::Neutral))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Neutral))
+    }
+
     fn summary_panel(&self) -> Paragraph<'static> {
         let stats = self.summary_stats();
         let text = format!(
-            "total sessions: {} | tagged: {} | untagged: {}\ntotal todos: {} | open: {} | completed: {}\ncompletion rate: {}%\nnewest opened: {}\noldest opened: {}\navg revision: r{}",
+            "total sessions: {} | tagged: {} | untagged: {} | avg revision: r{}\ntotal todos: {} | open: {} | completed: {} | completion rate: {}%\nnewest opened: {} | oldest opened: {}",
             stats.total_sessions,
             stats.tagged_sessions,
             stats.untagged_sessions,
+            stats.average_revision,
             stats.total_todos,
             stats.open_todos,
             stats.done_todos,
             stats.completion_rate,
             format_month_day_local(stats.newest_last_opened_at),
-            format_month_day_local(stats.oldest_last_opened_at),
-            stats.average_revision
+            format_month_day_local(stats.oldest_last_opened_at)
         );
 
         Paragraph::new(text)
@@ -586,7 +683,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nExpand todos: Enter\nOpen session: Right, l\nNew session: n\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nExpand todos: Enter\nOpen session: Right, l\nNew session: n\nEdit notes: m\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -668,6 +765,24 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
+    fn general_notes_editor_modal(&self) -> Paragraph<'static> {
+        let mut body = self.notes_editor.text.clone();
+        body.push('|');
+        body.push_str("\n\nEnter save  Shift+Enter newline  Ctrl+J newline  Esc cancel");
+
+        Paragraph::new(body)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Edit General Notes")
+                    .style(self.theme.surface_style(SurfaceTone::Overlay))
+                    .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+                    .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
+            )
+            .style(self.theme.surface_style(SurfaceTone::Overlay))
+    }
+
     fn delete_session_modal(&self, name: &str) -> Paragraph<'static> {
         Paragraph::new(format!(
             "Delete session {name}?\n\nThis permanently removes its todos and history.\n\nEnter delete  Esc cancel"
@@ -742,20 +857,39 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
-        self.body_areas(self.root_chunks(area)[1]).0
+        self.body_areas(self.root_chunks(area)[1]).list
     }
 
-    fn body_areas(&self, body: Rect) -> (Rect, Rect, Option<Rect>) {
+    fn body_areas(&self, body: Rect) -> OverviewBodyAreas {
         if body.width >= 90 {
             let columns =
                 Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
                     .split(body);
-            let left_column =
-                Layout::vertical(self.summary_split(columns[0].height)).split(columns[0]);
-            (left_column[0], left_column[1], Some(columns[1]))
+            let left_column = Layout::vertical([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(columns[0]);
+            OverviewBodyAreas {
+                list: left_column[0],
+                notes: left_column[1],
+                summary: left_column[2],
+                details: Some(columns[1]),
+            }
         } else {
-            let stacked = Layout::vertical(self.summary_split(body.height)).split(body);
-            (stacked[0], stacked[1], None)
+            let stacked = Layout::vertical([
+                Constraint::Percentage(50),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ])
+            .split(body);
+            OverviewBodyAreas {
+                list: stacked[0],
+                notes: stacked[1],
+                summary: stacked[2],
+                details: None,
+            }
         }
     }
 
@@ -765,17 +899,6 @@ impl OverviewScreen {
             constraints.push(Constraint::Length(active_footer_height()));
         }
         Layout::vertical(constraints).split(area).to_vec()
-    }
-
-    fn summary_split(&self, total_height: u16) -> [Constraint; 2] {
-        let proportional_height =
-            ((u32::from(total_height) * u32::from(SUMMARY_PANEL_PERCENT)).div_ceil(100)) as u16;
-        let summary_height = proportional_height.max(SUMMARY_PANEL_MIN_HEIGHT);
-        let list_height = total_height.saturating_sub(summary_height).max(1);
-        [
-            Constraint::Length(list_height),
-            Constraint::Length(summary_height),
-        ]
     }
 
     fn summary_stats(&self) -> OverviewSummaryStats {
@@ -868,6 +991,13 @@ impl OverviewScreen {
         self.overlay = Some(OverviewOverlay::SessionMetadata);
     }
 
+    fn open_general_notes_editor(&mut self) {
+        self.overlay = Some(OverviewOverlay::GeneralNotesEditor);
+        self.notes_editor = GeneralNotesEditorState {
+            text: self.overview_notes.clone(),
+        };
+    }
+
     fn open_delete_session(&mut self) {
         let Some(session) = self.sessions.get(self.selected_index) else {
             return;
@@ -880,6 +1010,11 @@ impl OverviewScreen {
     fn close_session_editor(&mut self) {
         self.overlay = None;
         self.session_editor = SessionEditorState::default();
+    }
+
+    fn close_general_notes_editor(&mut self) {
+        self.overlay = None;
+        self.notes_editor = GeneralNotesEditorState::default();
     }
 
     fn toggle_selected_session_todos(&mut self, database: &Database) -> Result<()> {
@@ -1094,6 +1229,14 @@ struct OverviewSummaryStats {
     newest_last_opened_at: i64,
     oldest_last_opened_at: i64,
     average_revision: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverviewBodyAreas {
+    list: Rect,
+    notes: Rect,
+    summary: Rect,
+    details: Option<Rect>,
 }
 
 fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
@@ -1536,6 +1679,8 @@ mod tests {
         assert!(wide_buffer.contains("Last Opened"));
         assert!(wide_buffer.contains("private"));
         assert!(wide_buffer.contains("writing-sprint"));
+        assert!(wide_buffer.contains("General Notes"));
+        assert!(wide_buffer.contains("Press m to edit overview notes."));
         assert!(wide_buffer.contains("Summary"));
         assert!(wide_buffer.contains("total sessions: 2"));
         assert!(wide_buffer.contains("tagged: 2"));
@@ -1555,6 +1700,7 @@ mod tests {
 
         let narrow_buffer = render_buffer(&mut populated, 80, 20);
         assert!(narrow_buffer.contains("Sessions"));
+        assert!(narrow_buffer.contains("General Notes"));
         assert!(narrow_buffer.contains("Summary"));
         assert!(!narrow_buffer.contains("Details"));
 
@@ -1566,8 +1712,18 @@ mod tests {
         assert!(empty_buffer.contains("Press n to create one"));
         assert!(empty_buffer.contains("h = help"));
         assert!(!empty_buffer.contains("Pomodoro"));
-        assert!(!empty_buffer.contains("Summary"));
+        assert!(empty_buffer.contains("General Notes"));
+        assert!(empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_layout_keeps_notes_half_the_sessions_height() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 80, 20));
+
+        assert_eq!(body.list.height, body.notes.height * 2);
+        assert_eq!(body.notes.height, body.summary.height);
     }
 
     #[test]
@@ -1672,7 +1828,8 @@ mod tests {
         assert!(buffer.contains("No sessions with open todos."));
         assert!(buffer.contains("Press n to create one"));
         assert!(!buffer.contains("No sessions yet."));
-        assert!(!buffer.contains("Summary"));
+        assert!(buffer.contains("General Notes"));
+        assert!(buffer.contains("Summary"));
     }
 
     #[test]
@@ -1975,6 +2132,79 @@ mod tests {
     }
 
     #[test]
+    fn overview_edits_general_notes_and_persists_raw_markdown() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+        assert!(render_buffer(&mut screen, 120, 24).contains("Edit General Notes"));
+        for character in "# Focus".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type heading");
+        }
+        screen
+            .handle_key(&mut database, ctrl_key(KeyCode::Char('j')))
+            .expect("newline");
+        for character in "Ship **notes**".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type body");
+        }
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("save");
+        assert!(exit.is_none());
+        assert_eq!(
+            database.get_overview_notes().expect("notes"),
+            "# Focus\nShip **notes**"
+        );
+
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("General Notes"));
+        assert!(buffer.contains("Focus"));
+        assert!(buffer.contains("Ship notes"));
+    }
+
+    #[test]
+    fn overview_shift_enter_inserts_newline_without_saving() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+        for character in "# Focus".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type heading");
+        }
+
+        screen
+            .handle_key(&mut database, shift_key(KeyCode::Enter))
+            .expect("shift enter newline");
+        for character in "Line two".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .expect("type body");
+        }
+
+        assert_eq!(database.get_overview_notes().expect("notes"), "");
+        assert!(render_buffer(&mut screen, 120, 24).contains("Edit General Notes"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("save");
+        assert_eq!(
+            database.get_overview_notes().expect("notes"),
+            "# Focus\nLine two"
+        );
+    }
+
+    #[test]
     fn overview_mouse_click_ignores_inline_todo_rows() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
@@ -2050,6 +2280,24 @@ mod tests {
         KeyEvent {
             code,
             modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SHIFT,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
