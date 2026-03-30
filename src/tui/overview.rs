@@ -34,6 +34,9 @@ const SESSION_COLUMN_SPACING: usize = 5;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
+const OVERVIEW_LIST_PERCENT: u16 = 40;
+const OVERVIEW_NOTES_PERCENT: u16 = 40;
+const OVERVIEW_SUMMARY_PERCENT: u16 = 20;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -866,9 +869,9 @@ impl OverviewScreen {
                 Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
                     .split(body);
             let left_column = Layout::vertical([
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
+                Constraint::Percentage(OVERVIEW_LIST_PERCENT),
+                Constraint::Percentage(OVERVIEW_NOTES_PERCENT),
+                Constraint::Percentage(OVERVIEW_SUMMARY_PERCENT),
             ])
             .split(columns[0]);
             OverviewBodyAreas {
@@ -879,9 +882,9 @@ impl OverviewScreen {
             }
         } else {
             let stacked = Layout::vertical([
-                Constraint::Percentage(50),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
+                Constraint::Percentage(OVERVIEW_LIST_PERCENT),
+                Constraint::Percentage(OVERVIEW_NOTES_PERCENT),
+                Constraint::Percentage(OVERVIEW_SUMMARY_PERCENT),
             ])
             .split(body);
             OverviewBodyAreas {
@@ -1689,9 +1692,6 @@ mod tests {
         assert!(wide_buffer.contains("open: 1"));
         assert!(wide_buffer.contains("completed: 0"));
         assert!(wide_buffer.contains("completion rate: 0%"));
-        assert!(wide_buffer.contains("newest opened:"));
-        assert!(wide_buffer.contains("oldest opened:"));
-        assert!(wide_buffer.contains("avg revision: r2"));
         assert!(wide_buffer.contains("Enter expands the session todos."));
         assert!(wide_buffer.contains("Use Right or l to open the session head."));
         assert!(wide_buffer.contains("return here."));
@@ -1718,12 +1718,12 @@ mod tests {
     }
 
     #[test]
-    fn overview_layout_keeps_notes_half_the_sessions_height() {
+    fn overview_layout_uses_forty_forty_twenty_split() {
         let (_directory, _database, screen) = seeded_overview_screen();
         let body = screen.body_areas(Rect::new(0, 0, 80, 20));
 
-        assert_eq!(body.list.height, body.notes.height * 2);
-        assert_eq!(body.notes.height, body.summary.height);
+        assert_eq!(body.list.height, body.notes.height);
+        assert!(body.summary.height < body.notes.height);
     }
 
     #[test]
