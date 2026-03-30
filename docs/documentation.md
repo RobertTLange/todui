@@ -62,6 +62,7 @@ Primary references:
   - CLI session management now includes `todui session new --tag ...`, `todui session tag [session] --set ...`, `todui session tag [session] --clear`, and `todui session list` / markdown export both surface session tags
   - historical revisions remain mutation-blocked, including both delete actions
   - overview/session navigation now supports arrow traversal across screens: `Right` opens the selected session from overview, and `Left` returns from a session to overview
+  - overview now includes one app-wide `General Notes` panel below `Sessions`; it persists raw markdown in SQLite `app_state`, renders basic markdown styles in the TUI, and is edited from the overview with `m`
 
 ## How To Run + Demo
 
@@ -131,6 +132,7 @@ TUI create flow:
 - `e` in overview to edit the selected session name, tag, and repo
 - `t` in overview as the same edit-session shortcut alias
 - `i` in overview to open a centered metadata popup for the selected session
+- `m` in overview to edit the app-wide general notes document
 - `n` again to add a todo with optional notes inside the session view
 - `i` or `Right` inside the session view to open the selected todo details
 - `Left` inside the session view to close details first, then return to the overview when no details box is open
