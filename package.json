@@ -1,0 +1,55 @@
+{
+  "name": "@roberttlange/todui",
+  "version": "0.1.0",
+  "description": "Local-first terminal todo app with session history, a full-screen TUI, and SQLite persistence.",
+  "type": "module",
+  "bin": {
+    "todui": "bin/todui.js"
+  },
+  "files": [
+    "bin/**",
+    "scripts/npm/**",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "npm run check:version && npm run check:js",
+    "check:js": "node --check bin/todui.js && node --check scripts/npm/shared.mjs && node --check scripts/npm/install.mjs && node --check scripts/npm/check-version-sync.mjs && node --check scripts/release-notes.mjs",
+    "check:version": "node scripts/npm/check-version-sync.mjs",
+    "test": "node --test npm-tests/*.test.mjs",
+    "prepack": "npm run build && npm test",
+    "postinstall": "node scripts/npm/install.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RobertTLange/todui.git"
+  },
+  "homepage": "https://github.com/RobertTLange/todui#readme",
+  "bugs": {
+    "url": "https://github.com/RobertTLange/todui/issues"
+  },
+  "keywords": [
+    "todo",
+    "tui",
+    "cli",
+    "rust",
+    "sqlite",
+    "productivity"
+  ],
+  "license": "MIT"
+}
