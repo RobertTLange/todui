@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::error::Result;
 
 pub mod browser;
+pub mod input;
 pub mod layout;
 pub mod overview;
 pub mod screen;

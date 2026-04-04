@@ -19,6 +19,7 @@ use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_full_local, format_month_day_local};
 use crate::tui::browser;
+use crate::tui::input::resolved_text_char;
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
@@ -420,7 +421,8 @@ impl OverviewScreen {
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.current_editor_field_mut().push(character);
+                self.current_editor_field_mut()
+                    .push(resolved_text_char(&key, character));
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -503,7 +505,7 @@ impl OverviewScreen {
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert_notes_editor_char(character);
+                self.insert_notes_editor_char(resolved_text_char(&key, character));
                 Ok(None)
             }
             _ => Ok(None),
