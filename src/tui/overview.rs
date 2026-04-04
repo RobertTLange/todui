@@ -88,6 +88,7 @@ pub(crate) enum OverviewExit {
 #[derive(Debug)]
 struct OverviewScreen {
     sessions: Vec<SessionOverview>,
+    detail_sessions: Vec<ExpandedSessionState>,
     expanded_sessions: Vec<ExpandedSessionState>,
     active_run: Option<PomodoroRun>,
     overview_notes: String,
@@ -177,6 +178,7 @@ impl OverviewScreen {
     fn new(config: Config) -> Self {
         Self {
             sessions: Vec::new(),
+            detail_sessions: Vec::new(),
             expanded_sessions: Vec::new(),
             active_run: None,
             overview_notes: String::new(),
@@ -196,6 +198,16 @@ impl OverviewScreen {
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.has_any_sessions = database.has_any_sessions()?;
         self.sessions = database.list_session_overview()?;
+        self.detail_sessions = self
+            .sessions
+            .iter()
+            .map(|session| {
+                Ok(ExpandedSessionState {
+                    name: session.name.clone(),
+                    todos: open_preview_todos(database.get_live_todos(session.id)?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         self.active_run = database.get_active_pomodoro()?;
         self.overview_notes = database.get_overview_notes()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
@@ -573,7 +585,7 @@ impl OverviewScreen {
             frame.render_widget(self.help_overlay(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionMetadata)) {
-            let area = centered_rect(frame.area(), 60, 13);
+            let area = centered_rect(frame.area(), 60, 21);
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_metadata_modal(), area);
         }
@@ -678,7 +690,7 @@ impl OverviewScreen {
 
     fn details_panel(&self) -> Paragraph<'static> {
         let text = self
-            .selected_session_metadata_lines()
+            .selected_session_metadata_lines(4)
             .map(Text::from)
             .unwrap_or_else(|| Text::from("Select a session to inspect its summary."));
 
@@ -839,7 +851,7 @@ impl OverviewScreen {
     }
 
     fn session_metadata_modal(&self) -> Paragraph<'static> {
-        let mut lines = self.selected_session_metadata_lines().unwrap_or_else(|| {
+        let mut lines = self.selected_session_metadata_lines(4).unwrap_or_else(|| {
             vec![
                 Line::from("Select a session to inspect its summary."),
                 Line::from(String::new()),
@@ -1325,6 +1337,13 @@ impl OverviewScreen {
             .map(|expanded| expanded.todos.as_slice())
     }
 
+    fn detail_todos_for_session(&self, session_name: &str) -> Option<&[Todo]> {
+        self.detail_sessions
+            .iter()
+            .find(|session| session.name == session_name)
+            .map(|session| session.todos.as_slice())
+    }
+
     fn expanded_child_row_count(&self, session_index: usize) -> usize {
         self.sessions
             .get(session_index)
@@ -1340,9 +1359,9 @@ impl OverviewScreen {
             .sum()
     }
 
-    fn selected_session_metadata_lines(&self) -> Option<Vec<Line<'static>>> {
+    fn selected_session_metadata_lines(&self, max_open_todos: usize) -> Option<Vec<Line<'static>>> {
         self.sessions.get(self.selected_index).map(|session| {
-            vec![
+            let mut lines = vec![
                 Line::from(format!("session: {}", session.name)),
                 Line::from(format!(
                     "tag: {}",
@@ -1360,12 +1379,27 @@ impl OverviewScreen {
                 )),
                 Line::from(format!("done todos: {}", session.done_count)),
                 Line::from(String::new()),
-                Line::from("Enter expands the session todos."),
-                Line::from("Use Right or l to open the session head."),
-                Line::from("Use o inside the session to return here."),
-                Line::from("Use H inside the session for revision history."),
-            ]
+            ];
+            lines.extend(session_open_todo_lines(
+                &self.theme,
+                self.selected_session_open_todos().unwrap_or(&[]),
+                max_open_todos,
+            ));
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from(
+                "Enter expands the session todos. Use Right or l to open the session head.",
+            ));
+            lines.push(Line::from(
+                "Use o inside the session to return here. Use H inside the session for revision history.",
+            ));
+            lines
         })
+    }
+
+    fn selected_session_open_todos(&self) -> Option<&[Todo]> {
+        self.sessions
+            .get(self.selected_index)
+            .and_then(|session| self.detail_todos_for_session(&session.name))
     }
 
     fn selected_session_repo(&self) -> Option<&str> {
@@ -1381,7 +1415,7 @@ impl OverviewScreen {
 
     fn session_metadata_repo_hitbox(&self) -> Option<Rect> {
         repo_hitbox(
-            centered_rect(self.last_area, 60, 13),
+            centered_rect(self.last_area, 60, 21),
             2,
             self.selected_session_repo(),
         )
@@ -1550,6 +1584,37 @@ fn empty_todo_preview_line(theme: &Theme, inner_width: usize) -> Line<'static> {
     ))
 }
 
+fn session_open_todo_lines(theme: &Theme, todos: &[Todo], max_items: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "open todo list:",
+        theme.text_style(TextTone::Meta),
+    ))];
+
+    if todos.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No open todos",
+            theme.text_style(TextTone::Muted),
+        )));
+        return lines;
+    }
+
+    let visible_count = todos.len().min(max_items);
+    lines.extend(todos.iter().take(visible_count).map(|todo| {
+        Line::from(Span::styled(
+            format!("  [ ] {}", todo.title),
+            theme.text_style(TextTone::Focus),
+        ))
+    }));
+    if todos.len() > visible_count {
+        lines.push(Line::from(Span::styled(
+            format!("  ... and {} more", todos.len() - visible_count),
+            theme.text_style(TextTone::Muted),
+        )));
+    }
+
+    lines
+}
+
 fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
     let name_width = inner_width.saturating_sub(
         TAG_COLUMN_WIDTH
@@ -1714,8 +1779,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use ratatui::text::Line;
 
-    use super::{OverviewExit, OverviewScreen, list_row_index, todo_preview_line};
+    use super::{
+        OverviewDisplayRow, OverviewExit, OverviewScreen, list_row_index, todo_preview_line,
+    };
     use crate::config::Config;
     use crate::db::Database;
     use crate::domain::pomodoro::PomodoroKind;
@@ -1757,15 +1825,23 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert!(exit.is_none());
-        let expanded = render_buffer(&mut screen, 120, 24);
-        assert!(expanded.contains("[ ] Draft spec"));
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::Todo { .. }))
+        );
 
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
         assert!(exit.is_none());
-        let collapsed = render_buffer(&mut screen, 120, 24);
-        assert!(!collapsed.contains("[ ] Draft spec"));
+        assert!(
+            !screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::Todo { .. }))
+        );
     }
 
     #[test]
@@ -1776,8 +1852,12 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("expand");
-        let expanded = render_buffer(&mut screen, 120, 24);
-        assert!(expanded.contains("No open todos"));
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::EmptyTodos(_)))
+        );
 
         screen
             .handle_key(&mut database, key(KeyCode::Down))
@@ -1790,9 +1870,18 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("expand second");
-        let expanded = render_buffer(&mut screen, 120, 24);
-        assert!(expanded.contains("[ ] Draft spec"));
-        assert!(expanded.contains("No open todos"));
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::Todo { .. }))
+        );
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::EmptyTodos(_)))
+        );
 
         screen
             .handle_key(&mut database, key(KeyCode::Up))
@@ -1800,9 +1889,18 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("collapse first");
-        let partially_collapsed = render_buffer(&mut screen, 120, 24);
-        assert!(partially_collapsed.contains("[ ] Draft spec"));
-        assert!(!partially_collapsed.contains("No open todos"));
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::Todo { .. }))
+        );
+        assert!(
+            !screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::EmptyTodos(_)))
+        );
     }
 
     #[test]
@@ -1970,8 +2068,9 @@ mod tests {
         assert!(wide_buffer.contains("open: 1"));
         assert!(wide_buffer.contains("completed: 0"));
         assert!(wide_buffer.contains("completion rate: 0%"));
+        assert!(wide_buffer.contains("open todo list:"));
         assert!(wide_buffer.contains("Enter expands the session todos."));
-        assert!(wide_buffer.contains("Use Right or l to open the session head."));
+        assert!(wide_buffer.contains("session head."));
         assert!(wide_buffer.contains("return here."));
         assert!(!wide_buffer.contains("Pomodoro"));
         assert!(!wide_buffer.contains("Keys"));
@@ -1993,6 +2092,49 @@ mod tests {
         assert!(empty_buffer.contains("General Notes"));
         assert!(empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_metadata_lists_open_todos_between_summary_and_hints() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        let done_todo = database
+            .add_todo("writing-sprint", "Done task", "", None, 1_711_275_910)
+            .expect("todo");
+        database
+            .add_todo("writing-sprint", "Ship docs", "", None, 1_711_275_920)
+            .expect("todo");
+        database
+            .set_todo_status(
+                done_todo.id,
+                Some("writing-sprint"),
+                TodoStatus::Done,
+                1_711_275_930,
+            )
+            .expect("mark done");
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let metadata = lines_to_string(
+            &screen
+                .selected_session_metadata_lines(4)
+                .expect("metadata lines"),
+        );
+
+        let done_todos_index = metadata.find("done todos: 1").expect("done todos");
+        let open_todo_list_index = metadata.find("open todo list:").expect("list");
+        let draft_spec_index = metadata.find("  [ ] Draft spec").expect("draft spec");
+        let ship_docs_index = metadata.find("  [ ] Ship docs").expect("ship docs");
+        let hints_index = metadata
+            .find("Enter expands the session todos.")
+            .expect("hint");
+
+        assert!(done_todos_index < open_todo_list_index);
+        assert!(open_todo_list_index < draft_spec_index);
+        assert!(draft_spec_index < ship_docs_index);
+        assert!(ship_docs_index < hints_index);
+        assert!(!metadata.contains("Done task"));
     }
 
     #[test]
@@ -2694,6 +2836,19 @@ mod tests {
             lines.push(line);
         }
         lines.join("\n")
+    }
+
+    fn lines_to_string(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn key(code: KeyCode) -> KeyEvent {

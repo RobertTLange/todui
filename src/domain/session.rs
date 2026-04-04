@@ -29,6 +29,7 @@ pub struct SessionHeadToken {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOverview {
+    pub id: i64,
     pub name: String,
     pub tag: Option<String>,
     pub repo: Option<String>,

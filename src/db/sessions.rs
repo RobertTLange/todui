@@ -61,6 +61,7 @@ impl Database {
     pub fn list_session_overview(&self) -> Result<Vec<SessionOverview>> {
         let mut statement = self.connection.prepare(
             "SELECT
+                sessions.id,
                 sessions.slug,
                 sessions.tag,
                 sessions.repo,
@@ -461,13 +462,14 @@ fn map_session_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSumma
 
 fn map_session_overview(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOverview> {
     Ok(SessionOverview {
-        name: row.get(0)?,
-        tag: row.get(1)?,
-        repo: row.get(2)?,
-        last_opened_at: row.get(3)?,
-        current_revision: row.get(4)?,
-        todo_count: row.get(5)?,
-        done_count: row.get(6)?,
+        id: row.get(0)?,
+        name: row.get(1)?,
+        tag: row.get(2)?,
+        repo: row.get(3)?,
+        last_opened_at: row.get(4)?,
+        current_revision: row.get(5)?,
+        todo_count: row.get(6)?,
+        done_count: row.get(7)?,
     })
 }
 
