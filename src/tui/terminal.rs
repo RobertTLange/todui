@@ -15,6 +15,12 @@ use crate::error::Result;
 
 pub type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+}
+
 pub fn init_terminal() -> Result<AppTerminal> {
     enable_raw_mode()?;
     let mut handle = stdout();
@@ -22,7 +28,7 @@ pub fn init_terminal() -> Result<AppTerminal> {
         handle,
         EnterAlternateScreen,
         EnableMouseCapture,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
     )?;
     Ok(Terminal::new(CrosstermBackend::new(handle))?)
 }
@@ -43,4 +49,19 @@ pub fn ring_terminal(terminal: &mut AppTerminal) -> Result<()> {
     terminal.backend_mut().write_all(b"\x07")?;
     terminal.backend_mut().flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::KeyboardEnhancementFlags;
+
+    use super::keyboard_enhancement_flags;
+
+    #[test]
+    fn terminal_requests_enhanced_enter_and_modifier_reporting() {
+        let flags = keyboard_enhancement_flags();
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+    }
 }
