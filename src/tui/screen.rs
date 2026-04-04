@@ -19,6 +19,7 @@ use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::browser;
+use crate::tui::input::resolved_text_char;
 use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
@@ -388,6 +389,15 @@ impl SessionScreen {
                 };
                 Ok(None)
             }
+            KeyCode::Enter
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && matches!(self.todo_editor.focused_field, EditorField::Secondary) =>
+            {
+                let field = self.focused_todo_field();
+                field.push('\n');
+                self.todo_editor.error = None;
+                Ok(None)
+            }
             KeyCode::Enter => {
                 self.submit_todo_editor(database)?;
                 Ok(None)
@@ -400,7 +410,7 @@ impl SessionScreen {
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 let field = self.focused_todo_field();
-                field.push(character);
+                field.push(resolved_text_char(&key, character));
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -687,7 +697,7 @@ impl SessionScreen {
         }
 
         if matches!(self.overlay, Some(Overlay::Details)) {
-            let area = centered_rect(frame.area(), 60, 12);
+            let area = self.details_overlay_area(frame.area(), snapshot);
             frame.render_widget(Clear, area);
             frame.render_widget(self.details_panel(snapshot), area);
         }
@@ -1224,8 +1234,12 @@ impl SessionScreen {
 
     fn todo_editor_footer_hint(&self) -> &'static str {
         match self.todo_editor.mode {
-            TodoEditorMode::Create => "Tab next field  Enter create  Esc cancel",
-            TodoEditorMode::Edit { .. } => "Tab next field  Enter save  Esc cancel",
+            TodoEditorMode::Create => {
+                "Tab next field  Shift+Enter newline in notes  Enter create  Esc cancel"
+            }
+            TodoEditorMode::Edit { .. } => {
+                "Tab next field  Shift+Enter newline in notes  Enter save  Esc cancel"
+            }
         }
     }
 
@@ -1254,14 +1268,16 @@ impl SessionScreen {
                 )),
                 repo_line(&self.theme, effective_repo.as_deref()),
                 Line::from(format!("repo source: {repo_source}")),
-                Line::from(format!(
-                    "notes: {}",
-                    if todo.notes.trim().is_empty() {
-                        "-"
-                    } else {
-                        todo.notes.trim()
-                    }
-                )),
+            ];
+            lines.extend(multiline_details_field_lines(
+                "notes",
+                if todo.notes.trim().is_empty() {
+                    "-"
+                } else {
+                    todo.notes.trim()
+                },
+            ));
+            lines.extend([
                 Line::from(format!("created: {}", format_full_local(todo.created_at))),
                 Line::from(format!("updated: {}", format_full_local(todo.updated_at))),
                 Line::from(format!(
@@ -1272,7 +1288,7 @@ impl SessionScreen {
                 )),
                 Line::from(format!("id: {}", todo.todo_id)),
                 Line::from(String::new()),
-            ];
+            ]);
             if effective_repo.is_some() {
                 lines.push(Line::from("u open repo  Esc/Enter/Left close"));
             } else {
@@ -1293,10 +1309,15 @@ impl SessionScreen {
             .current_todo()
             .and_then(|todo| self.current_todo_repo_details(todo).0);
         repo_hitbox(
-            centered_rect(self.viewport_area, 60, 12),
+            self.details_overlay_area(self.viewport_area, self.snapshot()),
             2,
             repo.as_deref(),
         )
+    }
+
+    fn details_overlay_area(&self, area: Rect, snapshot: &SessionSnapshot) -> Rect {
+        let height = self.details_lines(snapshot).len().saturating_add(2).max(12) as u16;
+        centered_rect(area, 60, height)
     }
 }
 
@@ -1310,6 +1331,16 @@ fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
 
 fn clamp_scroll_offset(offset: usize, total_rows: usize, visible_rows: usize) -> usize {
     total_rows.saturating_sub(visible_rows).min(offset)
+}
+
+fn multiline_details_field_lines(label: &str, value: &str) -> Vec<Line<'static>> {
+    let mut value_lines = value.lines();
+    let first = value_lines.next().unwrap_or_default();
+    let continuation_indent = " ".repeat(label.chars().count() + 2);
+
+    let mut lines = vec![Line::from(format!("{label}: {first}"))];
+    lines.extend(value_lines.map(|line| Line::from(format!("{continuation_indent}{line}"))));
+    lines
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -1804,6 +1835,87 @@ mod tests {
             screen.snapshot().mode,
             RevisionMode::Historical(_)
         ));
+    }
+
+    #[test]
+    fn todo_editor_shift_enter_in_notes_inserts_newline_without_submitting() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Outline modal flow".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "first line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, shift_key(KeyCode::Enter))
+            .unwrap();
+
+        assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
+        assert_eq!(screen.snapshot().todos.len(), 2);
+
+        for character in "second line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(screen.snapshot().todos.len(), 3);
+        assert_eq!(
+            screen.current_todo().expect("selected").notes,
+            "first line\nsecond line"
+        );
+    }
+
+    #[test]
+    fn todo_editor_uppercases_shifted_letters_when_terminal_reports_base_char() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, shift_key(KeyCode::Char('a')))
+            .unwrap();
+
+        assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
+        assert_eq!(screen.todo_editor.title, "A");
+        assert!(render_buffer(&screen, 120, 24).contains("Title: A|"));
+    }
+
+    #[test]
+    fn details_box_renders_multiline_notes_on_separate_lines() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.snapshot().todos[0].clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "first line\nsecond line",
+                first_todo.repo.as_deref(),
+                1_711_275_950,
+            )
+            .expect("update notes");
+        screen.reload(&database).expect("reload");
+        screen.overlay = Some(Overlay::Details);
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("notes: first line"));
+        assert!(rendered.contains("       second line"));
     }
 
     #[test]
@@ -2306,6 +2418,15 @@ mod tests {
         KeyEvent {
             code,
             modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn shift_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SHIFT,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
