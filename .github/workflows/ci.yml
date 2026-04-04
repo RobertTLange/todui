@@ -74,3 +74,28 @@ jobs:
         with:
           name: coverage-report
           path: coverage
+
+  npm-package:
+    name: npm Package
+    runs-on: ubuntu-latest
+    env:
+      TODOUI_SKIP_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Verify npm packaging scripts
+        run: |
+          npm run build
+          npm test
+      - name: Build local binary
+        run: cargo build --locked
+      - name: Smoke-test launcher
+        env:
+          TODOUI_BINARY_PATH: ${{ github.workspace }}/target/debug/todui
+        run: node bin/todui.js --help

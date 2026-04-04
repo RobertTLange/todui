@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must match Cargo.toml and package.json)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Verify release state
+    runs-on: ubuntu-latest
+    outputs:
+      pkg_version: ${{ steps.release_info.outputs.pkg_version }}
+      tag: ${{ steps.release_info.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install npm dependencies
+        run: npm ci
+        env:
+          TODOUI_SKIP_DOWNLOAD: "1"
+
+      - name: Verify npm package gate
+        run: |
+          npm run build
+          npm test
+
+      - name: Verify Rust gate
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test
+
+      - name: Validate version and release state
+        id: release_info
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "Release workflow must run from main. Current ref: ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          PKG_VERSION="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          CARGO_VERSION="$(node -e 'const fs=require("node:fs");const lines=fs.readFileSync("Cargo.toml","utf8").split(/\r?\n/);let inPackage=false;for(const rawLine of lines){const line=rawLine.trim();if(line.startsWith("[")&&line.endsWith("]")){inPackage=line==="[package]";continue;}if(!inPackage){continue;}const match=line.match(/^version\s*=\s*"([^"]+)"$/);if(match){process.stdout.write(match[1]);process.exit(0);}}process.exit(1);')"
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+
+          if [[ "${PKG_VERSION}" != "${INPUT_VERSION}" ]]; then
+            echo "Version mismatch: package.json=${PKG_VERSION}, input=${INPUT_VERSION}"
+            exit 1
+          fi
+
+          if [[ "${CARGO_VERSION}" != "${INPUT_VERSION}" ]]; then
+            echo "Version mismatch: Cargo.toml=${CARGO_VERSION}, input=${INPUT_VERSION}"
+            exit 1
+          fi
+
+          TAG="v${INPUT_VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag already exists on origin: ${TAG}"
+            exit 1
+          fi
+
+          if npm view "@roberttlange/todui@${INPUT_VERSION}" version >/dev/null 2>&1; then
+            echo "Version already published on npm: @roberttlange/todui@${INPUT_VERSION}"
+            exit 1
+          fi
+
+          echo "pkg_version=${INPUT_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+  build-linux:
+    name: Build Linux Binaries
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Build binary
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.validate.outputs.pkg_version }}"
+          ASSET="todui-v${VERSION}-${{ matrix.target }}"
+          mkdir -p release-assets
+          cp "target/${{ matrix.target }}/release/todui" "release-assets/${ASSET}"
+          sha256sum "release-assets/${ASSET}" > "release-assets/${ASSET}.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+
+  build-macos:
+    name: Build macOS Binaries
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.validate.outputs.pkg_version }}"
+          ASSET="todui-v${VERSION}-${{ matrix.target }}"
+          mkdir -p release-assets
+          cp "target/${{ matrix.target }}/release/todui" "release-assets/${ASSET}"
+          shasum -a 256 "release-assets/${ASSET}" > "release-assets/${ASSET}.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+
+  release:
+    name: Publish npm + create GitHub release
+    needs:
+      - validate
+      - build-linux
+      - build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install npm dependencies
+        run: npm ci
+        env:
+          TODOUI_SKIP_DOWNLOAD: "1"
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Extract release notes from CHANGELOG
+        run: node scripts/release-notes.mjs "${{ needs.validate.outputs.pkg_version }}" > release-notes.md
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.validate.outputs.tag }}" \
+            release-assets/* \
+            --target "${GITHUB_SHA}" \
+            --title "${{ needs.validate.outputs.tag }}" \
+            --notes-file release-notes.md
