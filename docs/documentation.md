@@ -20,8 +20,10 @@ Primary references:
   - Milestone 3: revision history CLI/TUI flow, read-only revision mode, return-to-head behavior
   - Milestone 4: Pomodoro persistence, state machine, active footer, active-run uniqueness
   - Milestone 5: config-driven theme/durations, export option matrix, expanded tests
+  - npm packaging prep: MIT license, public package metadata, Node installer/launcher, changelog, and release workflow
 - Next:
-  - optional UX refinement only; plan scope is complete
+  - optional UX refinement only; implementation scope is complete
+  - first public npm release can be dispatched from GitHub Actions once `main` contains this diff and `NPM_TOKEN` is configured
 
 ## Decisions Made
 
@@ -63,6 +65,8 @@ Primary references:
   - historical revisions remain mutation-blocked, including both delete actions
   - overview/session navigation now supports arrow traversal across screens: `Right` opens the selected session from overview, and `Left` returns from a session to overview
   - overview now includes one app-wide `General Notes` panel below `Sessions`; it persists raw markdown in SQLite `app_state`, renders basic markdown styles in the TUI, and is edited from the overview with `m`
+  - npm distribution is additive rather than a repo restructure: the Rust crate remains the source of truth, while a small root-level Node package installs prebuilt binaries for macOS/Linux and exposes the same `todui` bin name
+  - release automation now mirrors the `agentlens` style: a manual `workflow_dispatch` workflow validates version sync, rejects duplicate tags/npm versions, publishes to npm, and creates a GitHub release with attached binaries and checksums
 
 ## How To Run + Demo
 
@@ -85,6 +89,11 @@ Final validation commands run clean:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+TODOUI_SKIP_DOWNLOAD=1 npm ci
+npm run build
+npm test
+TODOUI_BINARY_PATH="$PWD/target/debug/todui" node bin/todui.js --help
+npm pack --dry-run
 target/debug/todui
 target/debug/todui session history writing-sprint
 target/debug/todui resume writing-sprint
