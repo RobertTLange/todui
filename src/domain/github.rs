@@ -44,6 +44,10 @@ pub fn normalize_repo(input: &str) -> Result<String> {
     ))
 }
 
+pub fn github_repo_url(input: &str) -> Result<String> {
+    Ok(format!("https://github.com/{}", normalize_repo(input)?))
+}
+
 fn is_valid_repo_part(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|character| {
@@ -56,7 +60,7 @@ fn is_valid_repo_part(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_optional_repo, normalize_repo};
+    use super::{github_repo_url, normalize_optional_repo, normalize_repo};
 
     #[test]
     fn normalizes_url_at_prefix_and_plain_repo_forms() {
@@ -90,5 +94,21 @@ mod tests {
         assert!(normalize_repo("https://github.com/org/repo/issues/1").is_err());
         assert!(normalize_repo("@org").is_err());
         assert!(normalize_repo("not a repo").is_err());
+    }
+
+    #[test]
+    fn builds_canonical_github_repo_urls() {
+        assert_eq!(
+            github_repo_url("https://github.com/ExampleOrg/todui-keymove").unwrap(),
+            "https://github.com/exampleorg/todui-keymove"
+        );
+        assert_eq!(
+            github_repo_url("@ExampleOrg/todui-keymove").unwrap(),
+            "https://github.com/exampleorg/todui-keymove"
+        );
+        assert_eq!(
+            github_repo_url("ExampleOrg/todui-keymove").unwrap(),
+            "https://github.com/exampleorg/todui-keymove"
+        );
     }
 }

@@ -1,25 +1,28 @@
 use std::cmp::min;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
 use crate::domain::todo::{Todo, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_full_local, format_month_day_local};
+use crate::tui::browser;
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
+use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 use crate::tui::widgets::markdown::render_markdown;
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
@@ -71,6 +74,8 @@ pub(crate) fn run_in_terminal(
         } else {
             screen.handle_tick(database)?;
         }
+
+        screen.expire_toast();
     }
 }
 
@@ -95,6 +100,7 @@ struct OverviewScreen {
     overlay: Option<OverviewOverlay>,
     session_editor: SessionEditorState,
     notes_editor: GeneralNotesEditorState,
+    toast: Option<ToastState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +110,18 @@ enum OverviewOverlay {
     GeneralNotesEditor,
     SessionMetadata,
     DeleteSession { name: String },
+}
+
+#[derive(Debug, Clone)]
+struct ToastState {
+    message: String,
+    expires_at: Instant,
+    tone: ToastTone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastTone {
+    Warning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +189,7 @@ impl OverviewScreen {
             overlay: None,
             session_editor: SessionEditorState::default(),
             notes_editor: GeneralNotesEditorState::default(),
+            toast: None,
         }
     }
 
@@ -215,11 +234,12 @@ impl OverviewScreen {
                 return Ok(None);
             }
             Some(OverviewOverlay::SessionMetadata) => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i')
-                ) {
-                    self.overlay = None;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => {
+                        self.overlay = None;
+                    }
+                    KeyCode::Char('u') => self.open_selected_session_repo(),
+                    _ => {}
                 }
                 return Ok(None);
             }
@@ -259,6 +279,10 @@ impl OverviewScreen {
             }
             KeyCode::Char('D') => {
                 self.open_delete_session();
+                None
+            }
+            KeyCode::Char('u') => {
+                self.open_selected_session_repo();
                 None
             }
             _ if matches!(key.code, KeyCode::Char('p'))
@@ -475,15 +499,32 @@ impl OverviewScreen {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<OverviewExit> {
-        if self.overlay.is_some() {
-            return None;
-        }
         match mouse.kind {
-            MouseEventKind::ScrollUp => self.move_selection(-1),
-            MouseEventKind::ScrollDown => self.move_selection(1),
+            MouseEventKind::ScrollUp if self.overlay.is_none() => self.move_selection(-1),
+            MouseEventKind::ScrollDown if self.overlay.is_none() => self.move_selection(1),
             MouseEventKind::Down(MouseButton::Left) => {
+                if matches!(self.overlay, Some(OverviewOverlay::SessionMetadata)) {
+                    if self
+                        .session_metadata_repo_hitbox()
+                        .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+                    {
+                        self.open_selected_session_repo();
+                    }
+                    return None;
+                }
+                if self.overlay.is_some() {
+                    return None;
+                }
+                if self
+                    .details_repo_hitbox()
+                    .is_some_and(|area| rect_contains(area, mouse.column, mouse.row))
+                {
+                    self.open_selected_session_repo();
+                    return None;
+                }
                 let list_area = self.list_area(self.last_area);
-                if let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
+                if rect_contains(list_area, mouse.column, mouse.row)
+                    && let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
                     && let Some(OverviewDisplayRow::Session(session_index)) =
                         self.display_rows().get(index).copied()
                 {
@@ -551,6 +592,35 @@ impl OverviewScreen {
             frame.render_widget(Clear, area);
             frame.render_widget(self.delete_session_modal(name), area);
         }
+        if let Some(toast) = &self.toast {
+            let area = centered_rect(frame.area(), 50, 3);
+            frame.render_widget(Clear, area);
+            let surface_tone = match toast.tone {
+                ToastTone::Warning => SurfaceTone::Notice,
+            };
+            let text_tone = match toast.tone {
+                ToastTone::Warning => TextTone::Warning,
+            };
+            frame.render_widget(
+                Paragraph::new(toast.message.clone())
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Notice")
+                            .style(self.theme.surface_style(surface_tone))
+                            .border_style(self.theme.surface_border_style(surface_tone))
+                            .title_style(self.theme.surface_title_style(surface_tone)),
+                    )
+                    .style(
+                        self.theme.surface_style(surface_tone).fg(self
+                            .theme
+                            .text_style(text_tone)
+                            .fg
+                            .unwrap_or(self.theme.fg_default)),
+                    ),
+                area,
+            );
+        }
     }
 
     fn top_bar(&self) -> Paragraph<'static> {
@@ -608,8 +678,9 @@ impl OverviewScreen {
 
     fn details_panel(&self) -> Paragraph<'static> {
         let text = self
-            .selected_session_metadata_text()
-            .unwrap_or_else(|| String::from("Select a session to inspect its summary."));
+            .selected_session_metadata_lines()
+            .map(Text::from)
+            .unwrap_or_else(|| Text::from("Select a session to inspect its summary."));
 
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
@@ -703,7 +774,7 @@ impl OverviewScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nExpand todos: Enter\nOpen session: Right, l\nNew session: n\nEdit notes: m\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nExpand todos: Enter\nOpen session: Right, l\nOpen repo: u or click repo\nNew session: n\nEdit notes: m\nEdit session: e\nEdit session alias: t\nSession metadata: i\nDelete session: D\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nQuit: q or Esc\nClose help: h, q, or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -768,11 +839,22 @@ impl OverviewScreen {
     }
 
     fn session_metadata_modal(&self) -> Paragraph<'static> {
-        let text = self.selected_session_metadata_text().unwrap_or_else(|| {
-            String::from("Select a session to inspect its summary.\n\nEsc close")
+        let mut lines = self.selected_session_metadata_lines().unwrap_or_else(|| {
+            vec![
+                Line::from("Select a session to inspect its summary."),
+                Line::from(String::new()),
+                Line::from("Esc close"),
+            ]
         });
+        if self.selected_session_repo().is_some() {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from("u open repo  Esc close"));
+        } else {
+            lines.push(Line::from(String::new()));
+            lines.push(Line::from("Esc close"));
+        }
 
-        Paragraph::new(format!("{text}\n\nEsc close"))
+        Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
@@ -1258,19 +1340,84 @@ impl OverviewScreen {
             .sum()
     }
 
-    fn selected_session_metadata_text(&self) -> Option<String> {
+    fn selected_session_metadata_lines(&self) -> Option<Vec<Line<'static>>> {
         self.sessions.get(self.selected_index).map(|session| {
-            format!(
-                "session: {}\ntag: {}\nrepo: {}\nlast opened: {}\ncurrent revision: r{}\nopen todos: {}\ndone todos: {}\n\nEnter expands the session todos.\nUse Right or l to open the session head.\nUse o inside the session to return here.\nUse H inside the session for revision history.",
-                session.name,
-                session.tag.as_deref().unwrap_or("untagged"),
-                session.repo.as_deref().unwrap_or("-"),
-                format_full_local(session.last_opened_at),
-                session.current_revision,
-                session.todo_count - session.done_count,
-                session.done_count
-            )
+            vec![
+                Line::from(format!("session: {}", session.name)),
+                Line::from(format!(
+                    "tag: {}",
+                    session.tag.as_deref().unwrap_or("untagged")
+                )),
+                repo_line(&self.theme, session.repo.as_deref()),
+                Line::from(format!(
+                    "last opened: {}",
+                    format_full_local(session.last_opened_at)
+                )),
+                Line::from(format!("current revision: r{}", session.current_revision)),
+                Line::from(format!(
+                    "open todos: {}",
+                    session.todo_count - session.done_count
+                )),
+                Line::from(format!("done todos: {}", session.done_count)),
+                Line::from(String::new()),
+                Line::from("Enter expands the session todos."),
+                Line::from("Use Right or l to open the session head."),
+                Line::from("Use o inside the session to return here."),
+                Line::from("Use H inside the session for revision history."),
+            ]
         })
+    }
+
+    fn selected_session_repo(&self) -> Option<&str> {
+        self.sessions
+            .get(self.selected_index)
+            .and_then(|session| session.repo.as_deref())
+    }
+
+    fn details_repo_hitbox(&self) -> Option<Rect> {
+        let body = self.body_areas(self.root_chunks(self.last_area)[1]);
+        repo_hitbox(body.details?, 2, self.selected_session_repo())
+    }
+
+    fn session_metadata_repo_hitbox(&self) -> Option<Rect> {
+        repo_hitbox(
+            centered_rect(self.last_area, 60, 13),
+            2,
+            self.selected_session_repo(),
+        )
+    }
+
+    fn open_selected_session_repo(&mut self) {
+        let Some(repo) = self.selected_session_repo() else {
+            return;
+        };
+        match github_repo_url(repo).and_then(|url| {
+            browser::open_url(&url)?;
+            Ok(url)
+        }) {
+            Ok(_) => {}
+            Err(error) => {
+                self.set_toast(format!("Failed to open repo: {error}"), ToastTone::Warning)
+            }
+        }
+    }
+
+    fn set_toast(&mut self, message: String, tone: ToastTone) {
+        self.toast = Some(ToastState {
+            message,
+            expires_at: Instant::now() + Duration::from_secs(2),
+            tone,
+        });
+    }
+
+    fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| Instant::now() >= toast.expires_at)
+        {
+            self.toast = None;
+        }
     }
 }
 
@@ -1575,6 +1722,9 @@ mod tests {
     use crate::domain::todo::Todo;
     use crate::domain::todo::TodoStatus;
     use crate::timestamp::format_month_day_local;
+    use crate::tui::browser::{
+        reset_test_browser, set_test_browser_should_fail, take_test_browser_opened_urls,
+    };
     use crate::tui::theme::{TextTone, Theme};
 
     #[test]
@@ -2257,6 +2407,100 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Char('i')))
             .unwrap();
         assert!(!render_buffer(&mut screen, 120, 24).contains("Session Metadata"));
+    }
+
+    #[test]
+    fn overview_clicks_session_repo_in_inline_details_panel() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .update_session_repo(
+                "reading-sprint",
+                Some("https://github.com/ExampleOrg/todui-keymove"),
+                1_711_275_900,
+            )
+            .expect("set repo");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitbox = screen.details_repo_hitbox().expect("repo hitbox");
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x,
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/exampleorg/todui-keymove")]
+        );
+    }
+
+    #[test]
+    fn overview_clicks_session_repo_in_metadata_popup() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .update_session_repo(
+                "reading-sprint",
+                Some("ExampleOrg/todui-keymove"),
+                1_711_275_900,
+            )
+            .expect("set repo");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open popup");
+        let hitbox = screen
+            .session_metadata_repo_hitbox()
+            .expect("popup repo hitbox");
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x,
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/exampleorg/todui-keymove")]
+        );
+    }
+
+    #[test]
+    fn overview_shows_notice_when_repo_open_fails() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .update_session_repo(
+                "reading-sprint",
+                Some("ExampleOrg/todui-keymove"),
+                1_711_275_900,
+            )
+            .expect("set repo");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+        set_test_browser_should_fail(true);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('u')))
+            .expect("open repo");
+
+        assert!(
+            screen
+                .toast
+                .as_ref()
+                .expect("toast")
+                .message
+                .contains("Failed to open repo")
+        );
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/exampleorg/todui-keymove")]
+        );
     }
 
     #[test]

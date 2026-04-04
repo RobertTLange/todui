@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::error::Result;
 
+pub mod browser;
 pub mod layout;
 pub mod overview;
 pub mod screen;
