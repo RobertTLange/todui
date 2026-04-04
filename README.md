@@ -1,52 +1,62 @@
-# todui
+<h1 align="center">todui</h1>
 
-Local-first terminal todo app.
+<p align="center">
+  Local-first terminal todo sessions with a full-screen TUI, immutable revisions, and SQLite persistence.
+</p>
 
-Features:
+<p align="center">
+  <img alt="Node.js 18+" src="https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white" />
+  <img alt="Rust stable" src="https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white" />
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white" />
+  <img alt="macOS and Linux" src="https://img.shields.io/badge/macOS%20%26%20Linux-x64%20%2F%20arm64-4CAF50" />
+</p>
 
-- session-based todo lists
-- full-screen TUI via `resume`
-- immutable session revision history
-- embedded Pomodoro timer
-- SQLite persistence
-- markdown export
+When work spans shell scripts, scratch markdown, and half-finished terminal notes, preserving a clean session history gets noisy fast. `todui` gives you one local place to capture todo sessions, browse immutable revisions, keep notes close to the work, and stay in the terminal from quick CLI automation to full-screen planning.
 
-## Setup
+## Quick Start
 
-Prereqs:
+### Fastest: run with `npx`
 
-- Rust stable
-- Cargo
+```bash
+npx -y @roberttlange/todui --help
+```
 
-Build:
+### Install globally
+
+```bash
+npm install -g @roberttlange/todui
+todui
+```
+
+The npm package downloads a prebuilt binary for macOS/Linux on `x64` and `arm64`; a local Rust toolchain is not required for the npm install path.
+
+### From source
 
 ```bash
 cargo install --path .
+todui --help
 ```
 
-If `todui` is not found after install, add Cargo bin to `PATH`:
+## 60-Second Usage
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+todui session new "Writing Sprint" --tag work
+todui add "Draft design spec" --session writing-sprint --note "cover CLI and TUI"
+todui add "Review keybindings" --session writing-sprint --repo @exampleorg/todui-keymove
+todui resume writing-sprint
+todui session history writing-sprint
+todui export md writing-sprint --include-notes
 ```
 
-Run tests + checks:
+## What You Get
 
-```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
+- Session-based todo lists with one canonical session name per workspace.
+- Full-screen TUI plus scriptable CLI for the same local SQLite data.
+- Immutable revision history with read-only historical resume/export flows.
+- App-wide overview notes, todo notes, repo-aware metadata, and markdown export.
+- Global Pomodoro timer surfaced in overview and live session views.
 
-Coverage:
-
-```bash
-rustup component add llvm-tools-preview
-cargo install cargo-llvm-cov --locked
-cargo llvm-cov --workspace --all-features --lcov --output-path coverage/lcov.info --fail-under-lines 80
-```
-
-## Paths
+## Config
 
 Default paths:
 
@@ -58,86 +68,38 @@ Overrides:
 - `TODO_TUI_CONFIG`
 - `TODO_TUI_DB`
 
-Example:
-
-```bash
-export TODO_TUI_DB=/tmp/todui.db
-export TODO_TUI_CONFIG=/tmp/todui-config.toml
-```
-
-## Run
-
-Create a session + add work:
-
-```bash
-todui session new "Writing Sprint"
-todui add "Draft design spec" --session writing-sprint --note "cover CLI, TUI, DB, pomodoro"
-```
-
-Open the TUI:
-
-```bash
-todui resume writing-sprint
-```
-
-Open a historical revision read-only:
-
-```bash
-todui resume writing-sprint --revision 1
-```
-
-Inspect history:
-
-```bash
-todui session history writing-sprint
-```
-
-Export markdown:
-
-```bash
-todui export md writing-sprint --format gfm
-todui export md writing-sprint --revision 1 --timestamps full --include-notes
-```
-
-## Config
-
-An example config lives in [`config.example.toml`](config.example.toml).
-
-Create the config directory and copy it into place:
+Seed a config file from the example:
 
 ```bash
 mkdir -p ~/.config/todui
 cp config.example.toml ~/.config/todui/config.toml
 ```
 
-## TUI Keys
+## Common TUI Keys
 
-Movement:
+- `j` / `k`, arrows: move selection
+- `n`: create a session or todo
+- `e`: edit the selected session or todo
+- `space` / `x`: toggle completion
+- `H`: open session history
+- `r`: return from a revision to the live head
+- `m`: edit overview notes
+- `q` / `Esc`: close overlay or quit
 
-- `j` / `k`, arrows: move selection up and down
-- `PageUp` / `PageDown`: jump by a page
-- `g` / `Home`: jump to the first row
-- `G` / `End`: jump to the last row
-- `Enter`, `Right`, `l`: open the selected session from overview
-- `Left`, `o`: return from a session to overview
-- `i`, `Right`: open todo details inside a session
+## Docs
 
-Session actions:
+- [Configuration example](config.example.toml)
+- [Development and release workflow](docs/development.md)
+- [Implementation notes](docs/documentation.md)
+- [Product spec](docs/spec.md)
 
-- `space` / `x`: toggle done
-- `n`: create a session or todo, depending on the current screen
-- `e`: edit the selected todo
-- `t`: edit the selected session tag/repo from overview
-- `u`: open the selected session/todo GitHub repo in the browser
-- `d`: delete selected todo
-- `D`: delete selected session
-- `H`: open revision history
-- `r`: return from revision to head
-- `p`: focus start / pause / resume
-- `b`: short break
-- `B`: long break
-- `c`: cancel timer
-- `h`: help overlay
-- `q` / `Esc`: quit or close overlay
+## Verification
 
-Pomodoro completion emits a terminal bell by default while the TUI is open.
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+TODOUI_SKIP_DOWNLOAD=1 npm ci
+npm run build
+npm test
+```
