@@ -128,6 +128,7 @@ Session actions:
 - `n`: create a session or todo, depending on the current screen
 - `e`: edit the selected todo
 - `t`: edit the selected session tag/repo from overview
+- `u`: open the selected session/todo GitHub repo in the browser
 - `d`: delete selected todo
 - `D`: delete selected session
 - `H`: open revision history

@@ -132,6 +132,8 @@ TUI create flow:
 - `e` in overview to edit the selected session name, tag, and repo
 - `t` in overview as the same edit-session shortcut alias
 - `i` in overview to open a centered metadata popup for the selected session
+- `u` in overview or a live session to open the visible GitHub repo in the browser
+- clicking the repo line in overview/session metadata and todo details also opens the GitHub repo
 - `m` in overview to edit the app-wide general notes document
 - `n` again to add a todo with optional notes inside the session view
 - `i` or `Right` inside the session view to open the selected todo details
