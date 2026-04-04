@@ -6,20 +6,23 @@ use crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
+use crate::tui::browser;
 use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
+use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
@@ -246,11 +249,12 @@ impl SessionScreen {
                 return self.handle_delete_key(database, key);
             }
             Some(Overlay::Details) => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Left
-                ) {
-                    self.overlay = None;
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter | KeyCode::Left => {
+                        self.overlay = None;
+                    }
+                    KeyCode::Char('u') => self.open_current_todo_repo(),
+                    _ => {}
                 }
                 return Ok(None);
             }
@@ -262,6 +266,10 @@ impl SessionScreen {
             KeyCode::Left | KeyCode::Char('o') => Ok(Some(SessionExit::Overview)),
             KeyCode::Right | KeyCode::Char('i') => {
                 self.open_details();
+                Ok(None)
+            }
+            KeyCode::Char('u') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.open_current_todo_repo();
                 Ok(None)
             }
             KeyCode::Char('h') => {
@@ -468,13 +476,23 @@ impl SessionScreen {
     ) -> Result<()> {
         self.viewport_area = area;
 
-        if matches!(
-            self.overlay,
-            Some(Overlay::TodoEditor | Overlay::Help | Overlay::Details)
-        ) || matches!(
-            self.overlay,
-            Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. })
-        ) {
+        if matches!(self.overlay, Some(Overlay::Details)) {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && self
+                    .details_repo_hitbox()
+                    .is_some_and(|hitbox| rect_contains(hitbox, mouse.column, mouse.row))
+            {
+                self.open_current_todo_repo();
+            }
+            return Ok(());
+        }
+
+        if matches!(self.overlay, Some(Overlay::TodoEditor | Overlay::Help))
+            || matches!(
+                self.overlay,
+                Some(Overlay::DeleteTodo { .. } | Overlay::DeleteSession { .. })
+            )
+        {
             return Ok(());
         }
         match mouse.kind {
@@ -774,35 +792,7 @@ impl SessionScreen {
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
-        let text = if let Some(todo) = self.current_todo() {
-            let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
-            format!(
-                "title: {}\nstatus: {}\nrepo: {}\nrepo source: {}\nnotes: {}\ncreated: {}\nupdated: {}\ncompleted: {}\nid: {}",
-                todo.title,
-                if todo.status == TodoStatus::Done {
-                    "done"
-                } else {
-                    "open"
-                },
-                effective_repo.unwrap_or_else(|| String::from("-")),
-                repo_source,
-                if todo.notes.trim().is_empty() {
-                    "-"
-                } else {
-                    todo.notes.trim()
-                },
-                format_full_local(todo.created_at),
-                format_full_local(todo.updated_at),
-                todo.completed_at
-                    .map(format_full_local)
-                    .unwrap_or_else(|| String::from("-")),
-                todo.todo_id
-            )
-        } else {
-            format!("No todos in session {}", snapshot.session.name)
-        };
-
-        Paragraph::new(text)
+        Paragraph::new(Text::from(self.details_lines(snapshot)))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
@@ -817,7 +807,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nOpen repo: u or click repo\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -1149,6 +1139,25 @@ impl SessionScreen {
         self.overlay = Some(Overlay::Details);
     }
 
+    fn open_current_todo_repo(&mut self) {
+        let Some(todo) = self.current_todo() else {
+            return;
+        };
+        let (effective_repo, _) = self.current_todo_repo_details(todo);
+        let Some(repo) = effective_repo else {
+            return;
+        };
+        match github_repo_url(&repo).and_then(|url| {
+            browser::open_url(&url)?;
+            Ok(url)
+        }) {
+            Ok(_) => {}
+            Err(error) => {
+                self.set_toast(format!("Failed to open repo: {error}"), ToastTone::Warning);
+            }
+        }
+    }
+
     fn close_todo_editor(&mut self) {
         self.overlay = None;
         self.todo_editor = TodoEditorState::default();
@@ -1229,6 +1238,66 @@ impl SessionScreen {
             (None, "-")
         }
     }
+
+    fn details_lines(&self, snapshot: &SessionSnapshot) -> Vec<Line<'static>> {
+        if let Some(todo) = self.current_todo() {
+            let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
+            let mut lines = vec![
+                Line::from(format!("title: {}", todo.title)),
+                Line::from(format!(
+                    "status: {}",
+                    if todo.status == TodoStatus::Done {
+                        "done"
+                    } else {
+                        "open"
+                    }
+                )),
+                repo_line(&self.theme, effective_repo.as_deref()),
+                Line::from(format!("repo source: {repo_source}")),
+                Line::from(format!(
+                    "notes: {}",
+                    if todo.notes.trim().is_empty() {
+                        "-"
+                    } else {
+                        todo.notes.trim()
+                    }
+                )),
+                Line::from(format!("created: {}", format_full_local(todo.created_at))),
+                Line::from(format!("updated: {}", format_full_local(todo.updated_at))),
+                Line::from(format!(
+                    "completed: {}",
+                    todo.completed_at
+                        .map(format_full_local)
+                        .unwrap_or_else(|| String::from("-"))
+                )),
+                Line::from(format!("id: {}", todo.todo_id)),
+                Line::from(String::new()),
+            ];
+            if effective_repo.is_some() {
+                lines.push(Line::from("u open repo  Esc/Enter/Left close"));
+            } else {
+                lines.push(Line::from("Esc/Enter/Left close"));
+            }
+            lines
+        } else {
+            vec![
+                Line::from(format!("No todos in session {}", snapshot.session.name)),
+                Line::from(String::new()),
+                Line::from("Esc/Enter/Left close"),
+            ]
+        }
+    }
+
+    fn details_repo_hitbox(&self) -> Option<Rect> {
+        let repo = self
+            .current_todo()
+            .and_then(|todo| self.current_todo_repo_details(todo).0);
+        repo_hitbox(
+            centered_rect(self.viewport_area, 60, 12),
+            2,
+            repo.as_deref(),
+        )
+    }
 }
 
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
@@ -1275,6 +1344,7 @@ mod tests {
     use crate::domain::pomodoro::{PomodoroKind, PomodoroState};
     use crate::domain::revision::RevisionMode;
     use crate::domain::todo::TodoStatus;
+    use crate::tui::browser::{reset_test_browser, take_test_browser_opened_urls};
     use crate::tui::widgets::todo_list::{
         TodoClickTarget, TodoSection, split_todo_list_area, todo_click_target, todo_status_label,
         todo_time_label,
@@ -2024,6 +2094,71 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(screen.overlay, Some(Overlay::Details)));
+    }
+
+    #[test]
+    fn session_u_shortcut_opens_effective_repo_preferring_todo_repo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.snapshot().todos[0].clone();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                &first_todo.notes,
+                Some("SakanaAI/todui-keymove"),
+                1_711_275_901,
+            )
+            .expect("set todo repo");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('u')))
+            .expect("open repo");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/sakanaai/todui-keymove")]
+        );
+    }
+
+    #[test]
+    fn session_clicks_repo_in_details_overlay_with_session_fallback() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitbox = screen.details_repo_hitbox().expect("repo hitbox");
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click repo");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/openai/codex")]
+        );
     }
 
     #[test]
