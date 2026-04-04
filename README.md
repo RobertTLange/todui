@@ -1,4 +1,6 @@
-<h1 align="center">todui</h1>
+<p align="center">
+  <img src="docs/logo.png" alt="todui logo" width="320" />
+</p>
 
 <p align="center">
   Local-first terminal todo sessions with a full-screen TUI, immutable revisions, and SQLite persistence.
