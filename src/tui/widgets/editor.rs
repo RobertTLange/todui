@@ -26,31 +26,28 @@ pub struct EditorView<'a> {
 }
 
 pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
-    let mut lines = vec![Line::from(format!(
-        "{}: {}",
+    let mut lines = field_lines(
         view.primary_label,
-        display_field(
-            view.primary_value,
-            matches!(view.focused_field, EditorField::Primary)
-        )
-    ))];
+        view.primary_value,
+        matches!(view.focused_field, EditorField::Primary),
+    );
 
     if let (Some(label), Some(value)) = (view.secondary_label, view.secondary_value) {
         lines.push(Line::from(String::new()));
-        lines.push(Line::from(format!(
-            "{}: {}",
+        lines.extend(field_lines(
             label,
-            display_field(value, matches!(view.focused_field, EditorField::Secondary))
-        )));
+            value,
+            matches!(view.focused_field, EditorField::Secondary),
+        ));
     }
 
     if let (Some(label), Some(value)) = (view.tertiary_label, view.tertiary_value) {
         lines.push(Line::from(String::new()));
-        lines.push(Line::from(format!(
-            "{}: {}",
+        lines.extend(field_lines(
             label,
-            display_field(value, matches!(view.focused_field, EditorField::Tertiary))
-        )));
+            value,
+            matches!(view.focused_field, EditorField::Tertiary),
+        ));
     }
 
     lines.push(Line::from(String::new()));
@@ -79,6 +76,17 @@ fn display_field(value: &str, focused: bool) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn field_lines(label: &str, value: &str, focused: bool) -> Vec<Line<'static>> {
+    let display = display_field(value, focused);
+    let mut display_lines = display.lines();
+    let first = display_lines.next().unwrap_or_default();
+    let continuation_indent = " ".repeat(label.chars().count() + 2);
+
+    let mut lines = vec![Line::from(format!("{label}: {first}"))];
+    lines.extend(display_lines.map(|line| Line::from(format!("{continuation_indent}{line}"))));
+    lines
 }
 
 #[cfg(test)]
@@ -122,6 +130,38 @@ mod tests {
         assert!(text.contains("Notes: cover TUI"));
         assert!(text.contains("Repo: @sakanaai/todui-keymove|"));
         assert!(text.contains("Todo title is required"));
+    }
+
+    #[test]
+    fn editor_renders_multiline_field_values_with_cursor_on_next_line() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    render_editor(
+                        &Theme::default(),
+                        EditorView {
+                            title: "New Todo",
+                            primary_label: "Title",
+                            primary_value: "Draft spec",
+                            secondary_label: Some("Notes"),
+                            secondary_value: Some("first line\nsecond line"),
+                            tertiary_label: None,
+                            tertiary_value: None,
+                            focused_field: EditorField::Secondary,
+                            error: None,
+                            footer_hint: "Enter save  Esc cancel",
+                        },
+                    ),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("Notes: first line"));
+        assert!(text.contains("       second line|"));
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
