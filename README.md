@@ -89,6 +89,7 @@ cp config.example.toml ~/.config/todui/config.toml
 - `q` / `Esc`: close overlay or quit
 
 ## Verification
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
