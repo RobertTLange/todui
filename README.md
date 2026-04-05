@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="todui logo" width="320" />
+  <img src="docs/logo.png" alt="todui logo" width="240" height="240" />
 </p>
 
 <p align="center">
