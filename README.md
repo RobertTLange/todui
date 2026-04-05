@@ -2,6 +2,8 @@
   <img src="docs/logo.png" alt="todui logo" width="240" height="240" />
 </p>
 
+<h1 align="center">todui</h1>
+
 <p align="center">
   Local-first terminal todo sessions with a full-screen TUI, immutable revisions, and SQLite persistence.
 </p>
@@ -87,6 +89,11 @@ cp config.example.toml ~/.config/todui/config.toml
 - `r`: return from a revision to the live head
 - `m`: edit overview notes
 - `q` / `Esc`: close overlay or quit
+
+## Skills
+
+- [Project Build skill](skills/project-build/SKILL.md)
+- [Project Plan skill](skills/project-plan/SKILL.md)
 
 ## Verification
 
