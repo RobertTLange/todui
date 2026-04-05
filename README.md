@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="todui logo" width="240" height="240" />
+</p>
+
 <h1 align="center">todui</h1>
 
 <p align="center">
@@ -90,11 +94,9 @@ cp config.example.toml ~/.config/todui/config.toml
 
 - [Configuration example](config.example.toml)
 - [Development and release workflow](docs/development.md)
-- [Implementation notes](docs/documentation.md)
-- [Product spec](docs/spec.md)
+- [Agent workflow notes](docs/agent-features.md)
 
 ## Verification
-
 ```bash
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
