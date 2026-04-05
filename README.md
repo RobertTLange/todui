@@ -88,13 +88,6 @@ cp config.example.toml ~/.config/todui/config.toml
 - `m`: edit overview notes
 - `q` / `Esc`: close overlay or quit
 
-## Docs
-
-- [Configuration example](config.example.toml)
-- [Development and release workflow](docs/development.md)
-- [Implementation notes](docs/documentation.md)
-- [Product spec](docs/spec.md)
-
 ## Verification
 
 ```bash
