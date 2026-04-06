@@ -23,7 +23,7 @@ use crate::tui::input::resolved_text_char;
 use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
-use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
+use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
@@ -842,6 +842,8 @@ impl SessionScreen {
                 secondary_value: Some(&self.todo_editor.notes),
                 tertiary_label: Some("Repo"),
                 tertiary_value: Some(&self.todo_editor.repo),
+                tertiary_value_style: (!self.todo_editor.repo.is_empty())
+                    .then_some(repo_value_style(&self.theme)),
                 focused_field: self.todo_editor.focused_field,
                 error: self.todo_editor.error.as_deref(),
                 footer_hint: self.todo_editor_footer_hint(),

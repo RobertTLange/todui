@@ -845,6 +845,7 @@ impl OverviewScreen {
                 secondary_value,
                 tertiary_label,
                 tertiary_value,
+                tertiary_value_style: None,
                 focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
                 footer_hint,
