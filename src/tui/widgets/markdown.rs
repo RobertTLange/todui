@@ -558,14 +558,21 @@ struct UrlMatch<'a> {
 }
 
 fn parse_url_prefix(source: &str) -> Option<UrlMatch<'_>> {
-    let candidate = if source.starts_with("https://") || source.starts_with("http://") {
-        source
-            .find(char::is_whitespace)
-            .map(|index| &source[..index])
-            .unwrap_or(source)
+    let protocol_len = if source.starts_with("https://") {
+        "https://".len()
+    } else if source.starts_with("http://") {
+        "http://".len()
     } else {
         return None;
     };
+
+    let raw_candidate = source
+        .find(char::is_whitespace)
+        .map(|index| &source[..index])
+        .unwrap_or(source);
+    let candidate = nested_protocol_index(raw_candidate, protocol_len)
+        .map(|index| &raw_candidate[..index])
+        .unwrap_or(raw_candidate);
 
     let visible = candidate.trim_end_matches(is_trailing_url_punctuation);
     if visible == "https://" || visible == "http://" {
@@ -577,6 +584,13 @@ fn parse_url_prefix(source: &str) -> Option<UrlMatch<'_>> {
         trailing: &candidate[visible.len()..],
         consumed: candidate.len(),
     })
+}
+
+fn nested_protocol_index(source: &str, start: usize) -> Option<usize> {
+    min_index(
+        source[start..].find("https://").map(|index| index + start),
+        source[start..].find("http://").map(|index| index + start),
+    )
 }
 
 fn is_trailing_url_punctuation(character: char) -> bool {
@@ -672,6 +686,28 @@ mod tests {
                 .map(|link| link.url.as_str())
                 .collect::<Vec<_>>(),
             vec!["https://example.com", "https://openai.com"]
+        );
+    }
+
+    #[test]
+    fn splits_adjacent_protocol_urls_into_distinct_links() {
+        let theme = Theme::default();
+        let rendered = render_markdown(
+            &theme,
+            "https://yalefds.swoogo.com/aiforscientificdiscoveryhttps://www.algorithmdiscovery.org/",
+            120,
+        );
+
+        assert_eq!(
+            rendered
+                .links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://yalefds.swoogo.com/aiforscientificdiscovery",
+                "https://www.algorithmdiscovery.org/",
+            ]
         );
     }
 
