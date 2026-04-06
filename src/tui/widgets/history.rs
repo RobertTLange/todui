@@ -108,7 +108,9 @@ pub(crate) fn derive_session_history_events(
 pub(crate) fn session_history_panel(
     theme: &Theme,
     events: &[SessionHistoryEvent],
+    width: u16,
 ) -> Paragraph<'static> {
+    let inner_width = usize::from(width.saturating_sub(2));
     let text = if events.is_empty() {
         Text::from(vec![
             Line::from("No note history yet."),
@@ -119,16 +121,30 @@ pub(crate) fn session_history_panel(
         Text::from(
             events
                 .iter()
-                .map(|event| {
-                    Line::from(vec![
-                        Span::styled(
-                            format_full_local(event.timestamp),
-                            theme.text_style(TextTone::Muted),
-                        ),
-                        Span::raw(" - "),
-                        Span::styled(event.kind.label(), theme.text_style(event.kind.text_tone())),
-                        Span::raw(format!(" {}", single_line_title(&event.title))),
-                    ])
+                .flat_map(|event| {
+                    let timestamp = format_full_local(event.timestamp);
+                    let first_rest = format!(" - {}", event.kind.label());
+                    let title = normalized_single_line(&event.title);
+                    let title_text = if title.is_empty() {
+                        "-"
+                    } else {
+                        title.as_str()
+                    };
+                    let second = truncate_with_ellipsis(&format!("  {title_text}"), inner_width);
+
+                    vec![
+                        Line::from(vec![
+                            Span::styled(timestamp.clone(), theme.text_style(TextTone::Muted)),
+                            Span::styled(
+                                truncate_with_ellipsis(
+                                    &first_rest,
+                                    inner_width.saturating_sub(timestamp.chars().count()),
+                                ),
+                                theme.text_style(event.kind.text_tone()),
+                            ),
+                        ]),
+                        Line::from(Span::styled(second, theme.text_style(TextTone::Default))),
+                    ]
                 })
                 .collect::<Vec<_>>(),
         )
@@ -172,8 +188,21 @@ fn normalized_single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn single_line_title(title: &str) -> String {
-    normalized_single_line(title)
+fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let truncated = text.chars().take(max_chars - 3).collect::<String>();
+    format!("{truncated}...")
 }
 
 #[cfg(test)]

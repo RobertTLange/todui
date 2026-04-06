@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
+use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
@@ -731,7 +731,7 @@ impl SessionScreen {
         );
         if let Some(history_area) = body_areas.history {
             frame.render_widget(
-                render_session_history_panel(&self.theme, &self.history_events),
+                render_session_history_panel(&self.theme, &self.history_events, history_area.width),
                 history_area,
             );
         }
@@ -857,7 +857,7 @@ impl SessionScreen {
 
     fn body_areas(&self, area: Rect) -> SessionBodyAreas {
         let layout = self.layout_for_area(area);
-        if matches!(layout.mode, LayoutMode::Wide) {
+        if layout.list.width >= 90 {
             let columns = Layout::horizontal([
                 Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
                 Constraint::Percentage(SESSION_HISTORY_PERCENT),
@@ -2427,8 +2427,9 @@ mod tests {
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
         assert!(wide.contains("History"));
-        assert!(wide.contains("Added Review bindings"));
-        assert!(wide.contains("Added Draft spec"));
+        assert!(wide.contains(" - Added"));
+        assert!(wide.contains("  Review bindings"));
+        assert!(wide.contains("  Draft spec"));
         assert!(!wide.contains("Details"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
@@ -2438,7 +2439,7 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
-        assert!(!medium.contains("Added Review bindings"));
+        assert!(!medium.contains("  Review bindings"));
         assert!(!medium.contains("Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2511,18 +2512,56 @@ mod tests {
         screen.reload(&database).expect("reload");
 
         let wide = render_buffer(&screen, 120, 24);
-        assert!(wide.contains("Added Feed UI"));
-        assert!(wide.contains("Edited Feed UI"));
-        assert!(wide.contains("Completed Feed UI"));
-        assert!(wide.contains("Reopened Feed UI"));
-        assert!(wide.contains("Deleted Feed UI"));
+        assert!(wide.contains(" - Added"));
+        assert!(wide.contains(" - Edited"));
+        assert!(wide.contains(" - Completed"));
+        assert!(wide.contains(" - Reopened"));
+        assert!(wide.contains(" - Deleted"));
+        assert!(wide.contains("  Feed UI"));
 
         screen.revision = Some(6);
         screen.reload(&database).expect("reload historical");
         let historical = render_buffer(&screen, 120, 24);
-        assert!(historical.contains("Completed Feed UI"));
-        assert!(!historical.contains("Reopened Feed UI"));
-        assert!(!historical.contains("Deleted Feed UI"));
+        assert!(historical.contains(" - Completed"));
+        assert!(!historical.contains(" - Reopened"));
+        assert!(!historical.contains(" - Deleted"));
+    }
+
+    #[test]
+    fn session_history_panel_appears_at_same_ninety_column_threshold_as_overview() {
+        let (_directory, _database, screen) = seeded_screen();
+
+        let at_threshold = render_buffer(&screen, 90, 24);
+        assert!(at_threshold.contains("History"));
+
+        let below_threshold = render_buffer(&screen, 89, 24);
+        assert!(!below_threshold.contains("History"));
+    }
+
+    #[test]
+    fn wide_history_panel_renders_indented_truncated_title_preview() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .add_todo(
+                &screen.session_name,
+                "Feed title preview should be truncated because the history panel is narrow",
+                "",
+                None,
+                1_711_275_900,
+            )
+            .expect("todo");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&screen, 90, 24);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        let added_index = lines
+            .iter()
+            .position(|line| line.contains(" - Added"))
+            .expect("added event line");
+        let title_line = lines.get(added_index + 1).expect("title preview line");
+
+        assert!(title_line.contains("Feed title preview"));
+        assert!(title_line.contains("..."));
     }
 
     #[test]
