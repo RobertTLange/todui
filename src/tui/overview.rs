@@ -25,7 +25,7 @@ use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
-use crate::tui::widgets::markdown::render_markdown;
+use crate::tui::widgets::markdown::{link_hitboxes, render_markdown};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
@@ -536,6 +536,14 @@ impl OverviewScreen {
                     self.open_selected_session_repo();
                     return None;
                 }
+                if let Some(hitbox) = self
+                    .notes_link_hitboxes()
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+                {
+                    self.open_note_url(&hitbox.url);
+                    return None;
+                }
                 let list_area = self.list_area(self.last_area);
                 if rect_contains(list_area, mouse.column, mouse.row)
                     && let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
@@ -717,11 +725,7 @@ impl OverviewScreen {
                 Line::from("Press m to edit overview notes."),
             ])
         } else {
-            render_markdown(
-                &self.theme,
-                &self.overview_notes,
-                area.width.saturating_sub(2),
-            )
+            self.rendered_notes(area).text
         };
 
         Paragraph::new(content)
@@ -977,6 +981,14 @@ impl OverviewScreen {
 
     fn list_area(&self, area: Rect) -> Rect {
         self.body_areas(self.root_chunks(area)[1]).list
+    }
+
+    fn rendered_notes(&self, area: Rect) -> crate::tui::widgets::markdown::RenderedTextBlock {
+        render_markdown(
+            &self.theme,
+            &self.overview_notes,
+            area.width.saturating_sub(2),
+        )
     }
 
     fn body_areas(&self, body: Rect) -> OverviewBodyAreas {
@@ -1416,6 +1428,16 @@ impl OverviewScreen {
         repo_hitbox(body.details?, 2, self.selected_session_repo())
     }
 
+    fn notes_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        if self.overview_notes.trim().is_empty() || self.last_area.height == 0 {
+            return Vec::new();
+        }
+
+        let notes_area = self.body_areas(self.root_chunks(self.last_area)[1]).notes;
+        let rendered = self.rendered_notes(notes_area);
+        link_hitboxes(notes_area, &rendered.links)
+    }
+
     fn session_metadata_repo_hitbox(&self) -> Option<Rect> {
         repo_hitbox(
             centered_rect(self.last_area, 60, 21),
@@ -1436,6 +1458,12 @@ impl OverviewScreen {
             Err(error) => {
                 self.set_toast(format!("Failed to open repo: {error}"), ToastTone::Warning)
             }
+        }
+    }
+
+    fn open_note_url(&mut self, url: &str) {
+        if let Err(error) = browser::open_url(url) {
+            self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
         }
     }
 
@@ -2613,6 +2641,61 @@ mod tests {
             take_test_browser_opened_urls(),
             vec![String::from("https://github.com/sakanaai/todui-keymove")]
         );
+    }
+
+    #[test]
+    fn overview_clicks_detected_url_in_general_notes() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("Plan: https://example.com/docs.")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitbox = screen
+            .notes_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x,
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/docs")]
+        );
+    }
+
+    #[test]
+    fn overview_ignores_clicks_outside_general_notes_url_span() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("Plan: https://example.com/docs.")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitbox = screen
+            .notes_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x.saturating_sub(1),
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert!(take_test_browser_opened_urls().is_empty());
     }
 
     #[test]

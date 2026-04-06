@@ -25,6 +25,7 @@ use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::markdown::{link_hitboxes, render_labeled_text};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
     GroupedTodos, TodoClickTarget, TodoSection, section_state, section_visible_rows,
@@ -503,6 +504,13 @@ impl SessionScreen {
                     .is_some_and(|hitbox| rect_contains(hitbox, mouse.column, mouse.row))
             {
                 self.open_current_todo_repo();
+            } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(hitbox) = self
+                    .details_note_link_hitboxes()
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+            {
+                self.open_note_url(&hitbox.url);
             }
             return Ok(());
         }
@@ -709,7 +717,7 @@ impl SessionScreen {
         if matches!(self.overlay, Some(Overlay::Details)) {
             let area = self.details_overlay_area(frame.area(), snapshot);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.details_panel(snapshot), area);
+            frame.render_widget(self.details_panel(snapshot, area.width), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
             let area = centered_rect(frame.area(), 60, 16);
@@ -811,18 +819,21 @@ impl SessionScreen {
         split_screen(area, self.top_bar_height(), self.active_footer_height())
     }
 
-    fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
-        Paragraph::new(Text::from(self.details_lines(snapshot)))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Details")
-                    .style(self.theme.surface_style(SurfaceTone::Neutral))
-                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
-                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
-            )
-            .style(self.theme.surface_style(SurfaceTone::Neutral))
+    fn details_panel(&self, snapshot: &SessionSnapshot, width: u16) -> Paragraph<'static> {
+        Paragraph::new(
+            self.rendered_details(snapshot, width.saturating_sub(2))
+                .text,
+        )
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Details")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn help_overlay(&self) -> Paragraph<'static> {
@@ -1278,7 +1289,11 @@ impl SessionScreen {
         }
     }
 
-    fn details_lines(&self, snapshot: &SessionSnapshot) -> Vec<Line<'static>> {
+    fn rendered_details(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+    ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
             let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
             let mut lines = vec![
@@ -1294,14 +1309,26 @@ impl SessionScreen {
                 repo_line(&self.theme, effective_repo.as_deref()),
                 Line::from(format!("repo source: {repo_source}")),
             ];
-            lines.extend(multiline_details_field_lines(
+            let rendered_notes = render_labeled_text(
+                &self.theme,
                 "notes",
                 if todo.notes.trim().is_empty() {
                     "-"
                 } else {
                     todo.notes.trim()
                 },
-            ));
+                width,
+            );
+            let note_line_offset = lines.len() as u16;
+            let mut links = rendered_notes
+                .links
+                .into_iter()
+                .map(|mut link| {
+                    link.line_index += note_line_offset;
+                    link
+                })
+                .collect::<Vec<_>>();
+            lines.extend(rendered_notes.text.lines);
             lines.extend([
                 Line::from(format!("created: {}", format_full_local(todo.created_at))),
                 Line::from(format!("updated: {}", format_full_local(todo.updated_at))),
@@ -1319,13 +1346,20 @@ impl SessionScreen {
             } else {
                 lines.push(Line::from("Esc/Enter/Left close"));
             }
-            lines
+            links.shrink_to_fit();
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(lines),
+                links,
+            }
         } else {
-            vec![
-                Line::from(format!("No todos in session {}", snapshot.session.name)),
-                Line::from(String::new()),
-                Line::from("Esc/Enter/Left close"),
-            ]
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(vec![
+                    Line::from(format!("No todos in session {}", snapshot.session.name)),
+                    Line::from(String::new()),
+                    Line::from("Esc/Enter/Left close"),
+                ]),
+                links: Vec::new(),
+            }
         }
     }
 
@@ -1340,9 +1374,23 @@ impl SessionScreen {
         )
     }
 
+    fn details_note_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        let area = self.details_overlay_area(self.viewport_area, self.snapshot());
+        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2));
+        link_hitboxes(area, &rendered.links)
+    }
+
     fn details_overlay_area(&self, area: Rect, snapshot: &SessionSnapshot) -> Rect {
-        let height = self.details_lines(snapshot).len().saturating_add(2).max(12) as u16;
+        let overlay_width = centered_rect(area, 60, 1).width;
+        let rendered = self.rendered_details(snapshot, overlay_width.saturating_sub(2));
+        let height = rendered.text.lines.len().saturating_add(2).max(12) as u16;
         centered_rect(area, 60, height)
+    }
+
+    fn open_note_url(&mut self, url: &str) {
+        if let Err(error) = browser::open_url(url) {
+            self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
+        }
     }
 }
 
@@ -1356,16 +1404,6 @@ fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
 
 fn clamp_scroll_offset(offset: usize, total_rows: usize, visible_rows: usize) -> usize {
     total_rows.saturating_sub(visible_rows).min(offset)
-}
-
-fn multiline_details_field_lines(label: &str, value: &str) -> Vec<Line<'static>> {
-    let mut value_lines = value.lines();
-    let first = value_lines.next().unwrap_or_default();
-    let continuation_indent = " ".repeat(label.chars().count() + 2);
-
-    let mut lines = vec![Line::from(format!("{label}: {first}"))];
-    lines.extend(value_lines.map(|line| Line::from(format!("{continuation_indent}{line}"))));
-    lines
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -2380,6 +2418,87 @@ mod tests {
             take_test_browser_opened_urls(),
             vec![String::from("https://github.com/openai/codex")]
         );
+    }
+
+    #[test]
+    fn session_clicks_detected_url_in_details_notes() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitbox = screen
+            .details_note_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/spec")]
+        );
+    }
+
+    #[test]
+    fn session_ignores_clicks_outside_details_note_url_span() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitbox = screen
+            .details_note_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hitbox.x.saturating_sub(1),
+                    hitbox.y,
+                ),
+            )
+            .expect("click outside note link");
+
+        assert!(take_test_browser_opened_urls().is_empty());
     }
 
     #[test]
