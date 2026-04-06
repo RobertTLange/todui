@@ -2225,6 +2225,65 @@ mod tests {
     }
 
     #[test]
+    fn overview_details_preview_shows_first_ten_open_todos_then_overflow_count() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        for index in 1..=10 {
+            database
+                .add_todo(
+                    "writing-sprint",
+                    &format!("Overflow {index:02}"),
+                    "",
+                    None,
+                    1_711_275_920 + i64::from(index),
+                )
+                .expect("todo");
+        }
+
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let metadata = lines_to_string(
+            &screen
+                .selected_session_metadata_lines(10, 58)
+                .expect("metadata lines"),
+        );
+
+        assert!(metadata.contains("Draft spec"));
+        assert!(metadata.contains("Overflow 09"));
+        assert!(!metadata.contains("Overflow 10"));
+        assert!(metadata.contains("... and 1 more"));
+    }
+
+    #[test]
+    fn overview_details_preview_truncates_long_open_todo_to_single_row() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 92, 24);
+        database
+            .add_todo(
+                "writing-sprint",
+                "very-long-details-preview-title-abcdefghijklmnopqrstuvwxyz-suffix-hidden-1234567890",
+                "",
+                None,
+                1_711_275_920,
+            )
+            .expect("todo");
+
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let buffer = render_buffer(&mut screen, 92, 24);
+
+        assert!(buffer.contains("very-long-details-preview"));
+        assert!(buffer.contains("..."));
+        assert!(!buffer.contains("suffix-hidden-1234567890"));
+    }
+
+    #[test]
     fn overview_layout_uses_forty_forty_twenty_split() {
         let (_directory, _database, screen) = seeded_overview_screen();
         let body = screen.body_areas(Rect::new(0, 0, 80, 20));
