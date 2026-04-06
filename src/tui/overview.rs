@@ -36,6 +36,9 @@ const DONE_COLUMN_WIDTH: usize = 5;
 const LAST_OPENED_COLUMN_WIDTH: usize = 11;
 const SESSION_COLUMN_SPACING: usize = 5;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
+const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
+const SESSION_METADATA_WIDTH: u16 = 60;
+const SESSION_METADATA_HEIGHT: u16 = 21;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
@@ -576,7 +579,7 @@ impl OverviewScreen {
             frame.render_widget(self.notes_panel(body_areas.notes), body_areas.notes);
             frame.render_widget(self.summary_panel(), body_areas.summary);
             if let Some(details_area) = body_areas.details {
-                frame.render_widget(self.details_panel(), details_area);
+                frame.render_widget(self.details_panel(details_area), details_area);
             }
         }
 
@@ -595,7 +598,11 @@ impl OverviewScreen {
             frame.render_widget(self.help_overlay(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionMetadata)) {
-            let area = centered_rect(frame.area(), 60, 21);
+            let area = centered_rect(
+                frame.area(),
+                SESSION_METADATA_WIDTH,
+                SESSION_METADATA_HEIGHT,
+            );
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_metadata_modal(), area);
         }
@@ -698,9 +705,12 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn details_panel(&self) -> Paragraph<'static> {
+    fn details_panel(&self, area: Rect) -> Paragraph<'static> {
         let text = self
-            .selected_session_metadata_lines(4)
+            .selected_session_metadata_lines(
+                OPEN_TODO_PREVIEW_MAX_ITEMS,
+                usize::from(area.width.saturating_sub(2)),
+            )
             .map(Text::from)
             .unwrap_or_else(|| Text::from("Select a session to inspect its summary."));
 
@@ -858,13 +868,23 @@ impl OverviewScreen {
     }
 
     fn session_metadata_modal(&self) -> Paragraph<'static> {
-        let mut lines = self.selected_session_metadata_lines(4).unwrap_or_else(|| {
-            vec![
-                Line::from("Select a session to inspect its summary."),
-                Line::from(String::new()),
-                Line::from("Esc close"),
-            ]
-        });
+        let modal_area = centered_rect(
+            self.last_area,
+            SESSION_METADATA_WIDTH,
+            SESSION_METADATA_HEIGHT,
+        );
+        let mut lines = self
+            .selected_session_metadata_lines(
+                OPEN_TODO_PREVIEW_MAX_ITEMS,
+                usize::from(modal_area.width.saturating_sub(2)),
+            )
+            .unwrap_or_else(|| {
+                vec![
+                    Line::from("Select a session to inspect its summary."),
+                    Line::from(String::new()),
+                    Line::from("Esc close"),
+                ]
+            });
         if self.selected_session_repo().is_some() {
             lines.push(Line::from(String::new()));
             lines.push(Line::from("u open repo  Esc close"));
@@ -1374,7 +1394,11 @@ impl OverviewScreen {
             .sum()
     }
 
-    fn selected_session_metadata_lines(&self, max_open_todos: usize) -> Option<Vec<Line<'static>>> {
+    fn selected_session_metadata_lines(
+        &self,
+        max_open_todos: usize,
+        inner_width: usize,
+    ) -> Option<Vec<Line<'static>>> {
         self.sessions.get(self.selected_index).map(|session| {
             let mut lines = vec![
                 Line::from(format!("session: {}", session.name)),
@@ -1399,6 +1423,7 @@ impl OverviewScreen {
                 &self.theme,
                 self.selected_session_open_todos().unwrap_or(&[]),
                 max_open_todos,
+                inner_width,
             ));
             lines.push(Line::from(String::new()));
             lines.push(Line::from(
@@ -1440,7 +1465,11 @@ impl OverviewScreen {
 
     fn session_metadata_repo_hitbox(&self) -> Option<Rect> {
         repo_hitbox(
-            centered_rect(self.last_area, 60, 21),
+            centered_rect(
+                self.last_area,
+                SESSION_METADATA_WIDTH,
+                SESSION_METADATA_HEIGHT,
+            ),
             2,
             self.selected_session_repo(),
         )
@@ -1615,7 +1644,12 @@ fn empty_todo_preview_line(theme: &Theme, inner_width: usize) -> Line<'static> {
     ))
 }
 
-fn session_open_todo_lines(theme: &Theme, todos: &[Todo], max_items: usize) -> Vec<Line<'static>> {
+fn session_open_todo_lines(
+    theme: &Theme,
+    todos: &[Todo],
+    max_items: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "open todo list:",
         theme.text_style(TextTone::Meta),
@@ -1632,13 +1666,16 @@ fn session_open_todo_lines(theme: &Theme, todos: &[Todo], max_items: usize) -> V
     let visible_count = todos.len().min(max_items);
     lines.extend(todos.iter().take(visible_count).map(|todo| {
         Line::from(Span::styled(
-            format!("  [ ] {}", todo.title),
+            fit_cell_with_ellipsis(&format!("  [ ] {}", todo.title), inner_width),
             theme.text_style(TextTone::Focus),
         ))
     }));
     if todos.len() > visible_count {
         lines.push(Line::from(Span::styled(
-            format!("  ... and {} more", todos.len() - visible_count),
+            fit_cell_with_ellipsis(
+                &format!("  ... and {} more", todos.len() - visible_count),
+                inner_width,
+            ),
             theme.text_style(TextTone::Muted),
         )));
     }
@@ -1669,6 +1706,25 @@ fn fit_cell(text: &str, width: usize) -> String {
     let mut value = text.chars().take(width).collect::<String>();
     let padding = width.saturating_sub(value.chars().count());
     value.push_str(&" ".repeat(padding));
+    value
+}
+
+fn fit_cell_with_ellipsis(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let char_count = text.chars().count();
+    if char_count <= width {
+        return fit_cell(text, width);
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let mut value = text.chars().take(width - 3).collect::<String>();
+    value.push_str("...");
     value
 }
 
@@ -2149,7 +2205,7 @@ mod tests {
 
         let metadata = lines_to_string(
             &screen
-                .selected_session_metadata_lines(4)
+                .selected_session_metadata_lines(10, 58)
                 .expect("metadata lines"),
         );
 
