@@ -5,7 +5,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -20,11 +20,15 @@ use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{centered_rect, split_screen};
+use crate::tui::layout::{LayoutMode, centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
 use crate::tui::widgets::editor::{EditorField, EditorView, editor_height, render_editor};
+use crate::tui::widgets::history::{
+    RevisionTodoSnapshot, SessionHistoryEvent, derive_session_history_events,
+    session_history_panel as render_session_history_panel,
+};
 use crate::tui::widgets::markdown::{link_hitboxes, render_labeled_text};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
@@ -33,6 +37,8 @@ use crate::tui::widgets::todo_list::{
 };
 
 const EVENT_POLL_MS: u64 = 250;
+const SESSION_TODO_LIST_PERCENT: u16 = 64;
+const SESSION_HISTORY_PERCENT: u16 = 36;
 
 pub fn run(
     database: &mut Database,
@@ -156,6 +162,7 @@ struct SessionScreen {
     revision: Option<u32>,
     snapshot: Option<SessionSnapshot>,
     revisions: Vec<RevisionSummary>,
+    history_events: Vec<SessionHistoryEvent>,
     active_run: Option<PomodoroRun>,
     head_token: Option<SessionHeadToken>,
     selected_index: usize,
@@ -171,6 +178,12 @@ struct SessionScreen {
     config: Config,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionBodyAreas {
+    list: Rect,
+    history: Option<Rect>,
+}
+
 impl SessionScreen {
     fn new(session_name: String, revision: Option<u32>, config: Config) -> Self {
         Self {
@@ -178,6 +191,7 @@ impl SessionScreen {
             revision,
             snapshot: None,
             revisions: Vec::new(),
+            history_events: Vec::new(),
             active_run: None,
             head_token: None,
             selected_index: 0,
@@ -197,7 +211,9 @@ impl SessionScreen {
     fn reload(&mut self, database: &Database) -> Result<()> {
         let selected_todo_id = self.current_todo().map(|todo| todo.todo_id);
         let snapshot = database.load_snapshot(&self.session_name, self.revision)?;
-        self.revisions = database.list_revisions(&self.session_name)?;
+        let revisions = database.list_revisions(&self.session_name)?;
+        self.history_events = self.load_history_events(database, &revisions)?;
+        self.revisions = revisions;
         if self.is_read_only_snapshot(&snapshot) {
             self.active_run = None;
         } else {
@@ -539,8 +555,7 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
-                let layout = self.layout_for_area(area);
-                let list_areas = split_todo_list_area(layout.list);
+                let list_areas = split_todo_list_area(self.list_area(area));
                 if let Some(target) = todo_click_target(
                     list_areas,
                     self.open_scroll_offset,
@@ -683,8 +698,9 @@ impl SessionScreen {
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let snapshot = self.snapshot();
         let layout = self.layout_for_area(frame.area());
+        let body_areas = self.body_areas(frame.area());
         let grouped = self.grouped_todos();
-        let list_areas = split_todo_list_area(layout.list);
+        let list_areas = split_todo_list_area(body_areas.list);
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
@@ -713,6 +729,12 @@ impl SessionScreen {
             list_areas.completed,
             &mut self.completed_list_state(),
         );
+        if let Some(history_area) = body_areas.history {
+            frame.render_widget(
+                render_session_history_panel(&self.theme, &self.history_events),
+                history_area,
+            );
+        }
         if let Some(footer_area) = layout.footer
             && let Some(run) = self.active_run.as_ref()
         {
@@ -831,6 +853,26 @@ impl SessionScreen {
 
     fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
         split_screen(area, self.top_bar_height(), self.active_footer_height())
+    }
+
+    fn body_areas(&self, area: Rect) -> SessionBodyAreas {
+        let layout = self.layout_for_area(area);
+        if matches!(layout.mode, LayoutMode::Wide) {
+            let columns = Layout::horizontal([
+                Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
+                Constraint::Percentage(SESSION_HISTORY_PERCENT),
+            ])
+            .split(layout.list);
+            SessionBodyAreas {
+                list: columns[0],
+                history: Some(columns[1]),
+            }
+        } else {
+            SessionBodyAreas {
+                list: layout.list,
+                history: None,
+            }
+        }
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot, width: u16) -> Paragraph<'static> {
@@ -997,7 +1039,7 @@ impl SessionScreen {
 
     fn page_size(&self) -> usize {
         let grouped = self.grouped_todos();
-        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        let areas = split_todo_list_area(self.list_area(self.viewport_area));
         match grouped.section_row_for_flat_index(self.selected_index) {
             Some((TodoSection::Completed, _)) => section_visible_rows(areas.completed),
             _ => section_visible_rows(areas.open),
@@ -1005,7 +1047,7 @@ impl SessionScreen {
     }
 
     fn ensure_selection_visible(&mut self) {
-        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        let areas = split_todo_list_area(self.list_area(self.viewport_area));
         let open_rows = section_visible_rows(areas.open);
         let completed_rows = section_visible_rows(areas.completed);
         let (open_len, completed_len, selected_section_row) = {
@@ -1399,6 +1441,32 @@ impl SessionScreen {
         let rendered = self.rendered_details(snapshot, overlay_width.saturating_sub(2));
         let height = rendered.text.lines.len().saturating_add(2).max(12) as u16;
         centered_rect(area, 60, height)
+    }
+
+    fn list_area(&self, area: Rect) -> Rect {
+        self.body_areas(area).list
+    }
+
+    fn load_history_events(
+        &self,
+        database: &Database,
+        revisions: &[RevisionSummary],
+    ) -> Result<Vec<SessionHistoryEvent>> {
+        let snapshots = revisions
+            .iter()
+            .filter(|revision| {
+                self.revision
+                    .is_none_or(|selected| revision.revision_number <= selected)
+            })
+            .map(|revision| {
+                Ok(RevisionTodoSnapshot {
+                    revision: revision.clone(),
+                    todos: database
+                        .get_revision_todos(&self.session_name, revision.revision_number)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(derive_session_history_events(&snapshots))
     }
 
     fn open_note_url(&mut self, url: &str) {
@@ -2358,6 +2426,9 @@ mod tests {
         assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(wide.contains("History"));
+        assert!(wide.contains("Added Review bindings"));
+        assert!(wide.contains("Added Draft spec"));
         assert!(!wide.contains("Details"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
@@ -2367,6 +2438,7 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
+        assert!(!medium.contains("Added Review bindings"));
         assert!(!medium.contains("Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2398,6 +2470,59 @@ mod tests {
         });
         let toast = render_buffer(&screen, 120, 24);
         assert!(toast.contains("Notice"));
+    }
+
+    #[test]
+    fn wide_history_panel_tracks_todo_lifecycle_and_respects_historical_revision() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let title = "Feed UI";
+        let todo = database
+            .add_todo(&screen.session_name, title, "", None, 1_711_275_900)
+            .expect("todo");
+        database
+            .update_todo(
+                todo.id,
+                Some(&screen.session_name),
+                title,
+                "with session revision feed",
+                None,
+                1_711_276_000,
+            )
+            .expect("edit");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&screen.session_name),
+                TodoStatus::Done,
+                1_711_276_100,
+            )
+            .expect("done");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&screen.session_name),
+                TodoStatus::Open,
+                1_711_276_200,
+            )
+            .expect("reopen");
+        database
+            .delete_todo(todo.id, Some(&screen.session_name), 1_711_276_300)
+            .expect("delete");
+        screen.reload(&database).expect("reload");
+
+        let wide = render_buffer(&screen, 120, 24);
+        assert!(wide.contains("Added Feed UI"));
+        assert!(wide.contains("Edited Feed UI"));
+        assert!(wide.contains("Completed Feed UI"));
+        assert!(wide.contains("Reopened Feed UI"));
+        assert!(wide.contains("Deleted Feed UI"));
+
+        screen.revision = Some(6);
+        screen.reload(&database).expect("reload historical");
+        let historical = render_buffer(&screen, 120, 24);
+        assert!(historical.contains("Completed Feed UI"));
+        assert!(!historical.contains("Reopened Feed UI"));
+        assert!(!historical.contains("Deleted Feed UI"));
     }
 
     #[test]
