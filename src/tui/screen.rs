@@ -134,6 +134,8 @@ struct TodoEditorState {
     title: String,
     notes: String,
     repo: String,
+    initial_repo_override: Option<String>,
+    repo_dirty: bool,
     focused_field: EditorField,
     error: Option<String>,
 }
@@ -403,14 +405,22 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Backspace => {
+                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
                 let field = self.focused_todo_field();
                 field.pop();
+                if repo_field {
+                    self.todo_editor.repo_dirty = true;
+                }
                 self.todo_editor.error = None;
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
                 let field = self.focused_todo_field();
                 field.push(resolved_text_char(&key, character));
+                if repo_field {
+                    self.todo_editor.repo_dirty = true;
+                }
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -1095,14 +1105,17 @@ impl SessionScreen {
             return;
         }
 
-        let Some((todo_id, title, notes, repo)) = self.current_todo().map(|todo| {
-            (
-                todo.todo_id,
-                todo.title.clone(),
-                todo.notes.clone(),
-                todo.repo.clone().unwrap_or_default(),
-            )
-        }) else {
+        let Some((todo_id, title, notes, repo, initial_repo_override)) =
+            self.current_todo().map(|todo| {
+                (
+                    todo.todo_id,
+                    todo.title.clone(),
+                    todo.notes.clone(),
+                    self.current_todo_repo_details(todo).0.unwrap_or_default(),
+                    todo.repo.clone(),
+                )
+            })
+        else {
             return;
         };
         self.todo_editor = TodoEditorState {
@@ -1110,8 +1123,10 @@ impl SessionScreen {
             title,
             notes,
             repo,
+            initial_repo_override,
             focused_field: EditorField::Primary,
             error: None,
+            repo_dirty: false,
         };
         self.overlay = Some(Overlay::TodoEditor);
     }
@@ -1182,12 +1197,20 @@ impl SessionScreen {
             return Ok(());
         }
 
+        let repo = match self.todo_editor.mode {
+            TodoEditorMode::Create => Some(self.todo_editor.repo.as_str()),
+            TodoEditorMode::Edit { .. } if self.todo_editor.repo_dirty => {
+                Some(self.todo_editor.repo.as_str())
+            }
+            TodoEditorMode::Edit { .. } => self.todo_editor.initial_repo_override.as_deref(),
+        };
+
         let saved = match self.todo_editor.mode {
             TodoEditorMode::Create => database.add_todo(
                 &self.session_name,
                 title,
                 self.todo_editor.notes.trim(),
-                Some(self.todo_editor.repo.as_str()),
+                repo,
                 now_utc_timestamp(),
             ),
             TodoEditorMode::Edit { todo_id } => database.update_todo(
@@ -1195,7 +1218,7 @@ impl SessionScreen {
                 Some(&self.session_name),
                 title,
                 self.todo_editor.notes.trim(),
-                Some(self.todo_editor.repo.as_str()),
+                repo,
                 now_utc_timestamp(),
             ),
         };
@@ -1896,6 +1919,90 @@ mod tests {
         assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
         assert_eq!(screen.todo_editor.title, "A");
         assert!(render_buffer(&screen, 120, 24).contains("Title: A|"));
+    }
+
+    #[test]
+    fn edit_todo_modal_shows_inherited_session_repo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+
+        assert!(render_buffer(&screen, 120, 24).contains("Repo: openai/codex"));
+    }
+
+    #[test]
+    fn edit_todo_preserves_inherited_session_repo_without_creating_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let todo_id = screen.current_todo().expect("selected").todo_id;
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(database.get_todo(todo_id).expect("todo").repo, None);
+    }
+
+    #[test]
+    fn edit_todo_can_replace_inherited_session_repo_with_explicit_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let todo_id = screen.current_todo().expect("selected").todo_id;
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+
+        for _ in 0..screen.todo_editor.repo.len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "SakanaAI/todui-keymove".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(
+            database.get_todo(todo_id).expect("todo").repo.as_deref(),
+            Some("sakanaai/todui-keymove")
+        );
     }
 
     #[test]
