@@ -602,7 +602,7 @@ impl OverviewScreen {
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 60, 11);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.session_editor_modal(), area);
+            frame.render_widget(self.session_editor_modal(area.width), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::GeneralNotesEditor)) {
             let area = centered_rect(frame.area(), NOTES_EDITOR_WIDTH, NOTES_EDITOR_HEIGHT);
@@ -729,7 +729,6 @@ impl OverviewScreen {
         };
 
         Paragraph::new(content)
-            .wrap(Wrap { trim: false })
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -806,7 +805,7 @@ impl OverviewScreen {
         .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn session_editor_modal(&self) -> Paragraph<'_> {
+    fn session_editor_modal(&self, width: u16) -> Paragraph<'_> {
         let (
             title,
             primary_label,
@@ -854,6 +853,7 @@ impl OverviewScreen {
                 error: self.session_editor.error.as_deref(),
                 footer_hint,
             },
+            width,
         )
     }
 
@@ -2696,6 +2696,33 @@ mod tests {
 
         assert!(exit.is_none());
         assert!(take_test_browser_opened_urls().is_empty());
+    }
+
+    #[test]
+    fn overview_keeps_newline_separated_note_urls_distinct() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("https://example.com/docs\nhttps://openai.com/research")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitboxes = screen.notes_link_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+
+        let second = &hitboxes[1];
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            second.area.x,
+            second.area.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://openai.com/research")]
+        );
     }
 
     #[test]

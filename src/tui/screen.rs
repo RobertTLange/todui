@@ -24,7 +24,7 @@ use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
-use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::editor::{EditorField, EditorView, editor_height, render_editor};
 use crate::tui::widgets::markdown::{link_hitboxes, render_labeled_text};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
@@ -393,11 +393,11 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Enter
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(self.todo_editor.focused_field, EditorField::Secondary) =>
+                if matches!(self.todo_editor.focused_field, EditorField::Secondary)
+                    && (key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::SUPER)) =>
             {
-                let field = self.focused_todo_field();
-                field.push('\n');
+                self.todo_editor.notes.push('\n');
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -416,6 +416,14 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if matches!(character, '\n' | '\r') {
+                    if matches!(self.todo_editor.focused_field, EditorField::Secondary) {
+                        self.todo_editor.notes.push('\n');
+                        self.todo_editor.error = None;
+                    }
+                    return Ok(None);
+                }
+
                 let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
                 let field = self.focused_todo_field();
                 field.push(resolved_text_char(&key, character));
@@ -730,9 +738,15 @@ impl SessionScreen {
             frame.render_stateful_widget(self.history_overlay(), area, &mut self.history_state());
         }
         if matches!(self.overlay, Some(Overlay::TodoEditor)) {
-            let area = centered_rect(frame.area(), 60, 10);
+            let overlay_width = 60.min(frame.area().width.saturating_sub(2)).max(1);
+            let view = self.todo_editor_view();
+            let area = centered_rect(
+                frame.area(),
+                overlay_width,
+                editor_height(&view, overlay_width),
+            );
             frame.render_widget(Clear, area);
-            frame.render_widget(self.todo_editor_modal(), area);
+            frame.render_widget(self.todo_editor_modal(area.width), area);
         }
         if let Some(Overlay::DeleteTodo { title, .. }) = &self.overlay {
             let area = centered_rect(frame.area(), 60, 8);
@@ -824,7 +838,6 @@ impl SessionScreen {
             self.rendered_details(snapshot, width.saturating_sub(2))
                 .text,
         )
-        .wrap(Wrap { trim: false })
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -852,24 +865,8 @@ impl SessionScreen {
         .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn todo_editor_modal(&self) -> Paragraph<'_> {
-        render_editor(
-            &self.theme,
-            EditorView {
-                title: self.todo_editor_title(),
-                primary_label: "Title",
-                primary_value: &self.todo_editor.title,
-                secondary_label: Some("Notes"),
-                secondary_value: Some(&self.todo_editor.notes),
-                tertiary_label: Some("Repo"),
-                tertiary_value: Some(&self.todo_editor.repo),
-                tertiary_value_style: (!self.todo_editor.repo.is_empty())
-                    .then_some(repo_value_style(&self.theme)),
-                focused_field: self.todo_editor.focused_field,
-                error: self.todo_editor.error.as_deref(),
-                footer_hint: self.todo_editor_footer_hint(),
-            },
-        )
+    fn todo_editor_modal(&self, width: u16) -> Paragraph<'_> {
+        render_editor(&self.theme, self.todo_editor_view(), width)
     }
 
     fn delete_todo_modal(&self, title: &str) -> Paragraph<'static> {
@@ -1268,13 +1265,30 @@ impl SessionScreen {
         }
     }
 
+    fn todo_editor_view(&self) -> EditorView<'_> {
+        EditorView {
+            title: self.todo_editor_title(),
+            primary_label: "Title",
+            primary_value: &self.todo_editor.title,
+            secondary_label: Some("Notes"),
+            secondary_value: Some(&self.todo_editor.notes),
+            tertiary_label: Some("Repo"),
+            tertiary_value: Some(&self.todo_editor.repo),
+            tertiary_value_style: (!self.todo_editor.repo.is_empty())
+                .then_some(repo_value_style(&self.theme)),
+            focused_field: self.todo_editor.focused_field,
+            error: self.todo_editor.error.as_deref(),
+            footer_hint: self.todo_editor_footer_hint(),
+        }
+    }
+
     fn todo_editor_footer_hint(&self) -> &'static str {
         match self.todo_editor.mode {
             TodoEditorMode::Create => {
-                "Tab next field  Shift+Enter newline in notes  Enter create  Esc cancel"
+                "Tab next field  Shift/Cmd+Enter newline in notes  Enter create  Esc cancel"
             }
             TodoEditorMode::Edit { .. } => {
-                "Tab next field  Shift+Enter newline in notes  Enter save  Esc cancel"
+                "Tab next field  Shift/Cmd+Enter newline in notes  Enter save  Esc cancel"
             }
         }
     }
@@ -1944,6 +1958,93 @@ mod tests {
     }
 
     #[test]
+    fn todo_editor_command_enter_char_in_notes_inserts_newline_without_submitting() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Prep talks".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "first line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, super_key(KeyCode::Char('\r')))
+            .unwrap();
+
+        assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
+        assert_eq!(screen.snapshot().todos.len(), 2);
+
+        for character in "second line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(screen.snapshot().todos.len(), 3);
+        assert_eq!(
+            screen.current_todo().expect("selected").notes,
+            "first line\nsecond line"
+        );
+    }
+
+    #[test]
+    fn todo_editor_grows_to_keep_footer_visible_for_multiline_notes() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Prep talks".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "Deeper results".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        for line in [
+            "Yale and AIDDA",
+            "https://yalefds.swoogo.com/aiforscientificdiscovery",
+            "- https://www.algorithmdiscovery.org/",
+        ] {
+            screen
+                .handle_key(&mut database, shift_key(KeyCode::Enter))
+                .unwrap();
+            for character in line.chars() {
+                screen
+                    .handle_key(&mut database, key(KeyCode::Char(character)))
+                    .unwrap();
+            }
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "sakanaai/shinkaevolve".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("newline in notes"));
+        assert!(rendered.contains("Repo: sakanaai/shinkaevolve"));
+    }
+
+    #[test]
     fn todo_editor_uppercases_shifted_letters_when_terminal_reports_base_char() {
         let (_directory, mut database, mut screen) = seeded_screen();
 
@@ -2502,6 +2603,48 @@ mod tests {
     }
 
     #[test]
+    fn session_keeps_newline_separated_detail_urls_distinct() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "https://example.com/spec\nhttps://openai.com/research",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note urls");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitboxes = screen.details_note_link_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+
+        let second = &hitboxes[1];
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    second.area.x,
+                    second.area.y,
+                ),
+            )
+            .expect("click second note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://openai.com/research")]
+        );
+    }
+
+    #[test]
     fn idle_screen_hides_pomodoro_footer() {
         let (_directory, _database, screen) = seeded_screen();
         let wide = render_buffer(&screen, 120, 24);
@@ -2655,6 +2798,15 @@ mod tests {
         KeyEvent {
             code,
             modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn super_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SUPER,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
