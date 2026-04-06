@@ -1,17 +1,22 @@
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::tui::theme::{TextTone, Theme};
 
 const REPO_LABEL: &str = "repo: ";
 
+pub(crate) fn repo_value_style(theme: &Theme) -> Style {
+    theme
+        .text_style(TextTone::Open)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
 pub(crate) fn repo_line(theme: &Theme, repo: Option<&str>) -> Line<'static> {
     let value = repo.unwrap_or("-");
     let style = if repo.is_some() {
-        theme
-            .text_style(TextTone::Open)
-            .add_modifier(Modifier::UNDERLINED)
+        repo_value_style(theme)
     } else {
         theme.text_style(TextTone::Muted)
     };

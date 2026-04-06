@@ -5,7 +5,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
@@ -23,8 +23,13 @@ use crate::tui::input::resolved_text_char;
 use crate::tui::layout::{centered_rect, split_screen};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
-use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
-use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
+use crate::tui::widgets::editor::{EditorField, EditorView, editor_height, render_editor};
+use crate::tui::widgets::history::{
+    RevisionTodoSnapshot, SessionHistoryEvent, derive_session_history_events,
+    session_history_panel as render_session_history_panel,
+};
+use crate::tui::widgets::markdown::{link_hitboxes, render_labeled_text};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 use crate::tui::widgets::todo_list::{
     GroupedTodos, TodoClickTarget, TodoSection, section_state, section_visible_rows,
@@ -32,6 +37,8 @@ use crate::tui::widgets::todo_list::{
 };
 
 const EVENT_POLL_MS: u64 = 250;
+const SESSION_TODO_LIST_PERCENT: u16 = 64;
+const SESSION_HISTORY_PERCENT: u16 = 36;
 
 pub fn run(
     database: &mut Database,
@@ -134,6 +141,8 @@ struct TodoEditorState {
     title: String,
     notes: String,
     repo: String,
+    initial_repo_override: Option<String>,
+    repo_dirty: bool,
     focused_field: EditorField,
     error: Option<String>,
 }
@@ -153,6 +162,7 @@ struct SessionScreen {
     revision: Option<u32>,
     snapshot: Option<SessionSnapshot>,
     revisions: Vec<RevisionSummary>,
+    history_events: Vec<SessionHistoryEvent>,
     active_run: Option<PomodoroRun>,
     head_token: Option<SessionHeadToken>,
     selected_index: usize,
@@ -168,6 +178,12 @@ struct SessionScreen {
     config: Config,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionBodyAreas {
+    list: Rect,
+    history: Option<Rect>,
+}
+
 impl SessionScreen {
     fn new(session_name: String, revision: Option<u32>, config: Config) -> Self {
         Self {
@@ -175,6 +191,7 @@ impl SessionScreen {
             revision,
             snapshot: None,
             revisions: Vec::new(),
+            history_events: Vec::new(),
             active_run: None,
             head_token: None,
             selected_index: 0,
@@ -194,7 +211,9 @@ impl SessionScreen {
     fn reload(&mut self, database: &Database) -> Result<()> {
         let selected_todo_id = self.current_todo().map(|todo| todo.todo_id);
         let snapshot = database.load_snapshot(&self.session_name, self.revision)?;
-        self.revisions = database.list_revisions(&self.session_name)?;
+        let revisions = database.list_revisions(&self.session_name)?;
+        self.history_events = self.load_history_events(database, &revisions)?;
+        self.revisions = revisions;
         if self.is_read_only_snapshot(&snapshot) {
             self.active_run = None;
         } else {
@@ -390,11 +409,11 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Enter
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    && matches!(self.todo_editor.focused_field, EditorField::Secondary) =>
+                if matches!(self.todo_editor.focused_field, EditorField::Secondary)
+                    && (key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.modifiers.contains(KeyModifiers::SUPER)) =>
             {
-                let field = self.focused_todo_field();
-                field.push('\n');
+                self.todo_editor.notes.push('\n');
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -403,14 +422,30 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Backspace => {
+                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
                 let field = self.focused_todo_field();
                 field.pop();
+                if repo_field {
+                    self.todo_editor.repo_dirty = true;
+                }
                 self.todo_editor.error = None;
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if matches!(character, '\n' | '\r') {
+                    if matches!(self.todo_editor.focused_field, EditorField::Secondary) {
+                        self.todo_editor.notes.push('\n');
+                        self.todo_editor.error = None;
+                    }
+                    return Ok(None);
+                }
+
+                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
                 let field = self.focused_todo_field();
                 field.push(resolved_text_char(&key, character));
+                if repo_field {
+                    self.todo_editor.repo_dirty = true;
+                }
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -493,6 +528,13 @@ impl SessionScreen {
                     .is_some_and(|hitbox| rect_contains(hitbox, mouse.column, mouse.row))
             {
                 self.open_current_todo_repo();
+            } else if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(hitbox) = self
+                    .details_note_link_hitboxes()
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+            {
+                self.open_note_url(&hitbox.url);
             }
             return Ok(());
         }
@@ -513,8 +555,7 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
-                let layout = self.layout_for_area(area);
-                let list_areas = split_todo_list_area(layout.list);
+                let list_areas = split_todo_list_area(self.list_area(area));
                 if let Some(target) = todo_click_target(
                     list_areas,
                     self.open_scroll_offset,
@@ -657,8 +698,9 @@ impl SessionScreen {
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let snapshot = self.snapshot();
         let layout = self.layout_for_area(frame.area());
+        let body_areas = self.body_areas(frame.area());
         let grouped = self.grouped_todos();
-        let list_areas = split_todo_list_area(layout.list);
+        let list_areas = split_todo_list_area(body_areas.list);
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
         frame.render_widget(self.top_bar(snapshot), layout.top_bar);
         frame.render_stateful_widget(
@@ -687,6 +729,12 @@ impl SessionScreen {
             list_areas.completed,
             &mut self.completed_list_state(),
         );
+        if let Some(history_area) = body_areas.history {
+            frame.render_widget(
+                render_session_history_panel(&self.theme, &self.history_events, history_area.width),
+                history_area,
+            );
+        }
         if let Some(footer_area) = layout.footer
             && let Some(run) = self.active_run.as_ref()
         {
@@ -699,7 +747,7 @@ impl SessionScreen {
         if matches!(self.overlay, Some(Overlay::Details)) {
             let area = self.details_overlay_area(frame.area(), snapshot);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.details_panel(snapshot), area);
+            frame.render_widget(self.details_panel(snapshot, area.width), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
             let area = centered_rect(frame.area(), 60, 16);
@@ -712,9 +760,15 @@ impl SessionScreen {
             frame.render_stateful_widget(self.history_overlay(), area, &mut self.history_state());
         }
         if matches!(self.overlay, Some(Overlay::TodoEditor)) {
-            let area = centered_rect(frame.area(), 60, 10);
+            let overlay_width = 60.min(frame.area().width.saturating_sub(2)).max(1);
+            let view = self.todo_editor_view();
+            let area = centered_rect(
+                frame.area(),
+                overlay_width,
+                editor_height(&view, overlay_width),
+            );
             frame.render_widget(Clear, area);
-            frame.render_widget(self.todo_editor_modal(), area);
+            frame.render_widget(self.todo_editor_modal(area.width), area);
         }
         if let Some(Overlay::DeleteTodo { title, .. }) = &self.overlay {
             let area = centered_rect(frame.area(), 60, 8);
@@ -801,18 +855,40 @@ impl SessionScreen {
         split_screen(area, self.top_bar_height(), self.active_footer_height())
     }
 
-    fn details_panel(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
-        Paragraph::new(Text::from(self.details_lines(snapshot)))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Details")
-                    .style(self.theme.surface_style(SurfaceTone::Neutral))
-                    .border_style(self.theme.surface_border_style(SurfaceTone::Details))
-                    .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
-            )
-            .style(self.theme.surface_style(SurfaceTone::Neutral))
+    fn body_areas(&self, area: Rect) -> SessionBodyAreas {
+        let layout = self.layout_for_area(area);
+        if layout.list.width >= 90 {
+            let columns = Layout::horizontal([
+                Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
+                Constraint::Percentage(SESSION_HISTORY_PERCENT),
+            ])
+            .split(layout.list);
+            SessionBodyAreas {
+                list: columns[0],
+                history: Some(columns[1]),
+            }
+        } else {
+            SessionBodyAreas {
+                list: layout.list,
+                history: None,
+            }
+        }
+    }
+
+    fn details_panel(&self, snapshot: &SessionSnapshot, width: u16) -> Paragraph<'static> {
+        Paragraph::new(
+            self.rendered_details(snapshot, width.saturating_sub(2))
+                .text,
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Details")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Details))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn help_overlay(&self) -> Paragraph<'static> {
@@ -831,22 +907,8 @@ impl SessionScreen {
         .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn todo_editor_modal(&self) -> Paragraph<'_> {
-        render_editor(
-            &self.theme,
-            EditorView {
-                title: self.todo_editor_title(),
-                primary_label: "Title",
-                primary_value: &self.todo_editor.title,
-                secondary_label: Some("Notes"),
-                secondary_value: Some(&self.todo_editor.notes),
-                tertiary_label: Some("Repo"),
-                tertiary_value: Some(&self.todo_editor.repo),
-                focused_field: self.todo_editor.focused_field,
-                error: self.todo_editor.error.as_deref(),
-                footer_hint: self.todo_editor_footer_hint(),
-            },
-        )
+    fn todo_editor_modal(&self, width: u16) -> Paragraph<'_> {
+        render_editor(&self.theme, self.todo_editor_view(), width)
     }
 
     fn delete_todo_modal(&self, title: &str) -> Paragraph<'static> {
@@ -977,7 +1039,7 @@ impl SessionScreen {
 
     fn page_size(&self) -> usize {
         let grouped = self.grouped_todos();
-        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        let areas = split_todo_list_area(self.list_area(self.viewport_area));
         match grouped.section_row_for_flat_index(self.selected_index) {
             Some((TodoSection::Completed, _)) => section_visible_rows(areas.completed),
             _ => section_visible_rows(areas.open),
@@ -985,7 +1047,7 @@ impl SessionScreen {
     }
 
     fn ensure_selection_visible(&mut self) {
-        let areas = split_todo_list_area(self.layout_for_area(self.viewport_area).list);
+        let areas = split_todo_list_area(self.list_area(self.viewport_area));
         let open_rows = section_visible_rows(areas.open);
         let completed_rows = section_visible_rows(areas.completed);
         let (open_len, completed_len, selected_section_row) = {
@@ -1093,14 +1155,17 @@ impl SessionScreen {
             return;
         }
 
-        let Some((todo_id, title, notes, repo)) = self.current_todo().map(|todo| {
-            (
-                todo.todo_id,
-                todo.title.clone(),
-                todo.notes.clone(),
-                todo.repo.clone().unwrap_or_default(),
-            )
-        }) else {
+        let Some((todo_id, title, notes, repo, initial_repo_override)) =
+            self.current_todo().map(|todo| {
+                (
+                    todo.todo_id,
+                    todo.title.clone(),
+                    todo.notes.clone(),
+                    self.current_todo_repo_details(todo).0.unwrap_or_default(),
+                    todo.repo.clone(),
+                )
+            })
+        else {
             return;
         };
         self.todo_editor = TodoEditorState {
@@ -1108,8 +1173,10 @@ impl SessionScreen {
             title,
             notes,
             repo,
+            initial_repo_override,
             focused_field: EditorField::Primary,
             error: None,
+            repo_dirty: false,
         };
         self.overlay = Some(Overlay::TodoEditor);
     }
@@ -1180,12 +1247,20 @@ impl SessionScreen {
             return Ok(());
         }
 
+        let repo = match self.todo_editor.mode {
+            TodoEditorMode::Create => Some(self.todo_editor.repo.as_str()),
+            TodoEditorMode::Edit { .. } if self.todo_editor.repo_dirty => {
+                Some(self.todo_editor.repo.as_str())
+            }
+            TodoEditorMode::Edit { .. } => self.todo_editor.initial_repo_override.as_deref(),
+        };
+
         let saved = match self.todo_editor.mode {
             TodoEditorMode::Create => database.add_todo(
                 &self.session_name,
                 title,
                 self.todo_editor.notes.trim(),
-                Some(self.todo_editor.repo.as_str()),
+                repo,
                 now_utc_timestamp(),
             ),
             TodoEditorMode::Edit { todo_id } => database.update_todo(
@@ -1193,7 +1268,7 @@ impl SessionScreen {
                 Some(&self.session_name),
                 title,
                 self.todo_editor.notes.trim(),
-                Some(self.todo_editor.repo.as_str()),
+                repo,
                 now_utc_timestamp(),
             ),
         };
@@ -1232,13 +1307,30 @@ impl SessionScreen {
         }
     }
 
+    fn todo_editor_view(&self) -> EditorView<'_> {
+        EditorView {
+            title: self.todo_editor_title(),
+            primary_label: "Title",
+            primary_value: &self.todo_editor.title,
+            secondary_label: Some("Notes"),
+            secondary_value: Some(&self.todo_editor.notes),
+            tertiary_label: Some("Repo"),
+            tertiary_value: Some(&self.todo_editor.repo),
+            tertiary_value_style: (!self.todo_editor.repo.is_empty())
+                .then_some(repo_value_style(&self.theme)),
+            focused_field: self.todo_editor.focused_field,
+            error: self.todo_editor.error.as_deref(),
+            footer_hint: self.todo_editor_footer_hint(),
+        }
+    }
+
     fn todo_editor_footer_hint(&self) -> &'static str {
         match self.todo_editor.mode {
             TodoEditorMode::Create => {
-                "Tab next field  Shift+Enter newline in notes  Enter create  Esc cancel"
+                "Tab next field  Shift/Cmd+Enter newline in notes  Enter create  Esc cancel"
             }
             TodoEditorMode::Edit { .. } => {
-                "Tab next field  Shift+Enter newline in notes  Enter save  Esc cancel"
+                "Tab next field  Shift/Cmd+Enter newline in notes  Enter save  Esc cancel"
             }
         }
     }
@@ -1253,7 +1345,11 @@ impl SessionScreen {
         }
     }
 
-    fn details_lines(&self, snapshot: &SessionSnapshot) -> Vec<Line<'static>> {
+    fn rendered_details(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+    ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
             let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
             let mut lines = vec![
@@ -1269,14 +1365,26 @@ impl SessionScreen {
                 repo_line(&self.theme, effective_repo.as_deref()),
                 Line::from(format!("repo source: {repo_source}")),
             ];
-            lines.extend(multiline_details_field_lines(
+            let rendered_notes = render_labeled_text(
+                &self.theme,
                 "notes",
                 if todo.notes.trim().is_empty() {
                     "-"
                 } else {
                     todo.notes.trim()
                 },
-            ));
+                width,
+            );
+            let note_line_offset = lines.len() as u16;
+            let mut links = rendered_notes
+                .links
+                .into_iter()
+                .map(|mut link| {
+                    link.line_index += note_line_offset;
+                    link
+                })
+                .collect::<Vec<_>>();
+            lines.extend(rendered_notes.text.lines);
             lines.extend([
                 Line::from(format!("created: {}", format_full_local(todo.created_at))),
                 Line::from(format!("updated: {}", format_full_local(todo.updated_at))),
@@ -1294,13 +1402,20 @@ impl SessionScreen {
             } else {
                 lines.push(Line::from("Esc/Enter/Left close"));
             }
-            lines
+            links.shrink_to_fit();
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(lines),
+                links,
+            }
         } else {
-            vec![
-                Line::from(format!("No todos in session {}", snapshot.session.name)),
-                Line::from(String::new()),
-                Line::from("Esc/Enter/Left close"),
-            ]
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(vec![
+                    Line::from(format!("No todos in session {}", snapshot.session.name)),
+                    Line::from(String::new()),
+                    Line::from("Esc/Enter/Left close"),
+                ]),
+                links: Vec::new(),
+            }
         }
     }
 
@@ -1315,9 +1430,49 @@ impl SessionScreen {
         )
     }
 
+    fn details_note_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        let area = self.details_overlay_area(self.viewport_area, self.snapshot());
+        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2));
+        link_hitboxes(area, &rendered.links)
+    }
+
     fn details_overlay_area(&self, area: Rect, snapshot: &SessionSnapshot) -> Rect {
-        let height = self.details_lines(snapshot).len().saturating_add(2).max(12) as u16;
+        let overlay_width = centered_rect(area, 60, 1).width;
+        let rendered = self.rendered_details(snapshot, overlay_width.saturating_sub(2));
+        let height = rendered.text.lines.len().saturating_add(2).max(12) as u16;
         centered_rect(area, 60, height)
+    }
+
+    fn list_area(&self, area: Rect) -> Rect {
+        self.body_areas(area).list
+    }
+
+    fn load_history_events(
+        &self,
+        database: &Database,
+        revisions: &[RevisionSummary],
+    ) -> Result<Vec<SessionHistoryEvent>> {
+        let snapshots = revisions
+            .iter()
+            .filter(|revision| {
+                self.revision
+                    .is_none_or(|selected| revision.revision_number <= selected)
+            })
+            .map(|revision| {
+                Ok(RevisionTodoSnapshot {
+                    revision: revision.clone(),
+                    todos: database
+                        .get_revision_todos(&self.session_name, revision.revision_number)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(derive_session_history_events(&snapshots))
+    }
+
+    fn open_note_url(&mut self, url: &str) {
+        if let Err(error) = browser::open_url(url) {
+            self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
+        }
     }
 }
 
@@ -1331,16 +1486,6 @@ fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
 
 fn clamp_scroll_offset(offset: usize, total_rows: usize, visible_rows: usize) -> usize {
     total_rows.saturating_sub(visible_rows).min(offset)
-}
-
-fn multiline_details_field_lines(label: &str, value: &str) -> Vec<Line<'static>> {
-    let mut value_lines = value.lines();
-    let first = value_lines.next().unwrap_or_default();
-    let continuation_indent = " ".repeat(label.chars().count() + 2);
-
-    let mut lines = vec![Line::from(format!("{label}: {first}"))];
-    lines.extend(value_lines.map(|line| Line::from(format!("{continuation_indent}{line}"))));
-    lines
 }
 
 fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
@@ -1881,6 +2026,93 @@ mod tests {
     }
 
     #[test]
+    fn todo_editor_command_enter_char_in_notes_inserts_newline_without_submitting() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Prep talks".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "first line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, super_key(KeyCode::Char('\r')))
+            .unwrap();
+
+        assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
+        assert_eq!(screen.snapshot().todos.len(), 2);
+
+        for character in "second line".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(screen.snapshot().todos.len(), 3);
+        assert_eq!(
+            screen.current_todo().expect("selected").notes,
+            "first line\nsecond line"
+        );
+    }
+
+    #[test]
+    fn todo_editor_grows_to_keep_footer_visible_for_multiline_notes() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Prep talks".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "Deeper results".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        for line in [
+            "Yale and AIDDA",
+            "https://yalefds.swoogo.com/aiforscientificdiscovery",
+            "- https://www.algorithmdiscovery.org/",
+        ] {
+            screen
+                .handle_key(&mut database, shift_key(KeyCode::Enter))
+                .unwrap();
+            for character in line.chars() {
+                screen
+                    .handle_key(&mut database, key(KeyCode::Char(character)))
+                    .unwrap();
+            }
+        }
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        for character in "sakanaai/shinkaevolve".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("newline in notes"));
+        assert!(rendered.contains("Repo: sakanaai/shinkaevolve"));
+    }
+
+    #[test]
     fn todo_editor_uppercases_shifted_letters_when_terminal_reports_base_char() {
         let (_directory, mut database, mut screen) = seeded_screen();
 
@@ -1894,6 +2126,90 @@ mod tests {
         assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
         assert_eq!(screen.todo_editor.title, "A");
         assert!(render_buffer(&screen, 120, 24).contains("Title: A|"));
+    }
+
+    #[test]
+    fn edit_todo_modal_shows_inherited_session_repo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+
+        assert!(render_buffer(&screen, 120, 24).contains("Repo: openai/codex"));
+    }
+
+    #[test]
+    fn edit_todo_preserves_inherited_session_repo_without_creating_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let todo_id = screen.current_todo().expect("selected").todo_id;
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(database.get_todo(todo_id).expect("todo").repo, None);
+    }
+
+    #[test]
+    fn edit_todo_can_replace_inherited_session_repo_with_explicit_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let todo_id = screen.current_todo().expect("selected").todo_id;
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+        screen.handle_key(&mut database, key(KeyCode::Tab)).unwrap();
+
+        for _ in 0..screen.todo_editor.repo.len() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Backspace))
+                .unwrap();
+        }
+        for character in "SakanaAI/todui-keymove".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(
+            database.get_todo(todo_id).expect("todo").repo.as_deref(),
+            Some("sakanaai/todui-keymove")
+        );
     }
 
     #[test]
@@ -2110,6 +2426,10 @@ mod tests {
         assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(wide.contains("History"));
+        assert!(wide.contains(" - Added"));
+        assert!(wide.contains("  Review bindings"));
+        assert!(wide.contains("  Draft spec"));
         assert!(!wide.contains("Details"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
@@ -2119,6 +2439,7 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
+        assert!(!medium.contains("  Review bindings"));
         assert!(!medium.contains("Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2150,6 +2471,97 @@ mod tests {
         });
         let toast = render_buffer(&screen, 120, 24);
         assert!(toast.contains("Notice"));
+    }
+
+    #[test]
+    fn wide_history_panel_tracks_todo_lifecycle_and_respects_historical_revision() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let title = "Feed UI";
+        let todo = database
+            .add_todo(&screen.session_name, title, "", None, 1_711_275_900)
+            .expect("todo");
+        database
+            .update_todo(
+                todo.id,
+                Some(&screen.session_name),
+                title,
+                "with session revision feed",
+                None,
+                1_711_276_000,
+            )
+            .expect("edit");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&screen.session_name),
+                TodoStatus::Done,
+                1_711_276_100,
+            )
+            .expect("done");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&screen.session_name),
+                TodoStatus::Open,
+                1_711_276_200,
+            )
+            .expect("reopen");
+        database
+            .delete_todo(todo.id, Some(&screen.session_name), 1_711_276_300)
+            .expect("delete");
+        screen.reload(&database).expect("reload");
+
+        let wide = render_buffer(&screen, 120, 24);
+        assert!(wide.contains(" - Added"));
+        assert!(wide.contains(" - Edited"));
+        assert!(wide.contains(" - Completed"));
+        assert!(wide.contains(" - Reopened"));
+        assert!(wide.contains(" - Deleted"));
+        assert!(wide.contains("  Feed UI"));
+
+        screen.revision = Some(6);
+        screen.reload(&database).expect("reload historical");
+        let historical = render_buffer(&screen, 120, 24);
+        assert!(historical.contains(" - Completed"));
+        assert!(!historical.contains(" - Reopened"));
+        assert!(!historical.contains(" - Deleted"));
+    }
+
+    #[test]
+    fn session_history_panel_appears_at_same_ninety_column_threshold_as_overview() {
+        let (_directory, _database, screen) = seeded_screen();
+
+        let at_threshold = render_buffer(&screen, 90, 24);
+        assert!(at_threshold.contains("History"));
+
+        let below_threshold = render_buffer(&screen, 89, 24);
+        assert!(!below_threshold.contains("History"));
+    }
+
+    #[test]
+    fn wide_history_panel_renders_indented_truncated_title_preview() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .add_todo(
+                &screen.session_name,
+                "Feed title preview should be truncated because the history panel is narrow",
+                "",
+                None,
+                1_711_275_900,
+            )
+            .expect("todo");
+        screen.reload(&database).expect("reload");
+
+        let rendered = render_buffer(&screen, 90, 24);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        let added_index = lines
+            .iter()
+            .position(|line| line.contains(" - Added"))
+            .expect("added event line");
+        let title_line = lines.get(added_index + 1).expect("title preview line");
+
+        assert!(title_line.contains("Feed title preview"));
+        assert!(title_line.contains("..."));
     }
 
     #[test]
@@ -2270,6 +2682,129 @@ mod tests {
         assert_eq!(
             take_test_browser_opened_urls(),
             vec![String::from("https://github.com/openai/codex")]
+        );
+    }
+
+    #[test]
+    fn session_clicks_detected_url_in_details_notes() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitbox = screen
+            .details_note_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/spec")]
+        );
+    }
+
+    #[test]
+    fn session_ignores_clicks_outside_details_note_url_span() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitbox = screen
+            .details_note_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    hitbox.x.saturating_sub(1),
+                    hitbox.y,
+                ),
+            )
+            .expect("click outside note link");
+
+        assert!(take_test_browser_opened_urls().is_empty());
+    }
+
+    #[test]
+    fn session_keeps_newline_separated_detail_urls_distinct() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "https://example.com/spec\nhttps://openai.com/research",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note urls");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('i')))
+            .expect("open details");
+        let hitboxes = screen.details_note_link_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+
+        let second = &hitboxes[1];
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(
+                    MouseEventKind::Down(MouseButton::Left),
+                    second.area.x,
+                    second.area.y,
+                ),
+            )
+            .expect("click second note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://openai.com/research")]
         );
     }
 
@@ -2427,6 +2962,15 @@ mod tests {
         KeyEvent {
             code,
             modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn super_key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::SUPER,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }
