@@ -25,7 +25,7 @@ use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
 use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
-use crate::tui::widgets::markdown::render_markdown;
+use crate::tui::widgets::markdown::{link_hitboxes, render_markdown};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
@@ -36,6 +36,9 @@ const DONE_COLUMN_WIDTH: usize = 5;
 const LAST_OPENED_COLUMN_WIDTH: usize = 11;
 const SESSION_COLUMN_SPACING: usize = 5;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
+const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
+const SESSION_METADATA_WIDTH: u16 = 60;
+const SESSION_METADATA_HEIGHT: u16 = 21;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
@@ -536,6 +539,14 @@ impl OverviewScreen {
                     self.open_selected_session_repo();
                     return None;
                 }
+                if let Some(hitbox) = self
+                    .notes_link_hitboxes()
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+                {
+                    self.open_note_url(&hitbox.url);
+                    return None;
+                }
                 let list_area = self.list_area(self.last_area);
                 if rect_contains(list_area, mouse.column, mouse.row)
                     && let Some(index) = list_row_index(list_area, self.scroll_offset, mouse.row)
@@ -568,7 +579,7 @@ impl OverviewScreen {
             frame.render_widget(self.notes_panel(body_areas.notes), body_areas.notes);
             frame.render_widget(self.summary_panel(), body_areas.summary);
             if let Some(details_area) = body_areas.details {
-                frame.render_widget(self.details_panel(), details_area);
+                frame.render_widget(self.details_panel(details_area), details_area);
             }
         }
 
@@ -587,14 +598,18 @@ impl OverviewScreen {
             frame.render_widget(self.help_overlay(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionMetadata)) {
-            let area = centered_rect(frame.area(), 60, 21);
+            let area = centered_rect(
+                frame.area(),
+                SESSION_METADATA_WIDTH,
+                SESSION_METADATA_HEIGHT,
+            );
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_metadata_modal(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
             let area = centered_rect(frame.area(), 60, 11);
             frame.render_widget(Clear, area);
-            frame.render_widget(self.session_editor_modal(), area);
+            frame.render_widget(self.session_editor_modal(area.width), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::GeneralNotesEditor)) {
             let area = centered_rect(frame.area(), NOTES_EDITOR_WIDTH, NOTES_EDITOR_HEIGHT);
@@ -690,9 +705,12 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
-    fn details_panel(&self) -> Paragraph<'static> {
+    fn details_panel(&self, area: Rect) -> Paragraph<'static> {
         let text = self
-            .selected_session_metadata_lines(4)
+            .selected_session_metadata_lines(
+                OPEN_TODO_PREVIEW_MAX_ITEMS,
+                usize::from(area.width.saturating_sub(2)),
+            )
             .map(Text::from)
             .unwrap_or_else(|| Text::from("Select a session to inspect its summary."));
 
@@ -717,15 +735,10 @@ impl OverviewScreen {
                 Line::from("Press m to edit overview notes."),
             ])
         } else {
-            render_markdown(
-                &self.theme,
-                &self.overview_notes,
-                area.width.saturating_sub(2),
-            )
+            self.rendered_notes(area).text
         };
 
         Paragraph::new(content)
-            .wrap(Wrap { trim: false })
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -802,7 +815,7 @@ impl OverviewScreen {
         .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn session_editor_modal(&self) -> Paragraph<'_> {
+    fn session_editor_modal(&self, width: u16) -> Paragraph<'_> {
         let (
             title,
             primary_label,
@@ -845,21 +858,33 @@ impl OverviewScreen {
                 secondary_value,
                 tertiary_label,
                 tertiary_value,
+                tertiary_value_style: None,
                 focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
                 footer_hint,
             },
+            width,
         )
     }
 
     fn session_metadata_modal(&self) -> Paragraph<'static> {
-        let mut lines = self.selected_session_metadata_lines(4).unwrap_or_else(|| {
-            vec![
-                Line::from("Select a session to inspect its summary."),
-                Line::from(String::new()),
-                Line::from("Esc close"),
-            ]
-        });
+        let modal_area = centered_rect(
+            self.last_area,
+            SESSION_METADATA_WIDTH,
+            SESSION_METADATA_HEIGHT,
+        );
+        let mut lines = self
+            .selected_session_metadata_lines(
+                OPEN_TODO_PREVIEW_MAX_ITEMS,
+                usize::from(modal_area.width.saturating_sub(2)),
+            )
+            .unwrap_or_else(|| {
+                vec![
+                    Line::from("Select a session to inspect its summary."),
+                    Line::from(String::new()),
+                    Line::from("Esc close"),
+                ]
+            });
         if self.selected_session_repo().is_some() {
             lines.push(Line::from(String::new()));
             lines.push(Line::from("u open repo  Esc close"));
@@ -976,6 +1001,14 @@ impl OverviewScreen {
 
     fn list_area(&self, area: Rect) -> Rect {
         self.body_areas(self.root_chunks(area)[1]).list
+    }
+
+    fn rendered_notes(&self, area: Rect) -> crate::tui::widgets::markdown::RenderedTextBlock {
+        render_markdown(
+            &self.theme,
+            &self.overview_notes,
+            area.width.saturating_sub(2),
+        )
     }
 
     fn body_areas(&self, body: Rect) -> OverviewBodyAreas {
@@ -1361,7 +1394,11 @@ impl OverviewScreen {
             .sum()
     }
 
-    fn selected_session_metadata_lines(&self, max_open_todos: usize) -> Option<Vec<Line<'static>>> {
+    fn selected_session_metadata_lines(
+        &self,
+        max_open_todos: usize,
+        inner_width: usize,
+    ) -> Option<Vec<Line<'static>>> {
         self.sessions.get(self.selected_index).map(|session| {
             let mut lines = vec![
                 Line::from(format!("session: {}", session.name)),
@@ -1386,6 +1423,7 @@ impl OverviewScreen {
                 &self.theme,
                 self.selected_session_open_todos().unwrap_or(&[]),
                 max_open_todos,
+                inner_width,
             ));
             lines.push(Line::from(String::new()));
             lines.push(Line::from(
@@ -1415,9 +1453,23 @@ impl OverviewScreen {
         repo_hitbox(body.details?, 2, self.selected_session_repo())
     }
 
+    fn notes_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        if self.overview_notes.trim().is_empty() || self.last_area.height == 0 {
+            return Vec::new();
+        }
+
+        let notes_area = self.body_areas(self.root_chunks(self.last_area)[1]).notes;
+        let rendered = self.rendered_notes(notes_area);
+        link_hitboxes(notes_area, &rendered.links)
+    }
+
     fn session_metadata_repo_hitbox(&self) -> Option<Rect> {
         repo_hitbox(
-            centered_rect(self.last_area, 60, 21),
+            centered_rect(
+                self.last_area,
+                SESSION_METADATA_WIDTH,
+                SESSION_METADATA_HEIGHT,
+            ),
             2,
             self.selected_session_repo(),
         )
@@ -1435,6 +1487,12 @@ impl OverviewScreen {
             Err(error) => {
                 self.set_toast(format!("Failed to open repo: {error}"), ToastTone::Warning)
             }
+        }
+    }
+
+    fn open_note_url(&mut self, url: &str) {
+        if let Err(error) = browser::open_url(url) {
+            self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
         }
     }
 
@@ -1586,7 +1644,12 @@ fn empty_todo_preview_line(theme: &Theme, inner_width: usize) -> Line<'static> {
     ))
 }
 
-fn session_open_todo_lines(theme: &Theme, todos: &[Todo], max_items: usize) -> Vec<Line<'static>> {
+fn session_open_todo_lines(
+    theme: &Theme,
+    todos: &[Todo],
+    max_items: usize,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "open todo list:",
         theme.text_style(TextTone::Meta),
@@ -1603,13 +1666,16 @@ fn session_open_todo_lines(theme: &Theme, todos: &[Todo], max_items: usize) -> V
     let visible_count = todos.len().min(max_items);
     lines.extend(todos.iter().take(visible_count).map(|todo| {
         Line::from(Span::styled(
-            format!("  [ ] {}", todo.title),
+            fit_cell_with_ellipsis(&format!("  [ ] {}", todo.title), inner_width),
             theme.text_style(TextTone::Focus),
         ))
     }));
     if todos.len() > visible_count {
         lines.push(Line::from(Span::styled(
-            format!("  ... and {} more", todos.len() - visible_count),
+            fit_cell_with_ellipsis(
+                &format!("  ... and {} more", todos.len() - visible_count),
+                inner_width,
+            ),
             theme.text_style(TextTone::Muted),
         )));
     }
@@ -1640,6 +1706,25 @@ fn fit_cell(text: &str, width: usize) -> String {
     let mut value = text.chars().take(width).collect::<String>();
     let padding = width.saturating_sub(value.chars().count());
     value.push_str(&" ".repeat(padding));
+    value
+}
+
+fn fit_cell_with_ellipsis(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let char_count = text.chars().count();
+    if char_count <= width {
+        return fit_cell(text, width);
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let mut value = text.chars().take(width - 3).collect::<String>();
+    value.push_str("...");
     value
 }
 
@@ -2120,7 +2205,7 @@ mod tests {
 
         let metadata = lines_to_string(
             &screen
-                .selected_session_metadata_lines(4)
+                .selected_session_metadata_lines(10, 58)
                 .expect("metadata lines"),
         );
 
@@ -2137,6 +2222,65 @@ mod tests {
         assert!(draft_spec_index < ship_docs_index);
         assert!(ship_docs_index < hints_index);
         assert!(!metadata.contains("Done task"));
+    }
+
+    #[test]
+    fn overview_details_preview_shows_first_ten_open_todos_then_overflow_count() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+
+        for index in 1..=10 {
+            database
+                .add_todo(
+                    "writing-sprint",
+                    &format!("Overflow {index:02}"),
+                    "",
+                    None,
+                    1_711_275_920 + i64::from(index),
+                )
+                .expect("todo");
+        }
+
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let metadata = lines_to_string(
+            &screen
+                .selected_session_metadata_lines(10, 58)
+                .expect("metadata lines"),
+        );
+
+        assert!(metadata.contains("Draft spec"));
+        assert!(metadata.contains("Overflow 09"));
+        assert!(!metadata.contains("Overflow 10"));
+        assert!(metadata.contains("... and 1 more"));
+    }
+
+    #[test]
+    fn overview_details_preview_truncates_long_open_todo_to_single_row() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 92, 24);
+        database
+            .add_todo(
+                "writing-sprint",
+                "very-long-details-preview-title-abcdefghijklmnopqrstuvwxyz-suffix-hidden-1234567890",
+                "",
+                None,
+                1_711_275_920,
+            )
+            .expect("todo");
+
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let buffer = render_buffer(&mut screen, 92, 24);
+
+        assert!(buffer.contains("very-long-details-preview"));
+        assert!(buffer.contains("..."));
+        assert!(!buffer.contains("suffix-hidden-1234567890"));
     }
 
     #[test]
@@ -2611,6 +2755,88 @@ mod tests {
         assert_eq!(
             take_test_browser_opened_urls(),
             vec![String::from("https://github.com/exampleorg/todui-keymove")]
+        );
+    }
+
+    #[test]
+    fn overview_clicks_detected_url_in_general_notes() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("Plan: https://example.com/docs.")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitbox = screen
+            .notes_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x,
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/docs")]
+        );
+    }
+
+    #[test]
+    fn overview_ignores_clicks_outside_general_notes_url_span() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("Plan: https://example.com/docs.")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitbox = screen
+            .notes_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            hitbox.x.saturating_sub(1),
+            hitbox.y,
+        ));
+
+        assert!(exit.is_none());
+        assert!(take_test_browser_opened_urls().is_empty());
+    }
+
+    #[test]
+    fn overview_keeps_newline_separated_note_urls_distinct() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .save_overview_notes("https://example.com/docs\nhttps://openai.com/research")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        reset_test_browser();
+
+        let hitboxes = screen.notes_link_hitboxes();
+        assert_eq!(hitboxes.len(), 2);
+
+        let second = &hitboxes[1];
+        let exit = screen.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            second.area.x,
+            second.area.y,
+        ));
+
+        assert!(exit.is_none());
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://openai.com/research")]
         );
     }
 

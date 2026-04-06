@@ -1,6 +1,6 @@
 use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::tui::theme::{SurfaceTone, Theme};
 
@@ -20,45 +20,14 @@ pub struct EditorView<'a> {
     pub secondary_value: Option<&'a str>,
     pub tertiary_label: Option<&'a str>,
     pub tertiary_value: Option<&'a str>,
+    pub tertiary_value_style: Option<Style>,
     pub focused_field: EditorField,
     pub error: Option<&'a str>,
     pub footer_hint: &'a str,
 }
 
-pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
-    let mut lines = field_lines(
-        view.primary_label,
-        view.primary_value,
-        matches!(view.focused_field, EditorField::Primary),
-    );
-
-    if let (Some(label), Some(value)) = (view.secondary_label, view.secondary_value) {
-        lines.push(Line::from(String::new()));
-        lines.extend(field_lines(
-            label,
-            value,
-            matches!(view.focused_field, EditorField::Secondary),
-        ));
-    }
-
-    if let (Some(label), Some(value)) = (view.tertiary_label, view.tertiary_value) {
-        lines.push(Line::from(String::new()));
-        lines.extend(field_lines(
-            label,
-            value,
-            matches!(view.focused_field, EditorField::Tertiary),
-        ));
-    }
-
-    lines.push(Line::from(String::new()));
-    if let Some(error) = view.error {
-        lines.push(Line::from(format!("Error: {error}")));
-        lines.push(Line::from(String::new()));
-    }
-    lines.push(Line::from(view.footer_hint.to_string()));
-
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
+pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>, width: u16) -> Paragraph<'a> {
+    Paragraph::new(editor_content_lines(&view, width.saturating_sub(2)))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -70,23 +39,187 @@ pub fn render_editor<'a>(theme: &Theme, view: EditorView<'a>) -> Paragraph<'a> {
         .style(Style::default().fg(theme.fg_default).bg(theme.bg_overlay))
 }
 
+pub fn editor_height(view: &EditorView<'_>, width: u16) -> u16 {
+    editor_content_lines(view, width.saturating_sub(2))
+        .len()
+        .saturating_add(2)
+        .max(10) as u16
+}
+
+fn editor_content_lines(view: &EditorView<'_>, inner_width: u16) -> Vec<Line<'static>> {
+    let mut lines = field_lines(
+        view.primary_label,
+        view.primary_value,
+        matches!(view.focused_field, EditorField::Primary),
+        inner_width,
+    );
+
+    if let (Some(label), Some(value)) = (view.secondary_label, view.secondary_value) {
+        lines.push(Line::from(String::new()));
+        lines.extend(field_lines(
+            label,
+            value,
+            matches!(view.focused_field, EditorField::Secondary),
+            inner_width,
+        ));
+    }
+
+    if let (Some(label), Some(value)) = (view.tertiary_label, view.tertiary_value) {
+        lines.push(Line::from(String::new()));
+        lines.extend(styled_field_lines(
+            label,
+            value,
+            matches!(view.focused_field, EditorField::Tertiary),
+            view.tertiary_value_style,
+            inner_width,
+        ));
+    }
+
+    lines.push(Line::from(String::new()));
+    if let Some(error) = view.error {
+        lines.extend(wrapped_plain_lines(&format!("Error: {error}"), inner_width));
+        lines.push(Line::from(String::new()));
+    }
+    lines.extend(wrapped_plain_lines(view.footer_hint, inner_width));
+    lines
+}
+
 fn display_field(value: &str, focused: bool) -> String {
+    let mut display = normalize_line_breaks(value);
     if focused {
-        format!("{value}|")
+        display.push('|');
+    }
+    display
+}
+
+fn normalize_line_breaks(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn styled_field_lines(
+    label: &str,
+    value: &str,
+    focused: bool,
+    value_style: Option<Style>,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
+    let display = display_field(value, focused);
+    let mut display_lines = display.split('\n');
+    let first = display_lines.next().unwrap_or_default();
+    let continuation_indent = " ".repeat(label.chars().count() + 2);
+    let first_width = available_width(inner_width, label.chars().count() + 2);
+    let continuation_width = available_width(inner_width, continuation_indent.chars().count());
+
+    let mut lines =
+        wrapped_field_line(label, first, value_style, first_width, &continuation_indent);
+    for line in display_lines {
+        lines.extend(wrapped_continuation_line(
+            &continuation_indent,
+            line,
+            value_style,
+            continuation_width,
+        ));
+    }
+    lines
+}
+
+fn field_lines(label: &str, value: &str, focused: bool, inner_width: u16) -> Vec<Line<'static>> {
+    styled_field_lines(label, value, focused, None, inner_width)
+}
+
+fn available_width(inner_width: u16, prefix_width: usize) -> usize {
+    usize::from(inner_width).saturating_sub(prefix_width).max(1)
+}
+
+fn wrapped_field_line(
+    label: &str,
+    value: &str,
+    value_style: Option<Style>,
+    available_width: usize,
+    continuation_indent: &str,
+) -> Vec<Line<'static>> {
+    let mut segments = wrap_segments(value, available_width).into_iter();
+    let first = segments.next().unwrap_or_default();
+
+    let mut lines = vec![styled_line(label, &first, value_style)];
+    lines.extend(
+        segments
+            .map(|segment| styled_continuation_line(continuation_indent, &segment, value_style)),
+    );
+    lines
+}
+
+fn wrapped_continuation_line(
+    indent: &str,
+    value: &str,
+    value_style: Option<Style>,
+    available_width: usize,
+) -> Vec<Line<'static>> {
+    wrap_segments(value, available_width)
+        .into_iter()
+        .map(|segment| styled_continuation_line(indent, &segment, value_style))
+        .collect()
+}
+
+fn wrapped_plain_lines(value: &str, inner_width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(inner_width).max(1);
+    normalize_line_breaks(value)
+        .split('\n')
+        .flat_map(|line| wrap_segments(line, width).into_iter())
+        .map(Line::from)
+        .collect()
+}
+
+fn wrap_segments(value: &str, width: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for character in value.chars() {
+        if current_width == width {
+            segments.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        current.push(character);
+        current_width += 1;
+    }
+
+    if current.is_empty() {
+        segments.push(String::new());
     } else {
-        value.to_string()
+        segments.push(current);
+    }
+
+    segments
+}
+
+fn styled_line(label: &str, value: &str, value_style: Option<Style>) -> Line<'static> {
+    match value_style {
+        Some(style) => Line::from(vec![
+            Span::raw(format!("{label}: ")),
+            Span::styled(value.to_string(), style),
+        ]),
+        None => Line::from(format!("{label}: {value}")),
     }
 }
 
-fn field_lines(label: &str, value: &str, focused: bool) -> Vec<Line<'static>> {
-    let display = display_field(value, focused);
-    let mut display_lines = display.lines();
-    let first = display_lines.next().unwrap_or_default();
-    let continuation_indent = " ".repeat(label.chars().count() + 2);
-
-    let mut lines = vec![Line::from(format!("{label}: {first}"))];
-    lines.extend(display_lines.map(|line| Line::from(format!("{continuation_indent}{line}"))));
-    lines
+fn styled_continuation_line(
+    indent: &str,
+    value: &str,
+    value_style: Option<Style>,
+) -> Line<'static> {
+    match value_style {
+        Some(style) => Line::from(vec![
+            Span::raw(indent.to_string()),
+            Span::styled(value.to_string(), style),
+        ]),
+        None => Line::from(format!("{indent}{value}")),
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +227,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
 
     use super::{EditorField, EditorView, render_editor};
     use crate::tui::theme::Theme;
@@ -115,10 +249,12 @@ mod tests {
                             secondary_value: Some("cover TUI"),
                             tertiary_label: Some("Repo"),
                             tertiary_value: Some("@exampleorg/todui-keymove"),
+                            tertiary_value_style: None,
                             focused_field: EditorField::Tertiary,
                             error: Some("Todo title is required"),
                             footer_hint: "Enter save  Esc cancel",
                         },
+                        frame.area().width,
                     ),
                     frame.area(),
                 );
@@ -149,10 +285,12 @@ mod tests {
                             secondary_value: Some("first line\nsecond line"),
                             tertiary_label: None,
                             tertiary_value: None,
+                            tertiary_value_style: None,
                             focused_field: EditorField::Secondary,
                             error: None,
                             footer_hint: "Enter save  Esc cancel",
                         },
+                        frame.area().width,
                     ),
                     frame.area(),
                 );
@@ -162,6 +300,94 @@ mod tests {
         let text = buffer_to_string(terminal.backend().buffer());
         assert!(text.contains("Notes: first line"));
         assert!(text.contains("       second line|"));
+    }
+
+    #[test]
+    fn editor_keeps_hanging_indent_for_wrapped_multiline_notes() {
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    render_editor(
+                        &Theme::default(),
+                        EditorView {
+                            title: "Edit Todo",
+                            primary_label: "Title",
+                            primary_value: "Prep talks",
+                            secondary_label: Some("Notes"),
+                            secondary_value: Some(
+                                "alpha\n1234567890123456789012345678901TAIL\nbeta",
+                            ),
+                            tertiary_label: Some("Repo"),
+                            tertiary_value: Some("exampleorg/shinkaevolve"),
+                            tertiary_value_style: None,
+                            focused_field: EditorField::Secondary,
+                            error: None,
+                            footer_hint: "Enter save  Esc cancel",
+                        },
+                        frame.area().width,
+                    ),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("       TAIL"));
+        assert!(text.contains("       beta|"));
+    }
+
+    #[test]
+    fn editor_styles_repo_value_as_link() {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    render_editor(
+                        &Theme::default(),
+                        EditorView {
+                            title: "Edit Todo",
+                            primary_label: "Title",
+                            primary_value: "Draft spec",
+                            secondary_label: None,
+                            secondary_value: None,
+                            tertiary_label: Some("Repo"),
+                            tertiary_value: Some("openai/codex"),
+                            tertiary_value_style: Some(
+                                Theme::default()
+                                    .text_style(crate::tui::theme::TextTone::Open)
+                                    .add_modifier(Modifier::UNDERLINED),
+                            ),
+                            focused_field: EditorField::Primary,
+                            error: None,
+                            footer_hint: "Enter save  Esc cancel",
+                        },
+                        frame.area().width,
+                    ),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer();
+        let text = buffer_to_string(buffer);
+        let row = text
+            .lines()
+            .position(|line| line.contains("Repo: openai/codex"))
+            .expect("repo line");
+        let column = text
+            .lines()
+            .nth(row)
+            .and_then(|line| line.find("openai/codex"))
+            .expect("repo column");
+
+        assert!(
+            buffer[(column as u16, row as u16)]
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {
