@@ -2658,6 +2658,50 @@ mod tests {
     }
 
     #[test]
+    fn wide_session_layout_matches_overview_details_width_ratio() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 100, 20));
+
+        assert_eq!(body.list.width, 58);
+        assert_eq!(body.note_details.expect("note details").width, 42);
+        assert_eq!(body.history.expect("history").width, 42);
+    }
+
+    #[test]
+    fn wide_session_note_details_and_history_match_left_section_heights() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 120, 24));
+        let list_areas = split_todo_list_area(body.list);
+
+        assert_eq!(
+            body.note_details.expect("note details").height,
+            list_areas.open.height
+        );
+        assert_eq!(
+            body.history.expect("history").height,
+            list_areas.completed.height
+        );
+    }
+
+    #[test]
+    fn inline_note_details_follow_selected_todo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        let initial = render_buffer(&screen, 120, 24);
+        assert!(initial.contains("Note Details"));
+        assert!(initial.contains("title: Draft spec"));
+        assert!(!initial.contains("title: Review bindings"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move selection");
+
+        let next = render_buffer(&screen, 120, 24);
+        assert!(next.contains("title: Review bindings"));
+        assert!(!next.contains("title: Draft spec"));
+    }
+
+    #[test]
     fn wide_history_panel_renders_indented_truncated_title_preview() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
@@ -2826,6 +2870,73 @@ mod tests {
             .expect("open details");
         let hitbox = screen
             .details_note_link_hitboxes()
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/spec")]
+        );
+    }
+
+    #[test]
+    fn session_clicks_repo_in_inline_note_details_with_session_fallback() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        let hitbox = screen
+            .inline_details_repo_hitbox(Rect::new(0, 0, 120, 24))
+            .expect("repo hitbox");
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click repo");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/openai/codex")]
+        );
+    }
+
+    #[test]
+    fn session_clicks_detected_url_in_inline_note_details() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        let hitbox = screen
+            .inline_details_note_link_hitboxes(Rect::new(0, 0, 120, 24))
             .into_iter()
             .next()
             .expect("notes link hitbox")
