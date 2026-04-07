@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::timestamp::{format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{centered_rect, split_screen};
+use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
@@ -183,6 +183,13 @@ struct SessionBodyAreas {
     list: Rect,
     note_details: Option<Rect>,
     history: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRootAreas {
+    top_bar: Rect,
+    pomodoro: Option<Rect>,
+    body: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -719,12 +726,20 @@ impl SessionScreen {
 
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let snapshot = self.snapshot();
-        let layout = self.layout_for_area(frame.area());
+        let root_areas = self.root_areas(frame.area());
         let body_areas = self.body_areas(frame.area());
         let grouped = self.grouped_todos();
         let list_areas = split_todo_list_area(body_areas.list);
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
-        frame.render_widget(self.top_bar(snapshot), layout.top_bar);
+        frame.render_widget(self.top_bar(snapshot), root_areas.top_bar);
+        if let Some(pomodoro_area) = root_areas.pomodoro
+            && let Some(run) = self.active_run.as_ref()
+        {
+            frame.render_widget(
+                active_footer(&self.theme, run, now_utc_timestamp()),
+                pomodoro_area,
+            );
+        }
         frame.render_stateful_widget(
             todo_section_table(
                 "Open",
@@ -761,14 +776,6 @@ impl SessionScreen {
             frame.render_widget(
                 render_session_history_panel(&self.theme, &self.history_events, history_area.width),
                 history_area,
-            );
-        }
-        if let Some(footer_area) = layout.footer
-            && let Some(run) = self.active_run.as_ref()
-        {
-            frame.render_widget(
-                active_footer(&self.theme, run, now_utc_timestamp()),
-                footer_area,
             );
         }
 
@@ -879,18 +886,63 @@ impl SessionScreen {
         if self.is_read_only() { 4 } else { 3 }
     }
 
-    fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
-        split_screen(area, self.top_bar_height(), self.active_footer_height())
+    fn root_areas(&self, area: Rect) -> SessionRootAreas {
+        let outer = Layout::vertical([
+            Constraint::Length(self.top_bar_height()),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        let top_bar = outer[0];
+        let remaining = outer[1];
+
+        if let Some(pomodoro_height) = self.active_footer_height() {
+            match layout_mode(area.width) {
+                LayoutMode::Wide => {
+                    let top_height = self.top_bar_height().max(pomodoro_height);
+                    let top_outer =
+                        Layout::vertical([Constraint::Length(top_height), Constraint::Min(0)])
+                            .split(area);
+                    let top = Layout::horizontal([
+                        Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
+                        Constraint::Percentage(SESSION_HISTORY_PERCENT),
+                    ])
+                    .split(top_outer[0]);
+                    SessionRootAreas {
+                        top_bar: top[0],
+                        pomodoro: Some(top[1]),
+                        body: top_outer[1],
+                    }
+                }
+                LayoutMode::Medium | LayoutMode::Narrow => {
+                    let lower = Layout::vertical([
+                        Constraint::Length(pomodoro_height.min(remaining.height)),
+                        Constraint::Min(0),
+                    ])
+                    .split(remaining);
+                    SessionRootAreas {
+                        top_bar,
+                        pomodoro: Some(lower[0]),
+                        body: lower[1],
+                    }
+                }
+            }
+        } else {
+            SessionRootAreas {
+                top_bar,
+                pomodoro: None,
+                body: remaining,
+            }
+        }
     }
 
     fn body_areas(&self, area: Rect) -> SessionBodyAreas {
-        let layout = self.layout_for_area(area);
-        if layout.list.width >= 90 {
+        let body = self.root_areas(area).body;
+        if body.width >= 90 {
             let columns = Layout::horizontal([
                 Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
                 Constraint::Percentage(SESSION_HISTORY_PERCENT),
             ])
-            .split(layout.list);
+            .split(body);
             let list_areas = split_todo_list_area(columns[0]);
             let sidebar = Layout::vertical([
                 Constraint::Length(list_areas.open.height),
@@ -904,7 +956,7 @@ impl SessionScreen {
             }
         } else {
             SessionBodyAreas {
-                list: layout.list,
+                list: body,
                 note_details: None,
                 history: None,
             }
@@ -2750,7 +2802,7 @@ mod tests {
     }
 
     #[test]
-    fn active_footer_renders_in_narrow_session_layout() {
+    fn active_pomodoro_renders_below_header_in_narrow_session_layout() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
             .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
@@ -2761,6 +2813,12 @@ mod tests {
         assert!(tiny.contains("Pomodoro"));
         assert!(tiny.contains("FOCUS"));
         assert!(!tiny.contains("Linked:"));
+        let lines: Vec<_> = tiny.lines().collect();
+        let session_line = line_index_containing(&lines, "Session").expect("session line");
+        let pomodoro_line = line_index_containing(&lines, "Pomodoro").expect("pomodoro line");
+        let open_line = line_index_containing(&lines, "Open").expect("open line");
+        assert!(session_line < pomodoro_line);
+        assert!(pomodoro_line < open_line);
     }
 
     #[test]
@@ -3039,7 +3097,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_screen_hides_pomodoro_footer() {
+    fn idle_screen_hides_pomodoro_box() {
         let (_directory, _database, screen) = seeded_screen();
         let wide = render_buffer(&screen, 120, 24);
         let medium = render_buffer(&screen, 80, 24);
@@ -3048,7 +3106,7 @@ mod tests {
     }
 
     #[test]
-    fn active_focus_footer_renders_without_session_link() {
+    fn active_focus_pomodoro_renders_in_top_region_without_session_link() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
             .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
@@ -3060,6 +3118,12 @@ mod tests {
         assert!(rendered.contains("FOCUS"));
         assert!(!rendered.contains("Linked:"));
         assert!(!rendered.contains("No linked todo"));
+        let lines: Vec<_> = rendered.lines().collect();
+        let session_line = line_index_containing(&lines, "Session").expect("session line");
+        let pomodoro_line = line_index_containing(&lines, "Pomodoro").expect("pomodoro line");
+        let open_line = line_index_containing(&lines, "Open").expect("open line");
+        assert_eq!(session_line, pomodoro_line);
+        assert!(pomodoro_line < open_line);
         assert_eq!(
             screen.active_run.as_ref().map(|active| active.id),
             Some(run.id)
@@ -3067,7 +3131,7 @@ mod tests {
     }
 
     #[test]
-    fn active_break_footer_renders_in_session_view() {
+    fn active_break_pomodoro_renders_in_session_view() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
             .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
@@ -3177,6 +3241,10 @@ mod tests {
             lines.push(line);
         }
         lines.join("\n")
+    }
+
+    fn line_index_containing(lines: &[&str], needle: &str) -> Option<usize> {
+        lines.iter().position(|line| line.contains(needle))
     }
 
     fn key(code: KeyCode) -> KeyEvent {
