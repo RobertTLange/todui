@@ -44,9 +44,11 @@ const NOTES_EDITOR_HEIGHT: u16 = 18;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
 const OVERVIEW_NOTES_PERCENT: u16 = 40;
 const OVERVIEW_SUMMARY_PERCENT: u16 = 20;
+const OVERVIEW_WIDE_LEFT_TOP_PERCENT: u16 = 50;
+const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 70;
+const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 30;
 const OVERVIEW_WIDE_PRIMARY_PERCENT: u16 = 58;
 const OVERVIEW_WIDE_SECONDARY_PERCENT: u16 = 42;
-
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
 }
@@ -720,7 +722,7 @@ impl OverviewScreen {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Details")
+                    .title("Session Details")
                     .style(self.theme.surface_style(SurfaceTone::Neutral))
                     .border_style(self.theme.surface_border_style(SurfaceTone::Details))
                     .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
@@ -1020,16 +1022,20 @@ impl OverviewScreen {
             ])
             .split(body);
             let left_column = Layout::vertical([
-                Constraint::Percentage(OVERVIEW_LIST_PERCENT),
-                Constraint::Percentage(OVERVIEW_NOTES_PERCENT),
-                Constraint::Percentage(OVERVIEW_SUMMARY_PERCENT),
+                Constraint::Percentage(OVERVIEW_WIDE_LEFT_TOP_PERCENT),
+                Constraint::Percentage(100 - OVERVIEW_WIDE_LEFT_TOP_PERCENT),
             ])
             .split(columns[0]);
+            let right_column = Layout::vertical([
+                Constraint::Percentage(OVERVIEW_WIDE_RIGHT_TOP_PERCENT),
+                Constraint::Percentage(OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT),
+            ])
+            .split(columns[1]);
             OverviewBodyAreas {
                 list: left_column[0],
                 notes: left_column[1],
-                summary: left_column[2],
-                details: Some(columns[1]),
+                summary: right_column[1],
+                details: Some(right_column[0]),
             }
         } else {
             let stacked = Layout::vertical([
@@ -1465,12 +1471,8 @@ impl OverviewScreen {
                 inner_width,
             ));
             lines.push(Line::from(String::new()));
-            lines.push(Line::from(
-                "Enter expands the session todos. Use Right or l to open the session head.",
-            ));
-            lines.push(Line::from(
-                "Use o inside the session to return here. Use H inside the session for revision history.",
-            ));
+            lines.push(Line::from("Enter expands todos. Right/l opens session."));
+            lines.push(Line::from("Use o to return here. H opens history."));
             lines
         })
     }
@@ -2200,10 +2202,11 @@ mod tests {
         assert!(wide_buffer.contains("total todos: 1"));
         assert!(wide_buffer.contains("open: 1"));
         assert!(wide_buffer.contains("completed: 0"));
-        assert!(wide_buffer.contains("completion rate: 0%"));
+        assert!(wide_buffer.contains("completion rate:"));
+        assert!(wide_buffer.contains("0%"));
         assert!(wide_buffer.contains("open todo list:"));
-        assert!(wide_buffer.contains("Enter expands the session todos."));
-        assert!(wide_buffer.contains("session head."));
+        assert!(wide_buffer.contains("Enter expands todos."));
+        assert!(wide_buffer.contains("Right/l opens session."));
         assert!(wide_buffer.contains("return here."));
         assert!(!wide_buffer.contains("Pomodoro"));
         assert!(!wide_buffer.contains("Keys"));
@@ -2259,9 +2262,7 @@ mod tests {
         let open_todo_list_index = metadata.find("open todo list:").expect("list");
         let draft_spec_index = metadata.find("  [ ] Draft spec").expect("draft spec");
         let ship_docs_index = metadata.find("  [ ] Ship docs").expect("ship docs");
-        let hints_index = metadata
-            .find("Enter expands the session todos.")
-            .expect("hint");
+        let hints_index = metadata.find("Enter expands todos.").expect("hint");
 
         assert!(done_todos_index < open_todo_list_index);
         assert!(open_todo_list_index < draft_spec_index);
@@ -2330,10 +2331,25 @@ mod tests {
     }
 
     #[test]
-    fn overview_layout_uses_forty_forty_twenty_split() {
+    fn overview_wide_layout_places_summary_below_details() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 120, 20));
+        let details = body.details.expect("wide layout details");
+
+        assert_eq!(body.list.x, body.notes.x);
+        assert!(body.notes.y > body.list.y);
+        assert_eq!(details.x, body.summary.x);
+        assert_eq!(details.width, body.summary.width);
+        assert!(body.summary.y > details.y);
+        assert!(body.summary.height < details.height);
+    }
+
+    #[test]
+    fn overview_narrow_layout_keeps_stacked_summary_without_details() {
         let (_directory, _database, screen) = seeded_overview_screen();
         let body = screen.body_areas(Rect::new(0, 0, 80, 20));
 
+        assert!(body.details.is_none());
         assert_eq!(body.list.height, body.notes.height);
         assert!(body.summary.height < body.notes.height);
     }
