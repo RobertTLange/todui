@@ -20,7 +20,7 @@ use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_compact_local, format_full_local, format_month_day_local};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
+use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
@@ -49,6 +49,7 @@ const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 70;
 const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 30;
 const OVERVIEW_WIDE_PRIMARY_PERCENT: u16 = 58;
 const OVERVIEW_WIDE_SECONDARY_PERCENT: u16 = 42;
+const OVERVIEW_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
 }
@@ -1057,36 +1058,33 @@ impl OverviewScreen {
 
     fn root_areas(&self, area: Rect) -> OverviewRootAreas {
         if self.active_run.is_some() {
-            match layout_mode(area.width) {
-                LayoutMode::Wide => {
-                    let outer = Layout::vertical([
-                        Constraint::Length(active_footer_height()),
-                        Constraint::Min(8),
-                    ])
-                    .split(area);
-                    let top = Layout::horizontal([
-                        Constraint::Percentage(OVERVIEW_WIDE_PRIMARY_PERCENT),
-                        Constraint::Percentage(OVERVIEW_WIDE_SECONDARY_PERCENT),
-                    ])
-                    .split(outer[0]);
-                    OverviewRootAreas {
-                        top_bar: top[0],
-                        pomodoro: Some(top[1]),
-                        body: outer[1],
-                    }
+            if area.width >= OVERVIEW_INLINE_POMODORO_MIN_WIDTH {
+                let outer = Layout::vertical([
+                    Constraint::Length(active_footer_height()),
+                    Constraint::Min(8),
+                ])
+                .split(area);
+                let top = Layout::horizontal([
+                    Constraint::Percentage(OVERVIEW_WIDE_PRIMARY_PERCENT),
+                    Constraint::Percentage(OVERVIEW_WIDE_SECONDARY_PERCENT),
+                ])
+                .split(outer[0]);
+                OverviewRootAreas {
+                    top_bar: top[0],
+                    pomodoro: Some(top[1]),
+                    body: outer[1],
                 }
-                LayoutMode::Medium | LayoutMode::Narrow => {
-                    let outer = Layout::vertical([
-                        Constraint::Length(3),
-                        Constraint::Length(active_footer_height()),
-                        Constraint::Min(8),
-                    ])
-                    .split(area);
-                    OverviewRootAreas {
-                        top_bar: outer[0],
-                        pomodoro: Some(outer[1]),
-                        body: outer[2],
-                    }
+            } else {
+                let outer = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Length(active_footer_height()),
+                    Constraint::Min(8),
+                ])
+                .split(area);
+                OverviewRootAreas {
+                    top_bar: outer[0],
+                    pomodoro: Some(outer[1]),
+                    body: outer[2],
                 }
             }
         } else {
@@ -2543,6 +2541,31 @@ mod tests {
             line_index_containing(&medium_lines, "Sessions").expect("sessions line");
         assert!(medium_overview_line < medium_pomodoro_line);
         assert!(medium_pomodoro_line < medium_sessions_line);
+    }
+
+    #[test]
+    fn overview_keeps_pomodoro_inline_until_eighty_nine_columns() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let at_threshold = render_buffer(&mut screen, 90, 20);
+        let at_threshold_lines: Vec<_> = at_threshold.lines().collect();
+        let overview_line =
+            line_index_containing(&at_threshold_lines, "Overview").expect("overview line");
+        let pomodoro_line =
+            line_index_containing(&at_threshold_lines, "Pomodoro").expect("pomodoro line");
+        assert_eq!(overview_line, pomodoro_line);
+
+        let below_threshold = render_buffer(&mut screen, 89, 20);
+        let below_threshold_lines: Vec<_> = below_threshold.lines().collect();
+        let below_overview_line =
+            line_index_containing(&below_threshold_lines, "Overview").expect("overview line");
+        let below_pomodoro_line =
+            line_index_containing(&below_threshold_lines, "Pomodoro").expect("pomodoro line");
+        assert!(below_overview_line < below_pomodoro_line);
     }
 
     #[test]

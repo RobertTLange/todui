@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
+use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
@@ -39,6 +39,7 @@ use crate::tui::widgets::todo_list::{
 const EVENT_POLL_MS: u64 = 250;
 const SESSION_TODO_LIST_PERCENT: u16 = 58;
 const SESSION_HISTORY_PERCENT: u16 = 42;
+const SESSION_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
 
 pub fn run(
     database: &mut Database,
@@ -898,34 +899,31 @@ impl SessionScreen {
         let remaining = outer[1];
 
         if let Some(pomodoro_height) = self.active_footer_height() {
-            match layout_mode(area.width) {
-                LayoutMode::Wide => {
-                    let top_height = self.top_bar_height().max(pomodoro_height);
-                    let top_outer =
-                        Layout::vertical([Constraint::Length(top_height), Constraint::Min(0)])
-                            .split(area);
-                    let top = Layout::horizontal([
-                        Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
-                        Constraint::Percentage(SESSION_HISTORY_PERCENT),
-                    ])
-                    .split(top_outer[0]);
-                    SessionRootAreas {
-                        top_bar: top[0],
-                        pomodoro: Some(top[1]),
-                        body: top_outer[1],
-                    }
+            if area.width >= SESSION_INLINE_POMODORO_MIN_WIDTH {
+                let top_height = self.top_bar_height().max(pomodoro_height);
+                let top_outer =
+                    Layout::vertical([Constraint::Length(top_height), Constraint::Min(0)])
+                        .split(area);
+                let top = Layout::horizontal([
+                    Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
+                    Constraint::Percentage(SESSION_HISTORY_PERCENT),
+                ])
+                .split(top_outer[0]);
+                SessionRootAreas {
+                    top_bar: top[0],
+                    pomodoro: Some(top[1]),
+                    body: top_outer[1],
                 }
-                LayoutMode::Medium | LayoutMode::Narrow => {
-                    let lower = Layout::vertical([
-                        Constraint::Length(pomodoro_height.min(remaining.height)),
-                        Constraint::Min(0),
-                    ])
-                    .split(remaining);
-                    SessionRootAreas {
-                        top_bar,
-                        pomodoro: Some(lower[0]),
-                        body: lower[1],
-                    }
+            } else {
+                let lower = Layout::vertical([
+                    Constraint::Length(pomodoro_height.min(remaining.height)),
+                    Constraint::Min(0),
+                ])
+                .split(remaining);
+                SessionRootAreas {
+                    top_bar,
+                    pomodoro: Some(lower[0]),
+                    body: lower[1],
                 }
             }
         } else {
@@ -2833,6 +2831,30 @@ mod tests {
         let open_line = line_index_containing(&lines, "Open").expect("open line");
         assert!(session_line < pomodoro_line);
         assert!(pomodoro_line < open_line);
+    }
+
+    #[test]
+    fn active_pomodoro_stays_inline_until_eighty_nine_columns() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let at_threshold = render_buffer(&screen, 90, 24);
+        let at_threshold_lines: Vec<_> = at_threshold.lines().collect();
+        let session_line = line_index_containing(&at_threshold_lines, "Session").expect("session");
+        let pomodoro_line =
+            line_index_containing(&at_threshold_lines, "Pomodoro").expect("pomodoro");
+        assert_eq!(session_line, pomodoro_line);
+
+        let below_threshold = render_buffer(&screen, 89, 24);
+        let below_threshold_lines: Vec<_> = below_threshold.lines().collect();
+        let below_session_line =
+            line_index_containing(&below_threshold_lines, "Session").expect("session");
+        let below_pomodoro_line =
+            line_index_containing(&below_threshold_lines, "Pomodoro").expect("pomodoro");
+        assert!(below_session_line < below_pomodoro_line);
     }
 
     #[test]
