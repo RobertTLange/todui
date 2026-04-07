@@ -17,7 +17,7 @@ use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, Sessi
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
-use crate::timestamp::{format_full_local, now_utc_timestamp};
+use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
 use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
@@ -731,7 +731,8 @@ impl SessionScreen {
         let grouped = self.grouped_todos();
         let list_areas = split_todo_list_area(body_areas.list);
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
-        frame.render_widget(self.top_bar(snapshot), root_areas.top_bar);
+        let clock = format_compact_local(now_utc_timestamp());
+        frame.render_widget(self.top_bar(snapshot, &clock), root_areas.top_bar);
         if let Some(pomodoro_area) = root_areas.pomodoro
             && let Some(run) = self.active_run.as_ref()
         {
@@ -850,7 +851,7 @@ impl SessionScreen {
         }
     }
 
-    fn top_bar(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+    fn top_bar(&self, snapshot: &SessionSnapshot, clock: &str) -> Paragraph<'static> {
         let revision = self
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
@@ -875,6 +876,7 @@ impl SessionScreen {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Session")
+                    .title(Line::from(format!("⏰ {clock}")).right_aligned())
                     .style(self.theme.surface_style(SurfaceTone::Neutral))
                     .border_style(self.theme.surface_border_style(SurfaceTone::Open))
                     .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
@@ -2083,6 +2085,18 @@ mod tests {
     }
 
     #[test]
+    fn session_header_renders_clock_in_top_border() {
+        let (_directory, _database, screen) = seeded_screen();
+        let snapshot = screen.snapshot();
+        let rendered = render_widget_buffer(40, 3, |frame| {
+            frame.render_widget(screen.top_bar(snapshot, "12:34:56"), frame.area());
+        });
+
+        assert!(rendered.contains("12:34:56"));
+        assert!(rendered.contains("Session"));
+    }
+
+    #[test]
     fn screen_handles_mouse_history_and_pomodoro_controls() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let area = Rect::new(0, 0, 120, 24);
@@ -3229,6 +3243,17 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| screen.render(frame)).expect("draw");
         terminal.backend().buffer().clone()
+    }
+
+    fn render_widget_buffer(
+        width: u16,
+        height: u16,
+        render: impl FnOnce(&mut ratatui::Frame<'_>),
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(render).expect("draw");
+        buffer_to_string(terminal.backend().buffer())
     }
 
     fn buffer_to_string(buffer: &Buffer) -> String {

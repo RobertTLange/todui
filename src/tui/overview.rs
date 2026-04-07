@@ -17,7 +17,7 @@ use crate::domain::session::SessionOverview;
 use crate::domain::todo::{Todo, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
-use crate::timestamp::{format_full_local, format_month_day_local};
+use crate::timestamp::{format_compact_local, format_full_local, format_month_day_local};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
 use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
@@ -571,7 +571,8 @@ impl OverviewScreen {
         let root_areas = self.root_areas(frame.area());
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
-        frame.render_widget(self.top_bar(), root_areas.top_bar);
+        let clock = format_compact_local(now_utc_timestamp());
+        frame.render_widget(self.top_bar(&clock), root_areas.top_bar);
         if let Some(run) = self.active_run.as_ref()
             && let Some(pomodoro_area) = root_areas.pomodoro
         {
@@ -655,7 +656,7 @@ impl OverviewScreen {
         }
     }
 
-    fn top_bar(&self) -> Paragraph<'static> {
+    fn top_bar(&self, clock: &str) -> Paragraph<'static> {
         let subtitle = if self.sessions.is_empty() {
             if self.has_any_sessions {
                 String::from("No sessions with open todos")
@@ -677,6 +678,7 @@ impl OverviewScreen {
             Block::default()
                 .borders(Borders::ALL)
                 .title("Overview")
+                .title(Line::from(format!("⏰ {clock}")).right_aligned())
                 .style(self.theme.surface_style(SurfaceTone::Neutral))
                 .border_style(self.theme.surface_border_style(SurfaceTone::Open))
                 .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
@@ -2231,6 +2233,17 @@ mod tests {
     }
 
     #[test]
+    fn overview_header_renders_clock_in_top_border() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let rendered = render_widget_buffer(40, 3, |frame| {
+            frame.render_widget(screen.top_bar("12:34:56"), frame.area());
+        });
+
+        assert!(rendered.contains("12:34:56"));
+        assert!(rendered.contains("Overview"));
+    }
+
+    #[test]
     fn overview_metadata_lists_open_todos_between_summary_and_hints() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
         let done_todo = database
@@ -3132,6 +3145,17 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal.draw(|frame| screen.render(frame)).expect("draw");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
+    fn render_widget_buffer(
+        width: u16,
+        height: u16,
+        render: impl FnOnce(&mut ratatui::Frame<'_>),
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(render).expect("draw");
         buffer_to_string(terminal.backend().buffer())
     }
 
