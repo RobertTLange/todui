@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::db::sessions::OverviewAggregateSnapshot;
 use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::session::SessionOverview;
@@ -41,12 +42,13 @@ const SESSION_METADATA_WIDTH: u16 = 60;
 const SESSION_METADATA_HEIGHT: u16 = 21;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
+const WEEK_SECONDS: i64 = 7 * 24 * 60 * 60;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
 const OVERVIEW_NOTES_PERCENT: u16 = 40;
 const OVERVIEW_SUMMARY_PERCENT: u16 = 20;
 const OVERVIEW_WIDE_LEFT_TOP_PERCENT: u16 = 50;
-const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 70;
-const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 30;
+const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 50;
+const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 50;
 const OVERVIEW_WIDE_PRIMARY_PERCENT: u16 = 58;
 const OVERVIEW_WIDE_SECONDARY_PERCENT: u16 = 42;
 const OVERVIEW_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
@@ -99,6 +101,7 @@ struct OverviewScreen {
     sessions: Vec<SessionOverview>,
     detail_sessions: Vec<ExpandedSessionState>,
     expanded_sessions: Vec<ExpandedSessionState>,
+    previous_week_summary: OverviewAggregateSnapshot,
     active_run: Option<PomodoroRun>,
     overview_notes: String,
     has_any_sessions: bool,
@@ -189,6 +192,7 @@ impl OverviewScreen {
             sessions: Vec::new(),
             detail_sessions: Vec::new(),
             expanded_sessions: Vec::new(),
+            previous_week_summary: OverviewAggregateSnapshot::default(),
             active_run: None,
             overview_notes: String::new(),
             has_any_sessions: false,
@@ -207,6 +211,8 @@ impl OverviewScreen {
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.has_any_sessions = database.has_any_sessions()?;
         self.sessions = database.list_session_overview()?;
+        self.previous_week_summary =
+            database.overview_aggregate_as_of(now_utc_timestamp() - WEEK_SECONDS)?;
         self.detail_sessions = self
             .sessions
             .iter()
@@ -758,31 +764,80 @@ impl OverviewScreen {
 
     fn summary_panel(&self) -> Paragraph<'static> {
         let stats = self.summary_stats();
-        let text = format!(
-            "total sessions: {} | tagged: {} | untagged: {} | avg revision: r{}\ntotal todos: {} | open: {} | completed: {} | completion rate: {}%\nnewest opened: {} | oldest opened: {}",
-            stats.total_sessions,
-            stats.tagged_sessions,
-            stats.untagged_sessions,
-            stats.average_revision,
-            stats.total_todos,
-            stats.open_todos,
-            stats.done_todos,
-            stats.completion_rate,
-            format_month_day_local(stats.newest_last_opened_at),
+        let previous = self.previous_week_summary;
+        let tagged_share = percentage_of(stats.tagged_sessions, stats.total_sessions);
+        let untagged_share = percentage_of(stats.untagged_sessions, stats.total_sessions);
+        let open_share = percentage_of(stats.open_todos, stats.total_todos);
+        let completed_share = percentage_of(stats.done_todos, stats.total_todos);
+        let newest_opened = if stats.total_sessions == 0 {
+            String::from("n/a")
+        } else {
+            format_month_day_local(stats.newest_last_opened_at)
+        };
+        let oldest_opened = if stats.total_sessions == 0 {
+            String::from("n/a")
+        } else {
             format_month_day_local(stats.oldest_last_opened_at)
-        );
+        };
 
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Summary")
-                    .style(self.theme.surface_style(SurfaceTone::Neutral))
-                    .border_style(self.theme.surface_border_style(SurfaceTone::Open))
-                    .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
-            )
-            .style(self.theme.surface_style(SurfaceTone::Neutral))
+        Paragraph::new(vec![
+            Line::from(format!(
+                "sessions: {} ({})",
+                stats.total_sessions,
+                format_wow_delta(stats.total_sessions - previous.total_sessions)
+            )),
+            Line::from(format!(
+                "tagged: {} ({}%, {})",
+                stats.tagged_sessions,
+                tagged_share,
+                format_wow_delta(stats.tagged_sessions - previous.tagged_sessions)
+            )),
+            Line::from(format!(
+                "untagged: {} ({}%)",
+                stats.untagged_sessions, untagged_share
+            )),
+            Line::from(format!(
+                "todos: {} ({})",
+                stats.total_todos,
+                format_wow_delta(stats.total_todos - previous.total_todos)
+            )),
+            Line::from(format!(
+                "open: {} ({}%, {})",
+                stats.open_todos,
+                open_share,
+                format_wow_delta(stats.open_todos - previous.open_todos())
+            )),
+            Line::from(format!(
+                "completed: {} ({}%, {})",
+                stats.done_todos,
+                completed_share,
+                format_wow_delta(stats.done_todos - previous.done_todos)
+            )),
+            Line::from(format!(
+                "completion: {}% ({})",
+                stats.completion_rate,
+                format_percentage_point_wow(stats.completion_rate - previous.completion_rate())
+            )),
+            Line::from(format!(
+                "avg rev: r{} ({})",
+                stats.average_revision,
+                format_wow_delta(
+                    i64::from(stats.average_revision) - i64::from(previous.average_revision)
+                )
+            )),
+            Line::from(format!("newest: {newest_opened}")),
+            Line::from(format!("oldest: {oldest_opened}")),
+        ])
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Summary")
+                .style(self.theme.surface_style(SurfaceTone::Neutral))
+                .border_style(self.theme.surface_border_style(SurfaceTone::Open))
+                .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
+        )
+        .style(self.theme.surface_style(SurfaceTone::Neutral))
     }
 
     fn empty_state(&self) -> Paragraph<'static> {
@@ -1098,12 +1153,12 @@ impl OverviewScreen {
     }
 
     fn summary_stats(&self) -> OverviewSummaryStats {
-        let total_sessions = self.sessions.len();
+        let total_sessions = self.sessions.len() as i64;
         let tagged_sessions = self
             .sessions
             .iter()
             .filter(|session| session.tag.is_some())
-            .count();
+            .count() as i64;
         let total_todos = self
             .sessions
             .iter()
@@ -1470,9 +1525,6 @@ impl OverviewScreen {
                 max_open_todos,
                 inner_width,
             ));
-            lines.push(Line::from(String::new()));
-            lines.push(Line::from("Enter expands todos. Right/l opens session."));
-            lines.push(Line::from("Use o to return here. H opens history."));
             lines
         })
     }
@@ -1558,9 +1610,9 @@ impl OverviewScreen {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OverviewSummaryStats {
-    total_sessions: usize,
-    tagged_sessions: usize,
-    untagged_sessions: usize,
+    total_sessions: i64,
+    tagged_sessions: i64,
+    untagged_sessions: i64,
     total_todos: i64,
     open_todos: i64,
     done_todos: i64,
@@ -1583,6 +1635,48 @@ struct OverviewRootAreas {
     top_bar: Rect,
     pomodoro: Option<Rect>,
     body: Rect,
+}
+
+impl OverviewAggregateSnapshot {
+    fn open_todos(self) -> i64 {
+        self.total_todos - self.done_todos
+    }
+
+    fn completion_rate(self) -> i64 {
+        if self.total_todos == 0 {
+            0
+        } else {
+            ((self.done_todos * 100) + (self.total_todos / 2)) / self.total_todos
+        }
+    }
+}
+
+fn format_delta(delta: i64) -> String {
+    if delta > 0 {
+        format!("+{delta}")
+    } else {
+        delta.to_string()
+    }
+}
+
+fn format_wow_delta(delta: i64) -> String {
+    format!("{} WoW", format_delta(delta))
+}
+
+fn format_percentage_point_wow(delta: i64) -> String {
+    format!("{} WoW", format_percentage_point_delta(delta))
+}
+
+fn format_percentage_point_delta(delta: i64) -> String {
+    format!("{}pp", format_delta(delta))
+}
+
+fn percentage_of(part: i64, total: i64) -> i64 {
+    if total == 0 {
+        0
+    } else {
+        ((part * 100) + (total / 2)) / total
+    }
 }
 
 fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
@@ -1917,14 +2011,15 @@ mod tests {
     use ratatui::text::Line;
 
     use super::{
-        OverviewDisplayRow, OverviewExit, OverviewScreen, list_row_index, todo_preview_line,
+        OverviewDisplayRow, OverviewExit, OverviewScreen, WEEK_SECONDS, list_row_index,
+        todo_preview_line,
     };
     use crate::config::Config;
     use crate::db::Database;
     use crate::domain::pomodoro::PomodoroKind;
     use crate::domain::todo::Todo;
     use crate::domain::todo::TodoStatus;
-    use crate::timestamp::format_month_day_local;
+    use crate::timestamp::{format_month_day_local, now_utc_timestamp};
     use crate::tui::browser::{
         reset_test_browser, set_test_browser_should_fail, take_test_browser_opened_urls,
     };
@@ -2073,7 +2168,7 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Enter))
             .expect("expand");
 
-        let buffer = render_buffer(&mut screen, 120, 24);
+        let buffer = render_buffer(&mut screen, 120, 40);
         assert!(buffer.contains("very-long-inline-preview-title"));
         assert!(buffer.contains(&format_month_day_local(long_todo.created_at)));
         assert!(!buffer.contains("done todo should stay hidden"));
@@ -2196,18 +2291,14 @@ mod tests {
         assert!(wide_buffer.contains("General Notes"));
         assert!(wide_buffer.contains("Press m to edit overview notes."));
         assert!(wide_buffer.contains("Summary"));
-        assert!(wide_buffer.contains("total sessions: 2"));
-        assert!(wide_buffer.contains("tagged: 2"));
-        assert!(wide_buffer.contains("untagged: 0"));
-        assert!(wide_buffer.contains("total todos: 1"));
-        assert!(wide_buffer.contains("open: 1"));
-        assert!(wide_buffer.contains("completed: 0"));
-        assert!(wide_buffer.contains("completion rate:"));
-        assert!(wide_buffer.contains("0%"));
-        assert!(wide_buffer.contains("open todo list:"));
-        assert!(wide_buffer.contains("Enter expands todos."));
-        assert!(wide_buffer.contains("Right/l opens session."));
-        assert!(wide_buffer.contains("return here."));
+        assert!(wide_buffer.contains("sessions: 2 (0 WoW)"));
+        assert!(wide_buffer.contains("tagged: 2 (100%, 0 WoW)"));
+        assert!(wide_buffer.contains("untagged: 0 (0%)"));
+        assert!(wide_buffer.contains("todos: 1 (0 WoW)"));
+        assert!(wide_buffer.contains("open: 1 (100%, 0 WoW)"));
+        assert!(wide_buffer.contains("completed: 0 (0%, 0 WoW)"));
+        assert!(wide_buffer.contains("completion: 0% (0pp WoW)"));
+        assert!(wide_buffer.contains("avg rev: r2 (0 WoW)"));
         assert!(!wide_buffer.contains("Pomodoro"));
         assert!(!wide_buffer.contains("Keys"));
 
@@ -2273,13 +2364,11 @@ mod tests {
         let open_todo_list_index = metadata.find("open todo list:").expect("list");
         let draft_spec_index = metadata.find("  [ ] Draft spec").expect("draft spec");
         let ship_docs_index = metadata.find("  [ ] Ship docs").expect("ship docs");
-        let hints_index = metadata.find("Enter expands todos.").expect("hint");
-
         assert!(done_todos_index < open_todo_list_index);
         assert!(open_todo_list_index < draft_spec_index);
         assert!(draft_spec_index < ship_docs_index);
-        assert!(ship_docs_index < hints_index);
         assert!(!metadata.contains("Done task"));
+        assert!(!metadata.contains("Enter expands todos."));
     }
 
     #[test]
@@ -2334,11 +2423,15 @@ mod tests {
             .handle_key(&mut database, key(KeyCode::Down))
             .expect("move to writing");
 
-        let buffer = render_buffer(&mut screen, 92, 24);
+        let metadata = lines_to_string(
+            &screen
+                .selected_session_metadata_lines(10, 48)
+                .expect("metadata lines"),
+        );
 
-        assert!(buffer.contains("very-long-details-preview"));
-        assert!(buffer.contains("..."));
-        assert!(!buffer.contains("suffix-hidden-1234567890"));
+        assert!(metadata.contains("very-long-details-preview"));
+        assert!(metadata.contains("..."));
+        assert!(!metadata.contains("suffix-hidden-1234567890"));
     }
 
     #[test]
@@ -2352,7 +2445,8 @@ mod tests {
         assert_eq!(details.x, body.summary.x);
         assert_eq!(details.width, body.summary.width);
         assert!(body.summary.y > details.y);
-        assert!(body.summary.height < details.height);
+        assert_eq!(body.summary.height, details.height);
+        assert_eq!(body.summary.height, body.notes.height);
     }
 
     #[test]
@@ -2661,6 +2755,52 @@ mod tests {
         assert_eq!(stats.newest_last_opened_at, 1_711_275_800);
         assert_eq!(stats.oldest_last_opened_at, 1_711_275_600);
         assert_eq!(stats.average_revision, 2);
+    }
+
+    #[test]
+    fn overview_summary_panel_shows_week_over_week_deltas() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let now = now_utc_timestamp();
+        let baseline_time = now - (8 * WEEK_SECONDS);
+        let recent_time = now - (2 * 24 * 60 * 60);
+
+        let baseline = database
+            .create_session("Baseline Sprint", Some("work"), None, baseline_time)
+            .expect("baseline session");
+        database
+            .add_todo(&baseline.name, "Draft spec", "", None, baseline_time + 60)
+            .expect("baseline todo");
+
+        let recent = database
+            .create_session("Recent Sprint", Some("private"), None, recent_time)
+            .expect("recent session");
+        let recent_done = database
+            .add_todo(&recent.name, "Done task", "", None, recent_time + 60)
+            .expect("recent done todo");
+        database
+            .add_todo(&recent.name, "Open task", "", None, recent_time + 120)
+            .expect("recent open todo");
+        database
+            .set_todo_status(
+                recent_done.id,
+                Some(&recent.name),
+                TodoStatus::Done,
+                recent_time + 180,
+            )
+            .expect("mark done");
+
+        let mut screen = OverviewScreen::new(Config::default());
+        screen.reload(&database).expect("reload");
+        let rendered = render_buffer(&mut screen, 120, 24);
+
+        assert!(rendered.contains("sessions: 2 (+1 WoW)"));
+        assert!(rendered.contains("tagged: 2 (100%, +1 WoW)"));
+        assert!(rendered.contains("untagged: 0 (0%)"));
+        assert!(rendered.contains("todos: 3 (+2 WoW)"));
+        assert!(rendered.contains("open: 2 (67%, +1 WoW)"));
+        assert!(rendered.contains("completed: 1 (33%, +1 WoW)"));
+        assert!(rendered.contains("completion: 33% (+33pp WoW)"));
+        assert!(rendered.contains("avg rev: r3 (+1 WoW)"));
     }
 
     #[test]
