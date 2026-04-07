@@ -20,7 +20,7 @@ use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_full_local, format_month_day_local};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::centered_rect;
+use crate::tui::layout::{LayoutMode, centered_rect, layout_mode};
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
@@ -44,6 +44,8 @@ const NOTES_EDITOR_HEIGHT: u16 = 18;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
 const OVERVIEW_NOTES_PERCENT: u16 = 40;
 const OVERVIEW_SUMMARY_PERCENT: u16 = 20;
+const OVERVIEW_WIDE_PRIMARY_PERCENT: u16 = 58;
+const OVERVIEW_WIDE_SECONDARY_PERCENT: u16 = 42;
 
 pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
@@ -564,11 +566,19 @@ impl OverviewScreen {
 
     fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
         self.last_area = frame.area();
-        let chunks = self.root_chunks(frame.area());
+        let root_areas = self.root_areas(frame.area());
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
 
-        frame.render_widget(self.top_bar(), chunks[0]);
-        let body_areas = self.body_areas(chunks[1]);
+        frame.render_widget(self.top_bar(), root_areas.top_bar);
+        if let Some(run) = self.active_run.as_ref()
+            && let Some(pomodoro_area) = root_areas.pomodoro
+        {
+            frame.render_widget(
+                active_footer(&self.theme, run, now_utc_timestamp()),
+                pomodoro_area,
+            );
+        }
+        let body_areas = self.body_areas(root_areas.body);
 
         if self.sessions.is_empty() {
             frame.render_widget(self.empty_state(), body_areas.list);
@@ -581,15 +591,6 @@ impl OverviewScreen {
             if let Some(details_area) = body_areas.details {
                 frame.render_widget(self.details_panel(details_area), details_area);
             }
-        }
-
-        if let Some(run) = self.active_run.as_ref()
-            && let Some(footer_area) = chunks.get(2).copied()
-        {
-            frame.render_widget(
-                active_footer(&self.theme, run, now_utc_timestamp()),
-                footer_area,
-            );
         }
 
         if matches!(self.overlay, Some(OverviewOverlay::Help)) {
@@ -1000,7 +1001,7 @@ impl OverviewScreen {
     }
 
     fn list_area(&self, area: Rect) -> Rect {
-        self.body_areas(self.root_chunks(area)[1]).list
+        self.body_areas(self.root_areas(area).body).list
     }
 
     fn rendered_notes(&self, area: Rect) -> crate::tui::widgets::markdown::RenderedTextBlock {
@@ -1013,9 +1014,11 @@ impl OverviewScreen {
 
     fn body_areas(&self, body: Rect) -> OverviewBodyAreas {
         if body.width >= 90 {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-                    .split(body);
+            let columns = Layout::horizontal([
+                Constraint::Percentage(OVERVIEW_WIDE_PRIMARY_PERCENT),
+                Constraint::Percentage(OVERVIEW_WIDE_SECONDARY_PERCENT),
+            ])
+            .split(body);
             let left_column = Layout::vertical([
                 Constraint::Percentage(OVERVIEW_LIST_PERCENT),
                 Constraint::Percentage(OVERVIEW_NOTES_PERCENT),
@@ -1044,12 +1047,48 @@ impl OverviewScreen {
         }
     }
 
-    fn root_chunks(&self, area: Rect) -> Vec<Rect> {
-        let mut constraints = vec![Constraint::Length(3), Constraint::Min(8)];
+    fn root_areas(&self, area: Rect) -> OverviewRootAreas {
         if self.active_run.is_some() {
-            constraints.push(Constraint::Length(active_footer_height()));
+            match layout_mode(area.width) {
+                LayoutMode::Wide => {
+                    let outer = Layout::vertical([
+                        Constraint::Length(active_footer_height()),
+                        Constraint::Min(8),
+                    ])
+                    .split(area);
+                    let top = Layout::horizontal([
+                        Constraint::Percentage(OVERVIEW_WIDE_PRIMARY_PERCENT),
+                        Constraint::Percentage(OVERVIEW_WIDE_SECONDARY_PERCENT),
+                    ])
+                    .split(outer[0]);
+                    OverviewRootAreas {
+                        top_bar: top[0],
+                        pomodoro: Some(top[1]),
+                        body: outer[1],
+                    }
+                }
+                LayoutMode::Medium | LayoutMode::Narrow => {
+                    let outer = Layout::vertical([
+                        Constraint::Length(3),
+                        Constraint::Length(active_footer_height()),
+                        Constraint::Min(8),
+                    ])
+                    .split(area);
+                    OverviewRootAreas {
+                        top_bar: outer[0],
+                        pomodoro: Some(outer[1]),
+                        body: outer[2],
+                    }
+                }
+            }
+        } else {
+            let outer = Layout::vertical([Constraint::Length(3), Constraint::Min(8)]).split(area);
+            OverviewRootAreas {
+                top_bar: outer[0],
+                pomodoro: None,
+                body: outer[1],
+            }
         }
-        Layout::vertical(constraints).split(area).to_vec()
     }
 
     fn summary_stats(&self) -> OverviewSummaryStats {
@@ -1449,7 +1488,7 @@ impl OverviewScreen {
     }
 
     fn details_repo_hitbox(&self) -> Option<Rect> {
-        let body = self.body_areas(self.root_chunks(self.last_area)[1]);
+        let body = self.body_areas(self.root_areas(self.last_area).body);
         repo_hitbox(body.details?, 2, self.selected_session_repo())
     }
 
@@ -1458,7 +1497,7 @@ impl OverviewScreen {
             return Vec::new();
         }
 
-        let notes_area = self.body_areas(self.root_chunks(self.last_area)[1]).notes;
+        let notes_area = self.body_areas(self.root_areas(self.last_area).body).notes;
         let rendered = self.rendered_notes(notes_area);
         link_hitboxes(notes_area, &rendered.links)
     }
@@ -1535,6 +1574,13 @@ struct OverviewBodyAreas {
     notes: Rect,
     summary: Rect,
     details: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverviewRootAreas {
+    top_bar: Rect,
+    pomodoro: Option<Rect>,
+    body: Rect,
 }
 
 fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
@@ -2436,7 +2482,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_shows_active_pomodoro_footer() {
+    fn overview_shows_active_pomodoro_in_top_region() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
 
         database
@@ -2444,11 +2490,30 @@ mod tests {
             .expect("run");
         screen.reload(&database).expect("reload");
 
-        let rendered = render_buffer(&mut screen, 120, 24);
-        assert!(rendered.contains("Pomodoro"));
-        assert!(rendered.contains("SHORT BREAK"));
-        assert!(!rendered.contains("Linked:"));
-        assert!(!rendered.contains("No linked todo"));
+        let wide_rendered = render_buffer(&mut screen, 120, 24);
+        assert!(wide_rendered.contains("Pomodoro"));
+        assert!(wide_rendered.contains("SHORT BREAK"));
+        assert!(!wide_rendered.contains("Linked:"));
+        assert!(!wide_rendered.contains("No linked todo"));
+
+        let wide_lines: Vec<_> = wide_rendered.lines().collect();
+        let overview_line = line_index_containing(&wide_lines, "Overview").expect("overview line");
+        let pomodoro_line = line_index_containing(&wide_lines, "Pomodoro").expect("pomodoro line");
+        let sessions_line = line_index_containing(&wide_lines, "Sessions").expect("sessions line");
+        assert_eq!(overview_line, pomodoro_line);
+        assert!(pomodoro_line < sessions_line);
+
+        let medium_rendered = render_buffer(&mut screen, 80, 20);
+        assert!(medium_rendered.contains("Pomodoro"));
+        let medium_lines: Vec<_> = medium_rendered.lines().collect();
+        let medium_overview_line =
+            line_index_containing(&medium_lines, "Overview").expect("overview line");
+        let medium_pomodoro_line =
+            line_index_containing(&medium_lines, "Pomodoro").expect("pomodoro line");
+        let medium_sessions_line =
+            line_index_containing(&medium_lines, "Sessions").expect("sessions line");
+        assert!(medium_overview_line < medium_pomodoro_line);
+        assert!(medium_pomodoro_line < medium_sessions_line);
     }
 
     #[test]
@@ -3077,6 +3142,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn line_index_containing(lines: &[&str], needle: &str) -> Option<usize> {
+        lines.iter().position(|line| line.contains(needle))
     }
 
     fn key(code: KeyCode) -> KeyEvent {
