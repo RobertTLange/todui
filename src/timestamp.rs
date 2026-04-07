@@ -2,7 +2,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-const COMPACT_FORMAT: &[FormatItem<'_>] = format_description!("[hour]:[minute]");
+const COMPACT_FORMAT: &[FormatItem<'_>] = format_description!("[hour]:[minute]:[second]");
 const FULL_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day] [hour]:[minute]");
 const MONTH_DAY_COMPACT_FORMAT: &[FormatItem<'_>] =
     format_description!("[month]/[day]-[hour]:[minute]");

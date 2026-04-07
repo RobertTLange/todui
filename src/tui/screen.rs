@@ -17,10 +17,10 @@ use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, Sessi
 use crate::domain::session::SessionHeadToken;
 use crate::domain::todo::TodoStatus;
 use crate::error::Result;
-use crate::timestamp::{format_full_local, now_utc_timestamp};
+use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
 use crate::tui::input::resolved_text_char;
-use crate::tui::layout::{centered_rect, split_screen};
+use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line, repo_value_style};
@@ -37,8 +37,9 @@ use crate::tui::widgets::todo_list::{
 };
 
 const EVENT_POLL_MS: u64 = 250;
-const SESSION_TODO_LIST_PERCENT: u16 = 64;
-const SESSION_HISTORY_PERCENT: u16 = 36;
+const SESSION_TODO_LIST_PERCENT: u16 = 58;
+const SESSION_HISTORY_PERCENT: u16 = 42;
+const SESSION_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
 
 pub fn run(
     database: &mut Database,
@@ -181,7 +182,21 @@ struct SessionScreen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionBodyAreas {
     list: Rect,
+    note_details: Option<Rect>,
     history: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionRootAreas {
+    top_bar: Rect,
+    pomodoro: Option<Rect>,
+    body: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailPanelMode {
+    Overlay,
+    Inline,
 }
 
 impl SessionScreen {
@@ -555,6 +570,21 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
+                if self
+                    .inline_details_repo_hitbox(area)
+                    .is_some_and(|hitbox| rect_contains(hitbox, mouse.column, mouse.row))
+                {
+                    self.open_current_todo_repo();
+                    return Ok(());
+                }
+                if let Some(hitbox) = self
+                    .inline_details_note_link_hitboxes(area)
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+                {
+                    self.open_note_url(&hitbox.url);
+                    return Ok(());
+                }
                 let list_areas = split_todo_list_area(self.list_area(area));
                 if let Some(target) = todo_click_target(
                     list_areas,
@@ -697,12 +727,21 @@ impl SessionScreen {
 
     fn render(&self, frame: &mut ratatui::Frame<'_>) {
         let snapshot = self.snapshot();
-        let layout = self.layout_for_area(frame.area());
+        let root_areas = self.root_areas(frame.area());
         let body_areas = self.body_areas(frame.area());
         let grouped = self.grouped_todos();
         let list_areas = split_todo_list_area(body_areas.list);
         frame.render_widget(Block::default().style(self.theme.app_style()), frame.area());
-        frame.render_widget(self.top_bar(snapshot), layout.top_bar);
+        let clock = format_compact_local(now_utc_timestamp());
+        frame.render_widget(self.top_bar(snapshot, &clock), root_areas.top_bar);
+        if let Some(pomodoro_area) = root_areas.pomodoro
+            && let Some(run) = self.active_run.as_ref()
+        {
+            frame.render_widget(
+                active_footer(&self.theme, run, now_utc_timestamp()),
+                pomodoro_area,
+            );
+        }
         frame.render_stateful_widget(
             todo_section_table(
                 "Open",
@@ -729,18 +768,16 @@ impl SessionScreen {
             list_areas.completed,
             &mut self.completed_list_state(),
         );
+        if let Some(note_details_area) = body_areas.note_details {
+            frame.render_widget(
+                self.inline_note_details_panel(snapshot, note_details_area.width),
+                note_details_area,
+            );
+        }
         if let Some(history_area) = body_areas.history {
             frame.render_widget(
                 render_session_history_panel(&self.theme, &self.history_events, history_area.width),
                 history_area,
-            );
-        }
-        if let Some(footer_area) = layout.footer
-            && let Some(run) = self.active_run.as_ref()
-        {
-            frame.render_widget(
-                active_footer(&self.theme, run, now_utc_timestamp()),
-                footer_area,
             );
         }
 
@@ -815,7 +852,7 @@ impl SessionScreen {
         }
     }
 
-    fn top_bar(&self, snapshot: &SessionSnapshot) -> Paragraph<'static> {
+    fn top_bar(&self, snapshot: &SessionSnapshot, clock: &str) -> Paragraph<'static> {
         let revision = self
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
@@ -840,6 +877,7 @@ impl SessionScreen {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Session")
+                    .title(Line::from(format!("⏰ {clock}")).right_aligned())
                     .style(self.theme.surface_style(SurfaceTone::Neutral))
                     .border_style(self.theme.surface_border_style(SurfaceTone::Open))
                     .title_style(self.theme.surface_title_style(SurfaceTone::Open)),
@@ -851,39 +889,109 @@ impl SessionScreen {
         if self.is_read_only() { 4 } else { 3 }
     }
 
-    fn layout_for_area(&self, area: Rect) -> crate::tui::layout::ScreenLayout {
-        split_screen(area, self.top_bar_height(), self.active_footer_height())
+    fn root_areas(&self, area: Rect) -> SessionRootAreas {
+        let outer = Layout::vertical([
+            Constraint::Length(self.top_bar_height()),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        let top_bar = outer[0];
+        let remaining = outer[1];
+
+        if let Some(pomodoro_height) = self.active_footer_height() {
+            if area.width >= SESSION_INLINE_POMODORO_MIN_WIDTH {
+                let top_height = self.top_bar_height().max(pomodoro_height);
+                let top_outer =
+                    Layout::vertical([Constraint::Length(top_height), Constraint::Min(0)])
+                        .split(area);
+                let top = Layout::horizontal([
+                    Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
+                    Constraint::Percentage(SESSION_HISTORY_PERCENT),
+                ])
+                .split(top_outer[0]);
+                SessionRootAreas {
+                    top_bar: top[0],
+                    pomodoro: Some(top[1]),
+                    body: top_outer[1],
+                }
+            } else {
+                let lower = Layout::vertical([
+                    Constraint::Length(pomodoro_height.min(remaining.height)),
+                    Constraint::Min(0),
+                ])
+                .split(remaining);
+                SessionRootAreas {
+                    top_bar,
+                    pomodoro: Some(lower[0]),
+                    body: lower[1],
+                }
+            }
+        } else {
+            SessionRootAreas {
+                top_bar,
+                pomodoro: None,
+                body: remaining,
+            }
+        }
     }
 
     fn body_areas(&self, area: Rect) -> SessionBodyAreas {
-        let layout = self.layout_for_area(area);
-        if layout.list.width >= 90 {
+        let body = self.root_areas(area).body;
+        if body.width >= 90 {
             let columns = Layout::horizontal([
                 Constraint::Percentage(SESSION_TODO_LIST_PERCENT),
                 Constraint::Percentage(SESSION_HISTORY_PERCENT),
             ])
-            .split(layout.list);
+            .split(body);
+            let list_areas = split_todo_list_area(columns[0]);
+            let sidebar = Layout::vertical([
+                Constraint::Length(list_areas.open.height),
+                Constraint::Length(list_areas.completed.height),
+            ])
+            .split(columns[1]);
             SessionBodyAreas {
                 list: columns[0],
-                history: Some(columns[1]),
+                note_details: Some(sidebar[0]),
+                history: Some(sidebar[1]),
             }
         } else {
             SessionBodyAreas {
-                list: layout.list,
+                list: body,
+                note_details: None,
                 history: None,
             }
         }
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot, width: u16) -> Paragraph<'static> {
+        self.note_details_panel(snapshot, width, DetailPanelMode::Overlay)
+    }
+
+    fn inline_note_details_panel(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+    ) -> Paragraph<'static> {
+        self.note_details_panel(snapshot, width, DetailPanelMode::Inline)
+    }
+
+    fn note_details_panel(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+        mode: DetailPanelMode,
+    ) -> Paragraph<'static> {
         Paragraph::new(
-            self.rendered_details(snapshot, width.saturating_sub(2))
+            self.rendered_details(snapshot, width.saturating_sub(2), mode)
                 .text,
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Details")
+                .title(match mode {
+                    DetailPanelMode::Overlay => "Details",
+                    DetailPanelMode::Inline => "Note Details",
+                })
                 .style(self.theme.surface_style(SurfaceTone::Neutral))
                 .border_style(self.theme.surface_border_style(SurfaceTone::Details))
                 .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
@@ -1349,6 +1457,7 @@ impl SessionScreen {
         &self,
         snapshot: &SessionSnapshot,
         width: u16,
+        mode: DetailPanelMode,
     ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
             let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
@@ -1395,12 +1504,22 @@ impl SessionScreen {
                         .unwrap_or_else(|| String::from("-"))
                 )),
                 Line::from(format!("id: {}", todo.todo_id)),
-                Line::from(String::new()),
             ]);
-            if effective_repo.is_some() {
-                lines.push(Line::from("u open repo  Esc/Enter/Left close"));
-            } else {
-                lines.push(Line::from("Esc/Enter/Left close"));
+            match mode {
+                DetailPanelMode::Overlay => {
+                    lines.push(Line::from(String::new()));
+                    if effective_repo.is_some() {
+                        lines.push(Line::from("u open repo  Esc/Enter/Left close"));
+                    } else {
+                        lines.push(Line::from("Esc/Enter/Left close"));
+                    }
+                }
+                DetailPanelMode::Inline => {
+                    if effective_repo.is_some() {
+                        lines.push(Line::from(String::new()));
+                        lines.push(Line::from("u open repo"));
+                    }
+                }
             }
             links.shrink_to_fit();
             crate::tui::widgets::markdown::RenderedTextBlock {
@@ -1408,39 +1527,87 @@ impl SessionScreen {
                 links,
             }
         } else {
-            crate::tui::widgets::markdown::RenderedTextBlock {
-                text: Text::from(vec![
+            let lines = match mode {
+                DetailPanelMode::Overlay => vec![
                     Line::from(format!("No todos in session {}", snapshot.session.name)),
                     Line::from(String::new()),
                     Line::from("Esc/Enter/Left close"),
-                ]),
+                ],
+                DetailPanelMode::Inline => vec![
+                    Line::from(format!("No todos in session {}", snapshot.session.name)),
+                    Line::from(String::new()),
+                    Line::from("Create a todo to inspect note details."),
+                ],
+            };
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(lines),
                 links: Vec::new(),
             }
         }
     }
 
     fn details_repo_hitbox(&self) -> Option<Rect> {
-        let repo = self
-            .current_todo()
-            .and_then(|todo| self.current_todo_repo_details(todo).0);
-        repo_hitbox(
+        self.detail_repo_hitbox(
             self.details_overlay_area(self.viewport_area, self.snapshot()),
-            2,
-            repo.as_deref(),
+            DetailPanelMode::Overlay,
         )
     }
 
     fn details_note_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
-        let area = self.details_overlay_area(self.viewport_area, self.snapshot());
-        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2));
+        self.detail_note_link_hitboxes(
+            self.details_overlay_area(self.viewport_area, self.snapshot()),
+            DetailPanelMode::Overlay,
+        )
+    }
+
+    fn inline_details_repo_hitbox(&self, area: Rect) -> Option<Rect> {
+        self.inline_details_area(area)
+            .and_then(|details_area| self.detail_repo_hitbox(details_area, DetailPanelMode::Inline))
+    }
+
+    fn inline_details_note_link_hitboxes(
+        &self,
+        area: Rect,
+    ) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        self.inline_details_area(area)
+            .map(|details_area| {
+                self.detail_note_link_hitboxes(details_area, DetailPanelMode::Inline)
+            })
+            .unwrap_or_default()
+    }
+
+    fn detail_repo_hitbox(&self, area: Rect, mode: DetailPanelMode) -> Option<Rect> {
+        let repo = self
+            .current_todo()
+            .and_then(|todo| self.current_todo_repo_details(todo).0);
+        let line_index = match mode {
+            DetailPanelMode::Overlay | DetailPanelMode::Inline => 2,
+        };
+        repo_hitbox(area, line_index, repo.as_deref())
+    }
+
+    fn detail_note_link_hitboxes(
+        &self,
+        area: Rect,
+        mode: DetailPanelMode,
+    ) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2), mode);
         link_hitboxes(area, &rendered.links)
     }
 
     fn details_overlay_area(&self, area: Rect, snapshot: &SessionSnapshot) -> Rect {
         let overlay_width = centered_rect(area, 60, 1).width;
-        let rendered = self.rendered_details(snapshot, overlay_width.saturating_sub(2));
+        let rendered = self.rendered_details(
+            snapshot,
+            overlay_width.saturating_sub(2),
+            DetailPanelMode::Overlay,
+        );
         let height = rendered.text.lines.len().saturating_add(2).max(12) as u16;
         centered_rect(area, 60, height)
+    }
+
+    fn inline_details_area(&self, area: Rect) -> Option<Rect> {
+        self.body_areas(area).note_details
     }
 
     fn list_area(&self, area: Rect) -> Rect {
@@ -1913,6 +2080,18 @@ mod tests {
         assert!(rendered.contains("read-only"));
         assert!(rendered.contains("h = help"));
         assert!(!rendered.contains("Keys"));
+    }
+
+    #[test]
+    fn session_header_renders_clock_in_top_border() {
+        let (_directory, _database, screen) = seeded_screen();
+        let snapshot = screen.snapshot();
+        let rendered = render_widget_buffer(40, 3, |frame| {
+            frame.render_widget(screen.top_bar(snapshot, "12:34:56"), frame.area());
+        });
+
+        assert!(rendered.contains("12:34:56"));
+        assert!(rendered.contains("Session"));
     }
 
     #[test]
@@ -2426,11 +2605,13 @@ mod tests {
         assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(wide.contains("Note Details"));
         assert!(wide.contains("History"));
         assert!(wide.contains(" - Added"));
         assert!(wide.contains("  Review bindings"));
         assert!(wide.contains("  Draft spec"));
-        assert!(!wide.contains("Details"));
+        assert!(wide.contains("title: Draft spec"));
+        assert!(!wide.contains("Esc/Enter/Left close"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Open"));
@@ -2440,7 +2621,7 @@ mod tests {
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
         assert!(!medium.contains("  Review bindings"));
-        assert!(!medium.contains("Details"));
+        assert!(!medium.contains("Note Details"));
         assert!(!medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
@@ -2511,7 +2692,7 @@ mod tests {
             .expect("delete");
         screen.reload(&database).expect("reload");
 
-        let wide = render_buffer(&screen, 120, 24);
+        let wide = render_buffer(&screen, 120, 32);
         assert!(wide.contains(" - Added"));
         assert!(wide.contains(" - Edited"));
         assert!(wide.contains(" - Completed"));
@@ -2521,7 +2702,7 @@ mod tests {
 
         screen.revision = Some(6);
         screen.reload(&database).expect("reload historical");
-        let historical = render_buffer(&screen, 120, 24);
+        let historical = render_buffer(&screen, 120, 32);
         assert!(historical.contains(" - Completed"));
         assert!(!historical.contains(" - Reopened"));
         assert!(!historical.contains(" - Deleted"));
@@ -2532,10 +2713,56 @@ mod tests {
         let (_directory, _database, screen) = seeded_screen();
 
         let at_threshold = render_buffer(&screen, 90, 24);
+        assert!(at_threshold.contains("Note Details"));
         assert!(at_threshold.contains("History"));
 
         let below_threshold = render_buffer(&screen, 89, 24);
+        assert!(!below_threshold.contains("Note Details"));
         assert!(!below_threshold.contains("History"));
+    }
+
+    #[test]
+    fn wide_session_layout_matches_overview_details_width_ratio() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 100, 20));
+
+        assert_eq!(body.list.width, 58);
+        assert_eq!(body.note_details.expect("note details").width, 42);
+        assert_eq!(body.history.expect("history").width, 42);
+    }
+
+    #[test]
+    fn wide_session_note_details_and_history_match_left_section_heights() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 120, 24));
+        let list_areas = split_todo_list_area(body.list);
+
+        assert_eq!(
+            body.note_details.expect("note details").height,
+            list_areas.open.height
+        );
+        assert_eq!(
+            body.history.expect("history").height,
+            list_areas.completed.height
+        );
+    }
+
+    #[test]
+    fn inline_note_details_follow_selected_todo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        let initial = render_buffer(&screen, 120, 24);
+        assert!(initial.contains("Note Details"));
+        assert!(initial.contains("title: Draft spec"));
+        assert!(!initial.contains("title: Review bindings"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move selection");
+
+        let next = render_buffer(&screen, 120, 24);
+        assert!(next.contains("title: Review bindings"));
+        assert!(!next.contains("title: Draft spec"));
     }
 
     #[test]
@@ -2569,7 +2796,7 @@ mod tests {
         let (_directory, _database, screen) = seeded_screen();
 
         let stacked = render_buffer(&screen, 60, 24);
-        assert!(!stacked.contains("Details"));
+        assert!(!stacked.contains("Note Details"));
         assert!(!stacked.contains("Pomodoro"));
     }
 
@@ -2578,7 +2805,7 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_screen();
 
         let tiny = render_buffer(&screen, 49, 24);
-        assert!(!tiny.contains("Details"));
+        assert!(!tiny.contains("Note Details"));
         assert!(!tiny.contains("Pomodoro"));
 
         screen.overlay = Some(Overlay::Details);
@@ -2587,7 +2814,7 @@ mod tests {
     }
 
     #[test]
-    fn active_footer_renders_in_narrow_session_layout() {
+    fn active_pomodoro_renders_below_header_in_narrow_session_layout() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
             .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
@@ -2598,6 +2825,36 @@ mod tests {
         assert!(tiny.contains("Pomodoro"));
         assert!(tiny.contains("FOCUS"));
         assert!(!tiny.contains("Linked:"));
+        let lines: Vec<_> = tiny.lines().collect();
+        let session_line = line_index_containing(&lines, "Session").expect("session line");
+        let pomodoro_line = line_index_containing(&lines, "Pomodoro").expect("pomodoro line");
+        let open_line = line_index_containing(&lines, "Open").expect("open line");
+        assert!(session_line < pomodoro_line);
+        assert!(pomodoro_line < open_line);
+    }
+
+    #[test]
+    fn active_pomodoro_stays_inline_until_eighty_nine_columns() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
+            .expect("run");
+        screen.reload(&database).expect("reload");
+
+        let at_threshold = render_buffer(&screen, 90, 24);
+        let at_threshold_lines: Vec<_> = at_threshold.lines().collect();
+        let session_line = line_index_containing(&at_threshold_lines, "Session").expect("session");
+        let pomodoro_line =
+            line_index_containing(&at_threshold_lines, "Pomodoro").expect("pomodoro");
+        assert_eq!(session_line, pomodoro_line);
+
+        let below_threshold = render_buffer(&screen, 89, 24);
+        let below_threshold_lines: Vec<_> = below_threshold.lines().collect();
+        let below_session_line =
+            line_index_containing(&below_threshold_lines, "Session").expect("session");
+        let below_pomodoro_line =
+            line_index_containing(&below_threshold_lines, "Pomodoro").expect("pomodoro");
+        assert!(below_session_line < below_pomodoro_line);
     }
 
     #[test]
@@ -2726,6 +2983,73 @@ mod tests {
     }
 
     #[test]
+    fn session_clicks_repo_in_inline_note_details_with_session_fallback() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        let hitbox = screen
+            .inline_details_repo_hitbox(Rect::new(0, 0, 120, 24))
+            .expect("repo hitbox");
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click repo");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/openai/codex")]
+        );
+    }
+
+    #[test]
+    fn session_clicks_detected_url_in_inline_note_details() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                &first_todo.title,
+                "See https://example.com/spec.",
+                None,
+                1_711_275_901,
+            )
+            .expect("set note url");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        let hitbox = screen
+            .inline_details_note_link_hitboxes(Rect::new(0, 0, 120, 24))
+            .into_iter()
+            .next()
+            .expect("notes link hitbox")
+            .area;
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+            )
+            .expect("click note link");
+
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://example.com/spec")]
+        );
+    }
+
+    #[test]
     fn session_ignores_clicks_outside_details_note_url_span() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let first_todo = screen.current_todo().expect("todo").clone();
@@ -2809,7 +3133,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_screen_hides_pomodoro_footer() {
+    fn idle_screen_hides_pomodoro_box() {
         let (_directory, _database, screen) = seeded_screen();
         let wide = render_buffer(&screen, 120, 24);
         let medium = render_buffer(&screen, 80, 24);
@@ -2818,7 +3142,7 @@ mod tests {
     }
 
     #[test]
-    fn active_focus_footer_renders_without_session_link() {
+    fn active_focus_pomodoro_renders_in_top_region_without_session_link() {
         let (_directory, mut database, mut screen) = seeded_screen();
         let run = database
             .start_pomodoro(PomodoroKind::Focus, 1_500, 1_711_275_900)
@@ -2830,6 +3154,12 @@ mod tests {
         assert!(rendered.contains("FOCUS"));
         assert!(!rendered.contains("Linked:"));
         assert!(!rendered.contains("No linked todo"));
+        let lines: Vec<_> = rendered.lines().collect();
+        let session_line = line_index_containing(&lines, "Session").expect("session line");
+        let pomodoro_line = line_index_containing(&lines, "Pomodoro").expect("pomodoro line");
+        let open_line = line_index_containing(&lines, "Open").expect("open line");
+        assert_eq!(session_line, pomodoro_line);
+        assert!(pomodoro_line < open_line);
         assert_eq!(
             screen.active_run.as_ref().map(|active| active.id),
             Some(run.id)
@@ -2837,7 +3167,7 @@ mod tests {
     }
 
     #[test]
-    fn active_break_footer_renders_in_session_view() {
+    fn active_break_pomodoro_renders_in_session_view() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
             .start_pomodoro(PomodoroKind::ShortBreak, 300, 1_711_275_900)
@@ -2937,6 +3267,17 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn render_widget_buffer(
+        width: u16,
+        height: u16,
+        render: impl FnOnce(&mut ratatui::Frame<'_>),
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(render).expect("draw");
+        buffer_to_string(terminal.backend().buffer())
+    }
+
     fn buffer_to_string(buffer: &Buffer) -> String {
         let mut lines = Vec::new();
         for y in 0..buffer.area.height {
@@ -2947,6 +3288,10 @@ mod tests {
             lines.push(line);
         }
         lines.join("\n")
+    }
+
+    fn line_index_containing(lines: &[&str], needle: &str) -> Option<usize> {
+        lines.iter().position(|line| line.contains(needle))
     }
 
     fn key(code: KeyCode) -> KeyEvent {

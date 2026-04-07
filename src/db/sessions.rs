@@ -9,6 +9,15 @@ use crate::domain::session::{
 };
 use crate::error::{AppError, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct OverviewAggregateSnapshot {
+    pub total_sessions: i64,
+    pub tagged_sessions: i64,
+    pub total_todos: i64,
+    pub done_todos: i64,
+    pub average_revision: u32,
+}
+
 impl Database {
     pub fn has_any_sessions(&self) -> Result<bool> {
         Ok(self.connection.query_row(
@@ -84,6 +93,64 @@ impl Database {
         )?;
         let rows = statement.query_map([], map_session_overview)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn overview_aggregate_as_of(&self, as_of: i64) -> Result<OverviewAggregateSnapshot> {
+        let (total_sessions, tagged_sessions, total_todos, done_todos, total_revisions): (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = self.connection.query_row(
+            "WITH latest_revisions AS (
+                SELECT session_id, MAX(revision_number) AS revision_number
+                FROM session_revisions
+                WHERE created_at <= ?1
+                GROUP BY session_id
+             )
+             SELECT
+                COUNT(*) AS total_sessions,
+                COALESCE(SUM(CASE WHEN revisions.session_tag IS NOT NULL THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(revisions.todo_count), 0),
+                COALESCE(SUM(revisions.done_count), 0),
+                COALESCE(SUM(revisions.revision_number), 0)
+             FROM sessions
+             JOIN latest_revisions
+               ON latest_revisions.session_id = sessions.id
+             JOIN session_revisions AS revisions
+               ON revisions.session_id = latest_revisions.session_id
+              AND revisions.revision_number = latest_revisions.revision_number
+             WHERE sessions.created_at <= ?1
+               AND (
+                    revisions.todo_count = 0
+                    OR revisions.todo_count > revisions.done_count
+               )",
+            [as_of],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+
+        let average_revision = if total_sessions == 0 {
+            0
+        } else {
+            ((total_revisions + (total_sessions / 2)) / total_sessions) as u32
+        };
+
+        Ok(OverviewAggregateSnapshot {
+            total_sessions,
+            tagged_sessions,
+            total_todos,
+            done_todos,
+            average_revision,
+        })
     }
 
     pub fn get_session_by_name(&self, name: &str) -> Result<Session> {
@@ -520,6 +587,56 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "writing-sprint");
         assert_eq!(listed[0].tag.as_deref(), Some("work-projects"));
+    }
+
+    #[test]
+    fn overview_aggregate_as_of_uses_historical_visible_state() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let baseline_time = 1_711_275_600;
+        let recent_time = baseline_time + (6 * 24 * 60 * 60);
+
+        let baseline = database
+            .create_session("Baseline Sprint", Some("work"), None, baseline_time)
+            .expect("baseline session");
+        database
+            .add_todo(&baseline.name, "Draft spec", "", None, baseline_time + 60)
+            .expect("baseline todo");
+
+        let recent = database
+            .create_session("Recent Sprint", Some("private"), None, recent_time)
+            .expect("recent session");
+        let recent_done = database
+            .add_todo(&recent.name, "Done task", "", None, recent_time + 60)
+            .expect("recent done todo");
+        database
+            .add_todo(&recent.name, "Open task", "", None, recent_time + 120)
+            .expect("recent open todo");
+        database
+            .set_todo_status(
+                recent_done.id,
+                Some(&recent.name),
+                crate::domain::todo::TodoStatus::Done,
+                recent_time + 180,
+            )
+            .expect("mark done");
+
+        let before_recent = database
+            .overview_aggregate_as_of(recent_time - 1)
+            .expect("before recent snapshot");
+        assert_eq!(before_recent.total_sessions, 1);
+        assert_eq!(before_recent.tagged_sessions, 1);
+        assert_eq!(before_recent.total_todos, 1);
+        assert_eq!(before_recent.done_todos, 0);
+        assert_eq!(before_recent.average_revision, 2);
+
+        let after_recent = database
+            .overview_aggregate_as_of(recent_time + 180)
+            .expect("after recent snapshot");
+        assert_eq!(after_recent.total_sessions, 2);
+        assert_eq!(after_recent.tagged_sessions, 2);
+        assert_eq!(after_recent.total_todos, 3);
+        assert_eq!(after_recent.done_todos, 1);
+        assert_eq!(after_recent.average_revision, 3);
     }
 
     #[test]
