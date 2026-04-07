@@ -37,8 +37,8 @@ use crate::tui::widgets::todo_list::{
 };
 
 const EVENT_POLL_MS: u64 = 250;
-const SESSION_TODO_LIST_PERCENT: u16 = 64;
-const SESSION_HISTORY_PERCENT: u16 = 36;
+const SESSION_TODO_LIST_PERCENT: u16 = 58;
+const SESSION_HISTORY_PERCENT: u16 = 42;
 
 pub fn run(
     database: &mut Database,
@@ -181,7 +181,14 @@ struct SessionScreen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SessionBodyAreas {
     list: Rect,
+    note_details: Option<Rect>,
     history: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailPanelMode {
+    Overlay,
+    Inline,
 }
 
 impl SessionScreen {
@@ -555,6 +562,21 @@ impl SessionScreen {
                     self.handle_history_click(database, area, mouse.row)?;
                     return Ok(());
                 }
+                if self
+                    .inline_details_repo_hitbox(area)
+                    .is_some_and(|hitbox| rect_contains(hitbox, mouse.column, mouse.row))
+                {
+                    self.open_current_todo_repo();
+                    return Ok(());
+                }
+                if let Some(hitbox) = self
+                    .inline_details_note_link_hitboxes(area)
+                    .into_iter()
+                    .find(|hitbox| rect_contains(hitbox.area, mouse.column, mouse.row))
+                {
+                    self.open_note_url(&hitbox.url);
+                    return Ok(());
+                }
                 let list_areas = split_todo_list_area(self.list_area(area));
                 if let Some(target) = todo_click_target(
                     list_areas,
@@ -729,6 +751,12 @@ impl SessionScreen {
             list_areas.completed,
             &mut self.completed_list_state(),
         );
+        if let Some(note_details_area) = body_areas.note_details {
+            frame.render_widget(
+                self.inline_note_details_panel(snapshot, note_details_area.width),
+                note_details_area,
+            );
+        }
         if let Some(history_area) = body_areas.history {
             frame.render_widget(
                 render_session_history_panel(&self.theme, &self.history_events, history_area.width),
@@ -863,27 +891,55 @@ impl SessionScreen {
                 Constraint::Percentage(SESSION_HISTORY_PERCENT),
             ])
             .split(layout.list);
+            let list_areas = split_todo_list_area(columns[0]);
+            let sidebar = Layout::vertical([
+                Constraint::Length(list_areas.open.height),
+                Constraint::Length(list_areas.completed.height),
+            ])
+            .split(columns[1]);
             SessionBodyAreas {
                 list: columns[0],
-                history: Some(columns[1]),
+                note_details: Some(sidebar[0]),
+                history: Some(sidebar[1]),
             }
         } else {
             SessionBodyAreas {
                 list: layout.list,
+                note_details: None,
                 history: None,
             }
         }
     }
 
     fn details_panel(&self, snapshot: &SessionSnapshot, width: u16) -> Paragraph<'static> {
+        self.note_details_panel(snapshot, width, DetailPanelMode::Overlay)
+    }
+
+    fn inline_note_details_panel(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+    ) -> Paragraph<'static> {
+        self.note_details_panel(snapshot, width, DetailPanelMode::Inline)
+    }
+
+    fn note_details_panel(
+        &self,
+        snapshot: &SessionSnapshot,
+        width: u16,
+        mode: DetailPanelMode,
+    ) -> Paragraph<'static> {
         Paragraph::new(
-            self.rendered_details(snapshot, width.saturating_sub(2))
+            self.rendered_details(snapshot, width.saturating_sub(2), mode)
                 .text,
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Details")
+                .title(match mode {
+                    DetailPanelMode::Overlay => "Details",
+                    DetailPanelMode::Inline => "Note Details",
+                })
                 .style(self.theme.surface_style(SurfaceTone::Neutral))
                 .border_style(self.theme.surface_border_style(SurfaceTone::Details))
                 .title_style(self.theme.surface_title_style(SurfaceTone::Details)),
@@ -1349,6 +1405,7 @@ impl SessionScreen {
         &self,
         snapshot: &SessionSnapshot,
         width: u16,
+        mode: DetailPanelMode,
     ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
             let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
@@ -1395,12 +1452,22 @@ impl SessionScreen {
                         .unwrap_or_else(|| String::from("-"))
                 )),
                 Line::from(format!("id: {}", todo.todo_id)),
-                Line::from(String::new()),
             ]);
-            if effective_repo.is_some() {
-                lines.push(Line::from("u open repo  Esc/Enter/Left close"));
-            } else {
-                lines.push(Line::from("Esc/Enter/Left close"));
+            match mode {
+                DetailPanelMode::Overlay => {
+                    lines.push(Line::from(String::new()));
+                    if effective_repo.is_some() {
+                        lines.push(Line::from("u open repo  Esc/Enter/Left close"));
+                    } else {
+                        lines.push(Line::from("Esc/Enter/Left close"));
+                    }
+                }
+                DetailPanelMode::Inline => {
+                    if effective_repo.is_some() {
+                        lines.push(Line::from(String::new()));
+                        lines.push(Line::from("u open repo"));
+                    }
+                }
             }
             links.shrink_to_fit();
             crate::tui::widgets::markdown::RenderedTextBlock {
@@ -1408,39 +1475,87 @@ impl SessionScreen {
                 links,
             }
         } else {
-            crate::tui::widgets::markdown::RenderedTextBlock {
-                text: Text::from(vec![
+            let lines = match mode {
+                DetailPanelMode::Overlay => vec![
                     Line::from(format!("No todos in session {}", snapshot.session.name)),
                     Line::from(String::new()),
                     Line::from("Esc/Enter/Left close"),
-                ]),
+                ],
+                DetailPanelMode::Inline => vec![
+                    Line::from(format!("No todos in session {}", snapshot.session.name)),
+                    Line::from(String::new()),
+                    Line::from("Create a todo to inspect note details."),
+                ],
+            };
+            crate::tui::widgets::markdown::RenderedTextBlock {
+                text: Text::from(lines),
                 links: Vec::new(),
             }
         }
     }
 
     fn details_repo_hitbox(&self) -> Option<Rect> {
-        let repo = self
-            .current_todo()
-            .and_then(|todo| self.current_todo_repo_details(todo).0);
-        repo_hitbox(
+        self.detail_repo_hitbox(
             self.details_overlay_area(self.viewport_area, self.snapshot()),
-            2,
-            repo.as_deref(),
+            DetailPanelMode::Overlay,
         )
     }
 
     fn details_note_link_hitboxes(&self) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
-        let area = self.details_overlay_area(self.viewport_area, self.snapshot());
-        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2));
+        self.detail_note_link_hitboxes(
+            self.details_overlay_area(self.viewport_area, self.snapshot()),
+            DetailPanelMode::Overlay,
+        )
+    }
+
+    fn inline_details_repo_hitbox(&self, area: Rect) -> Option<Rect> {
+        self.inline_details_area(area)
+            .and_then(|details_area| self.detail_repo_hitbox(details_area, DetailPanelMode::Inline))
+    }
+
+    fn inline_details_note_link_hitboxes(
+        &self,
+        area: Rect,
+    ) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        self.inline_details_area(area)
+            .map(|details_area| {
+                self.detail_note_link_hitboxes(details_area, DetailPanelMode::Inline)
+            })
+            .unwrap_or_default()
+    }
+
+    fn detail_repo_hitbox(&self, area: Rect, mode: DetailPanelMode) -> Option<Rect> {
+        let repo = self
+            .current_todo()
+            .and_then(|todo| self.current_todo_repo_details(todo).0);
+        let line_index = match mode {
+            DetailPanelMode::Overlay | DetailPanelMode::Inline => 2,
+        };
+        repo_hitbox(area, line_index, repo.as_deref())
+    }
+
+    fn detail_note_link_hitboxes(
+        &self,
+        area: Rect,
+        mode: DetailPanelMode,
+    ) -> Vec<crate::tui::widgets::markdown::LinkHitbox> {
+        let rendered = self.rendered_details(self.snapshot(), area.width.saturating_sub(2), mode);
         link_hitboxes(area, &rendered.links)
     }
 
     fn details_overlay_area(&self, area: Rect, snapshot: &SessionSnapshot) -> Rect {
         let overlay_width = centered_rect(area, 60, 1).width;
-        let rendered = self.rendered_details(snapshot, overlay_width.saturating_sub(2));
+        let rendered = self.rendered_details(
+            snapshot,
+            overlay_width.saturating_sub(2),
+            DetailPanelMode::Overlay,
+        );
         let height = rendered.text.lines.len().saturating_add(2).max(12) as u16;
         centered_rect(area, 60, height)
+    }
+
+    fn inline_details_area(&self, area: Rect) -> Option<Rect> {
+        self.body_areas(area).note_details
     }
 
     fn list_area(&self, area: Rect) -> Rect {
@@ -2426,11 +2541,13 @@ mod tests {
         assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(wide.contains("Note Details"));
         assert!(wide.contains("History"));
         assert!(wide.contains(" - Added"));
         assert!(wide.contains("  Review bindings"));
         assert!(wide.contains("  Draft spec"));
-        assert!(!wide.contains("Details"));
+        assert!(wide.contains("title: Draft spec"));
+        assert!(!wide.contains("Esc/Enter/Left close"));
         let wide_lines = wide.lines().collect::<Vec<_>>();
         assert!(wide_lines[2].starts_with("└"));
         assert!(wide_lines[3].contains("Open"));
@@ -2440,7 +2557,7 @@ mod tests {
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
         assert!(!medium.contains("  Review bindings"));
-        assert!(!medium.contains("Details"));
+        assert!(!medium.contains("Note Details"));
         assert!(!medium.contains("Keys"));
 
         screen.overlay = Some(Overlay::Details);
@@ -2511,7 +2628,7 @@ mod tests {
             .expect("delete");
         screen.reload(&database).expect("reload");
 
-        let wide = render_buffer(&screen, 120, 24);
+        let wide = render_buffer(&screen, 120, 32);
         assert!(wide.contains(" - Added"));
         assert!(wide.contains(" - Edited"));
         assert!(wide.contains(" - Completed"));
@@ -2521,7 +2638,7 @@ mod tests {
 
         screen.revision = Some(6);
         screen.reload(&database).expect("reload historical");
-        let historical = render_buffer(&screen, 120, 24);
+        let historical = render_buffer(&screen, 120, 32);
         assert!(historical.contains(" - Completed"));
         assert!(!historical.contains(" - Reopened"));
         assert!(!historical.contains(" - Deleted"));
@@ -2532,9 +2649,11 @@ mod tests {
         let (_directory, _database, screen) = seeded_screen();
 
         let at_threshold = render_buffer(&screen, 90, 24);
+        assert!(at_threshold.contains("Note Details"));
         assert!(at_threshold.contains("History"));
 
         let below_threshold = render_buffer(&screen, 89, 24);
+        assert!(!below_threshold.contains("Note Details"));
         assert!(!below_threshold.contains("History"));
     }
 
@@ -2569,7 +2688,7 @@ mod tests {
         let (_directory, _database, screen) = seeded_screen();
 
         let stacked = render_buffer(&screen, 60, 24);
-        assert!(!stacked.contains("Details"));
+        assert!(!stacked.contains("Note Details"));
         assert!(!stacked.contains("Pomodoro"));
     }
 
@@ -2578,7 +2697,7 @@ mod tests {
         let (_directory, _database, mut screen) = seeded_screen();
 
         let tiny = render_buffer(&screen, 49, 24);
-        assert!(!tiny.contains("Details"));
+        assert!(!tiny.contains("Note Details"));
         assert!(!tiny.contains("Pomodoro"));
 
         screen.overlay = Some(Overlay::Details);
