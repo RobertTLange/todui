@@ -39,6 +39,8 @@ use crate::tui::widgets::todo_list::{
 const EVENT_POLL_MS: u64 = 250;
 const SESSION_TODO_LIST_PERCENT: u16 = 58;
 const SESSION_HISTORY_PERCENT: u16 = 42;
+const SESSION_NARROW_LIST_PERCENT: u16 = 80;
+const SESSION_NARROW_HISTORY_PERCENT: u16 = 20;
 const SESSION_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
 
 pub fn run(
@@ -955,10 +957,15 @@ impl SessionScreen {
                 history: Some(sidebar[1]),
             }
         } else {
+            let stacked = Layout::vertical([
+                Constraint::Percentage(SESSION_NARROW_LIST_PERCENT),
+                Constraint::Percentage(SESSION_NARROW_HISTORY_PERCENT),
+            ])
+            .split(body);
             SessionBodyAreas {
-                list: body,
+                list: stacked[0],
                 note_details: None,
-                history: None,
+                history: Some(stacked[1]),
             }
         }
     }
@@ -2641,7 +2648,8 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
-        assert!(!medium.contains("  Review bindings"));
+        assert!(medium.contains("History"));
+        assert!(medium.contains("  Review bindings"));
         assert!(!medium.contains("Note Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2739,7 +2747,7 @@ mod tests {
 
         let below_threshold = render_buffer(&screen, 89, 24);
         assert!(!below_threshold.contains("Note Details"));
-        assert!(!below_threshold.contains("History"));
+        assert!(below_threshold.contains("History"));
     }
 
     #[test]
@@ -2766,6 +2774,21 @@ mod tests {
             body.history.expect("history").height,
             list_areas.completed.height
         );
+    }
+
+    #[test]
+    fn narrow_session_layout_stacks_history_below_completed_with_overview_proportions() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 80, 20));
+
+        let history = body.history.expect("narrow history");
+        let combined_height = body.list.height + history.height;
+        assert!(body.note_details.is_none());
+        assert_eq!(body.list.width, history.width);
+        assert_eq!(combined_height, 17);
+        assert_eq!(body.list.height, 14);
+        assert_eq!(history.height, 3);
+        assert!(history.y > body.list.y);
     }
 
     #[test]
