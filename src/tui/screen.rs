@@ -1248,6 +1248,7 @@ impl SessionScreen {
         }
         self.todo_editor = TodoEditorState {
             mode: TodoEditorMode::Create,
+            repo: self.snapshot().session.repo.clone().unwrap_or_default(),
             focused_field: EditorField::Primary,
             ..TodoEditorState::default()
         };
@@ -2305,6 +2306,26 @@ mod tests {
         assert!(matches!(screen.overlay, Some(Overlay::TodoEditor)));
         assert_eq!(screen.todo_editor.title, "A");
         assert!(render_buffer(&screen, 120, 24).contains("Title: A|"));
+    }
+
+    #[test]
+    fn new_todo_modal_shows_session_repo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+        assert!(render_buffer(&screen, 120, 24).contains("Repo: openai/codex"));
     }
 
     #[test]
