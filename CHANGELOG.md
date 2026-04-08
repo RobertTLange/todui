@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Thanks
+
+- Thanks to @RobertTLange for the TUI theme, layout, and markdown polish in PR #10.
+
 ## [0.1.0] - 2026-04-04
 
 ### Added

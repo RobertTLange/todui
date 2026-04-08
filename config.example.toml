@@ -1,5 +1,7 @@
 [theme]
+# modes: dark, light, beige
 mode = "dark"
+# accents: black, blue, cyan, gray, green, magenta, red, white, yellow
 accent = "cyan"
 
 [pomodoro]

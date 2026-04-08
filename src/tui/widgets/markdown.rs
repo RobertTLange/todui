@@ -151,14 +151,13 @@ fn render_markdown_line(theme: &Theme, line: &str, width: u16) -> RenderedTextBl
         );
     }
 
-    if let Some(content) = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-    {
+    if let Some((indent, content)) = list_item_content(line) {
+        let prefix = format!("{indent}• ");
+        let continuation_prefix = format!("{indent}  ");
         return render_prefixed_line(
             parse_inline_fragments(theme, content, theme.text_style(TextTone::Default), true),
-            "• ",
-            "  ",
+            &prefix,
+            &continuation_prefix,
             width,
             theme
                 .text_style(TextTone::Muted)
@@ -183,6 +182,19 @@ fn heading_content(line: &str) -> Option<(usize, &str)> {
 
     let content = line[hash_count..].strip_prefix(' ')?;
     Some((hash_count, content))
+}
+
+fn list_item_content(line: &str) -> Option<(&str, &str)> {
+    let indent_end = line
+        .char_indices()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(line.len());
+    let (indent, rest) = line.split_at(indent_end);
+    let content = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))?;
+    Some((indent, content))
 }
 
 fn heading_style(theme: &Theme, level: usize) -> Style {
@@ -724,5 +736,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, "https://example.com"), (1, "https://openai.com")]
         );
+    }
+
+    #[test]
+    fn preserves_nested_bullet_indentation() {
+        let theme = Theme::default();
+        let rendered = render_markdown(&theme, "- Idea 1\n  - Point 1", 40);
+
+        assert_eq!(rendered.text.lines[0].spans[0].content.as_ref(), "• ");
+        assert_eq!(rendered.text.lines[1].spans[0].content.as_ref(), "  • ");
+    }
+
+    #[test]
+    fn aligns_wrapped_nested_bullet_continuations() {
+        let theme = Theme::default();
+        let rendered = render_markdown(&theme, "  - Point 1 wraps onto another line", 12);
+
+        assert_eq!(rendered.text.lines[0].spans[0].content.as_ref(), "  • ");
+        assert_eq!(rendered.text.lines[1].spans[0].content.as_ref(), "    ");
     }
 }

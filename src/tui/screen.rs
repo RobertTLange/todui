@@ -39,6 +39,8 @@ use crate::tui::widgets::todo_list::{
 const EVENT_POLL_MS: u64 = 250;
 const SESSION_TODO_LIST_PERCENT: u16 = 58;
 const SESSION_HISTORY_PERCENT: u16 = 42;
+const SESSION_NARROW_LIST_PERCENT: u16 = 80;
+const SESSION_NARROW_HISTORY_PERCENT: u16 = 20;
 const SESSION_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
 
 pub fn run(
@@ -955,10 +957,15 @@ impl SessionScreen {
                 history: Some(sidebar[1]),
             }
         } else {
+            let stacked = Layout::vertical([
+                Constraint::Percentage(SESSION_NARROW_LIST_PERCENT),
+                Constraint::Percentage(SESSION_NARROW_HISTORY_PERCENT),
+            ])
+            .split(body);
             SessionBodyAreas {
-                list: body,
+                list: stacked[0],
                 note_details: None,
-                history: None,
+                history: Some(stacked[1]),
             }
         }
     }
@@ -1248,6 +1255,7 @@ impl SessionScreen {
         }
         self.todo_editor = TodoEditorState {
             mode: TodoEditorMode::Create,
+            repo: self.snapshot().session.repo.clone().unwrap_or_default(),
             focused_field: EditorField::Primary,
             ..TodoEditorState::default()
         };
@@ -1356,7 +1364,10 @@ impl SessionScreen {
         }
 
         let repo = match self.todo_editor.mode {
-            TodoEditorMode::Create => Some(self.todo_editor.repo.as_str()),
+            TodoEditorMode::Create if self.todo_editor.repo_dirty => {
+                Some(self.todo_editor.repo.as_str())
+            }
+            TodoEditorMode::Create => None,
             TodoEditorMode::Edit { .. } if self.todo_editor.repo_dirty => {
                 Some(self.todo_editor.repo.as_str())
             }
@@ -2308,6 +2319,56 @@ mod tests {
     }
 
     #[test]
+    fn new_todo_modal_shows_session_repo() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+
+        assert_eq!(screen.todo_editor.repo, "openai/codex");
+        assert!(render_buffer(&screen, 120, 24).contains("Repo: openai/codex"));
+    }
+
+    #[test]
+    fn new_todo_preserves_inherited_session_repo_without_creating_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Keep inheritance".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        let created = screen.current_todo().expect("selected");
+        assert_eq!(created.title, "Keep inheritance");
+        assert_eq!(database.get_todo(created.todo_id).expect("todo").repo, None);
+    }
+
+    #[test]
     fn edit_todo_modal_shows_inherited_session_repo() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
@@ -2620,7 +2681,8 @@ mod tests {
 
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
-        assert!(!medium.contains("  Review bindings"));
+        assert!(medium.contains("History"));
+        assert!(medium.contains("  Review bindings"));
         assert!(!medium.contains("Note Details"));
         assert!(!medium.contains("Keys"));
 
@@ -2718,7 +2780,7 @@ mod tests {
 
         let below_threshold = render_buffer(&screen, 89, 24);
         assert!(!below_threshold.contains("Note Details"));
-        assert!(!below_threshold.contains("History"));
+        assert!(below_threshold.contains("History"));
     }
 
     #[test]
@@ -2745,6 +2807,21 @@ mod tests {
             body.history.expect("history").height,
             list_areas.completed.height
         );
+    }
+
+    #[test]
+    fn narrow_session_layout_stacks_history_below_completed_with_overview_proportions() {
+        let (_directory, _database, screen) = seeded_screen();
+        let body = screen.body_areas(Rect::new(0, 0, 80, 20));
+
+        let history = body.history.expect("narrow history");
+        let combined_height = body.list.height + history.height;
+        assert!(body.note_details.is_none());
+        assert_eq!(body.list.width, history.width);
+        assert_eq!(combined_height, 17);
+        assert_eq!(body.list.height, 14);
+        assert_eq!(history.height, 3);
+        assert!(history.y > body.list.y);
     }
 
     #[test]
