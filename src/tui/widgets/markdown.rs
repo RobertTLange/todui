@@ -191,7 +191,9 @@ fn list_item_content(line: &str) -> Option<(&str, &str)> {
         .map(|(index, _)| index)
         .unwrap_or(line.len());
     let (indent, rest) = line.split_at(indent_end);
-    let content = rest.strip_prefix("- ").or_else(|| rest.strip_prefix("* "))?;
+    let content = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))?;
     Some((indent, content))
 }
 
@@ -748,11 +750,7 @@ mod tests {
     #[test]
     fn aligns_wrapped_nested_bullet_continuations() {
         let theme = Theme::default();
-        let rendered = render_markdown(
-            &theme,
-            "  - Point 1 wraps onto another line",
-            12,
-        );
+        let rendered = render_markdown(&theme, "  - Point 1 wraps onto another line", 12);
 
         assert_eq!(rendered.text.lines[0].spans[0].content.as_ref(), "  • ");
         assert_eq!(rendered.text.lines[1].spans[0].content.as_ref(), "    ");
