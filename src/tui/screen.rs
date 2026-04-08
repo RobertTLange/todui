@@ -1364,7 +1364,10 @@ impl SessionScreen {
         }
 
         let repo = match self.todo_editor.mode {
-            TodoEditorMode::Create => Some(self.todo_editor.repo.as_str()),
+            TodoEditorMode::Create if self.todo_editor.repo_dirty => {
+                Some(self.todo_editor.repo.as_str())
+            }
+            TodoEditorMode::Create => None,
             TodoEditorMode::Edit { .. } if self.todo_editor.repo_dirty => {
                 Some(self.todo_editor.repo.as_str())
             }
@@ -2333,6 +2336,36 @@ mod tests {
 
         assert_eq!(screen.todo_editor.repo, "openai/codex");
         assert!(render_buffer(&screen, 120, 24).contains("Repo: openai/codex"));
+    }
+
+    #[test]
+    fn new_todo_preserves_inherited_session_repo_without_creating_override() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_900,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Keep inheritance".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        let created = screen.current_todo().expect("selected");
+        assert_eq!(created.title, "Keep inheritance");
+        assert_eq!(database.get_todo(created.todo_id).expect("todo").repo, None);
     }
 
     #[test]
