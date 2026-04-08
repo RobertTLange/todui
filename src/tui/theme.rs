@@ -120,6 +120,30 @@ impl Theme {
                 accent_history: Color::Rgb(161, 82, 93),
                 accent_tag: Color::Rgb(73, 120, 176),
             },
+            "beige" => Self {
+                fg_default: Color::Rgb(54, 44, 34),
+                fg_muted: Color::Rgb(122, 108, 91),
+                fg_success: Color::Rgb(78, 121, 87),
+                fg_warning: Color::Rgb(154, 108, 45),
+                fg_error: Color::Rgb(168, 79, 73),
+                fg_accent: accent,
+                bg_app: Color::Rgb(250, 244, 232),
+                bg_panel: Color::Rgb(244, 236, 221),
+                bg_overlay: Color::Rgb(232, 222, 205),
+                bg_notice: Color::Rgb(248, 236, 204),
+                bg_danger: Color::Rgb(248, 225, 220),
+                bg_open_selected: Color::Rgb(208, 221, 227),
+                bg_completed_selected: Color::Rgb(236, 205, 200),
+                bg_history_selected: Color::Rgb(230, 214, 205),
+                border_default: Color::Rgb(168, 153, 132),
+                border_focus: accent,
+                accent_completed: Color::Rgb(168, 79, 73),
+                accent_details: Color::Rgb(148, 110, 58),
+                accent_focus: Color::Rgb(78, 121, 87),
+                accent_break: Color::Rgb(186, 128, 67),
+                accent_history: Color::Rgb(146, 104, 94),
+                accent_tag: Color::Rgb(101, 124, 143),
+            },
             _ => Self {
                 fg_accent: accent,
                 border_focus: accent,
@@ -283,6 +307,33 @@ mod tests {
         assert_eq!(
             theme.selection_style(SelectionTone::Open).bg,
             Some(Color::Rgb(24, 60, 110))
+        );
+    }
+
+    #[test]
+    fn builds_beige_theme_from_config() {
+        let mut config = Config::default();
+        config.theme.mode = String::from("beige");
+        config.theme.accent = String::from("blue");
+
+        let theme = Theme::from_config(&config);
+
+        assert_eq!(theme.fg_default, Color::Rgb(54, 44, 34));
+        assert_eq!(
+            theme.surface_style(SurfaceTone::Neutral).bg,
+            Some(Color::Rgb(244, 236, 221))
+        );
+        assert_eq!(
+            theme.surface_style(SurfaceTone::Overlay).bg,
+            Some(Color::Rgb(232, 222, 205))
+        );
+        assert_eq!(
+            theme.surface_border_style(SurfaceTone::Open).fg,
+            Some(Color::Blue)
+        );
+        assert_eq!(
+            theme.selection_style(SelectionTone::Open).bg,
+            Some(Color::Rgb(208, 221, 227))
         );
     }
 }
