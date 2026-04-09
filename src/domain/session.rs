@@ -33,6 +33,7 @@ pub struct SessionOverview {
     pub name: String,
     pub tag: Option<String>,
     pub repo: Option<String>,
+    pub updated_at: i64,
     pub last_opened_at: i64,
     pub current_revision: u32,
     pub todo_count: i64,
