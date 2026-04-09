@@ -34,7 +34,7 @@ const TAG_COLUMN_WIDTH: usize = 10;
 const REV_COLUMN_WIDTH: usize = 5;
 const OPEN_COLUMN_WIDTH: usize = 5;
 const DONE_COLUMN_WIDTH: usize = 5;
-const LAST_OPENED_COLUMN_WIDTH: usize = 11;
+const LAST_UPDATED_COLUMN_WIDTH: usize = 12;
 const SESSION_COLUMN_SPACING: usize = 5;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
@@ -672,7 +672,7 @@ impl OverviewScreen {
             }
         } else {
             format!(
-                "{} visible sessions | tag first, then last opened",
+                "{} visible sessions | tag first, then last updated",
                 self.sessions.len()
             )
         };
@@ -769,15 +769,15 @@ impl OverviewScreen {
         let untagged_share = percentage_of(stats.untagged_sessions, stats.total_sessions);
         let open_share = percentage_of(stats.open_todos, stats.total_todos);
         let completed_share = percentage_of(stats.done_todos, stats.total_todos);
-        let newest_opened = if stats.total_sessions == 0 {
+        let newest_updated = if stats.total_sessions == 0 {
             String::from("n/a")
         } else {
-            format_month_day_local(stats.newest_last_opened_at)
+            format_month_day_local(stats.newest_updated_at)
         };
-        let oldest_opened = if stats.total_sessions == 0 {
+        let oldest_updated = if stats.total_sessions == 0 {
             String::from("n/a")
         } else {
-            format_month_day_local(stats.oldest_last_opened_at)
+            format_month_day_local(stats.oldest_updated_at)
         };
 
         Paragraph::new(vec![
@@ -825,8 +825,8 @@ impl OverviewScreen {
                     i64::from(stats.average_revision) - i64::from(previous.average_revision)
                 )
             )),
-            Line::from(format!("newest: {newest_opened}")),
-            Line::from(format!("oldest: {oldest_opened}")),
+            Line::from(format!("newest: {newest_updated}")),
+            Line::from(format!("oldest: {oldest_updated}")),
         ])
         .wrap(Wrap { trim: false })
         .block(
@@ -1175,16 +1175,16 @@ impl OverviewScreen {
         } else {
             ((done_todos * 100) + (total_todos / 2)) / total_todos
         };
-        let newest_last_opened_at = self
+        let newest_updated_at = self
             .sessions
             .iter()
-            .map(|session| session.last_opened_at)
+            .map(|session| session.updated_at)
             .max()
             .unwrap_or(0);
-        let oldest_last_opened_at = self
+        let oldest_updated_at = self
             .sessions
             .iter()
-            .map(|session| session.last_opened_at)
+            .map(|session| session.updated_at)
             .min()
             .unwrap_or(0);
         let total_revisions = self
@@ -1206,8 +1206,8 @@ impl OverviewScreen {
             open_todos,
             done_todos,
             completion_rate,
-            newest_last_opened_at,
-            oldest_last_opened_at,
+            newest_updated_at,
+            oldest_updated_at,
             average_revision,
         }
     }
@@ -1508,8 +1508,8 @@ impl OverviewScreen {
                 )),
                 repo_line(&self.theme, session.repo.as_deref()),
                 Line::from(format!(
-                    "last opened: {}",
-                    format_full_local(session.last_opened_at)
+                    "last updated: {}",
+                    format_full_local(session.updated_at)
                 )),
                 Line::from(format!("current revision: r{}", session.current_revision)),
                 Line::from(format!(
@@ -1617,8 +1617,8 @@ struct OverviewSummaryStats {
     open_todos: i64,
     done_todos: i64,
     completion_rate: i64,
-    newest_last_opened_at: i64,
-    oldest_last_opened_at: i64,
+    newest_updated_at: i64,
+    oldest_updated_at: i64,
     average_revision: u32,
 }
 
@@ -1708,7 +1708,7 @@ fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
         ),
         Span::raw(" "),
         Span::styled(
-            fit_cell("Last Opened", widths.last_opened),
+            fit_cell("Last Updated", widths.updated),
             theme.surface_title_style(SurfaceTone::Open),
         ),
     ])
@@ -1752,10 +1752,7 @@ fn session_row_line(
         ),
         Span::raw(" "),
         Span::styled(
-            fit_cell(
-                &format_month_day_local(session.last_opened_at),
-                widths.last_opened,
-            ),
+            fit_cell(&format_month_day_local(session.updated_at), widths.updated),
             theme.text_style(TextTone::Muted),
         ),
     ]);
@@ -1831,7 +1828,7 @@ fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
             + REV_COLUMN_WIDTH
             + OPEN_COLUMN_WIDTH
             + DONE_COLUMN_WIDTH
-            + LAST_OPENED_COLUMN_WIDTH
+            + LAST_UPDATED_COLUMN_WIDTH
             + SESSION_COLUMN_SPACING,
     );
     SessionColumnWidths {
@@ -1840,7 +1837,7 @@ fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
         rev: REV_COLUMN_WIDTH,
         open: OPEN_COLUMN_WIDTH,
         done: DONE_COLUMN_WIDTH,
-        last_opened: LAST_OPENED_COLUMN_WIDTH,
+        updated: LAST_UPDATED_COLUMN_WIDTH,
     }
 }
 
@@ -1967,7 +1964,7 @@ struct SessionColumnWidths {
     rev: usize,
     open: usize,
     done: usize,
-    last_opened: usize,
+    updated: usize,
 }
 
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
@@ -2285,7 +2282,8 @@ mod tests {
         assert!(wide_buffer.contains("h = help"));
         assert!(wide_buffer.contains("Tag"));
         assert!(wide_buffer.contains("Session"));
-        assert!(wide_buffer.contains("Last Opened"));
+        assert!(wide_buffer.contains("Last Updated"));
+        assert!(wide_buffer.contains("last updated:"));
         assert!(wide_buffer.contains("private"));
         assert!(wide_buffer.contains("writing-sprint"));
         assert!(wide_buffer.contains("General Notes"));
@@ -2330,6 +2328,16 @@ mod tests {
 
         assert!(rendered.contains("12:34:56"));
         assert!(rendered.contains("Overview"));
+    }
+
+    #[test]
+    fn overview_top_bar_mentions_last_updated_ordering() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let rendered = render_widget_buffer(80, 5, |frame| {
+            frame.render_widget(screen.top_bar("12:34:56"), frame.area());
+        });
+
+        assert!(rendered.contains("tag first, then last updated"));
     }
 
     #[test]
@@ -2752,8 +2760,8 @@ mod tests {
         assert_eq!(stats.open_todos, 1);
         assert_eq!(stats.done_todos, 0);
         assert_eq!(stats.completion_rate, 0);
-        assert_eq!(stats.newest_last_opened_at, 1_711_275_800);
-        assert_eq!(stats.oldest_last_opened_at, 1_711_275_600);
+        assert_eq!(stats.newest_updated_at, 1_711_275_700);
+        assert_eq!(stats.oldest_updated_at, 1_711_275_650);
         assert_eq!(stats.average_revision, 2);
     }
 
