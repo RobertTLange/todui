@@ -74,6 +74,7 @@ impl Database {
                 sessions.slug,
                 sessions.tag,
                 sessions.repo,
+                sessions.updated_at,
                 sessions.last_opened_at,
                 sessions.current_revision,
                 COALESCE(session_revisions.todo_count, 0),
@@ -88,7 +89,7 @@ impl Database {
              ORDER BY
                sessions.tag IS NULL ASC,
                sessions.tag ASC,
-               sessions.last_opened_at DESC,
+               sessions.updated_at DESC,
                sessions.id DESC",
         )?;
         let rows = statement.query_map([], map_session_overview)?;
@@ -533,10 +534,11 @@ fn map_session_overview(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionOver
         name: row.get(1)?,
         tag: row.get(2)?,
         repo: row.get(3)?,
-        last_opened_at: row.get(4)?,
-        current_revision: row.get(5)?,
-        todo_count: row.get(6)?,
-        done_count: row.get(7)?,
+        updated_at: row.get(4)?,
+        last_opened_at: row.get(5)?,
+        current_revision: row.get(6)?,
+        todo_count: row.get(7)?,
+        done_count: row.get(8)?,
     })
 }
 
@@ -688,6 +690,12 @@ mod tests {
         let private = database
             .create_session("Reading Sprint", Some("private"), None, 1_711_275_700)
             .expect("session");
+        let planning = database
+            .create_session("Planning Sprint", Some("work"), None, 1_711_275_705)
+            .expect("session");
+        database
+            .add_todo(&planning.name, "Outline roadmap", "", None, 1_711_275_810)
+            .expect("todo");
         let finished = database
             .create_session("Archive Sprint", Some("archive"), None, 1_711_275_750)
             .expect("session");
@@ -710,17 +718,20 @@ mod tests {
             .expect("opened");
 
         let overview = database.list_session_overview().expect("overview");
-        assert_eq!(overview.len(), 3);
+        assert_eq!(overview.len(), 4);
         assert_eq!(overview[0].name, private.name);
         assert_eq!(overview[0].tag.as_deref(), Some("private"));
-        assert_eq!(overview[1].name, writing.name);
+        assert_eq!(overview[1].name, planning.name);
         assert_eq!(overview[1].tag.as_deref(), Some("work"));
-        assert_eq!(overview[1].last_opened_at, 1_711_275_800);
-        assert_eq!(overview[2].name, inbox.name);
-        assert_eq!(overview[2].tag, None);
-        assert_eq!(overview[2].last_opened_at, 1_711_275_900);
-        assert_eq!(overview[1].todo_count, 2);
-        assert_eq!(overview[1].done_count, 1);
+        assert_eq!(overview[1].updated_at, 1_711_275_810);
+        assert_eq!(overview[2].name, writing.name);
+        assert_eq!(overview[2].tag.as_deref(), Some("work"));
+        assert_eq!(overview[2].updated_at, 1_711_275_670);
+        assert_eq!(overview[3].name, inbox.name);
+        assert_eq!(overview[3].tag, None);
+        assert_eq!(overview[3].updated_at, 1_711_275_900);
+        assert_eq!(overview[2].todo_count, 2);
+        assert_eq!(overview[2].done_count, 1);
         assert!(overview.iter().all(|session| session.name != finished.name));
     }
 
