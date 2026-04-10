@@ -1704,12 +1704,12 @@ fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
     spans.extend([
         Span::raw(" "),
         Span::styled(
-            fit_cell("☐", widths.open),
+            fit_cell("□", widths.open),
             theme.surface_title_style(SurfaceTone::Open),
         ),
         Span::raw(" "),
         Span::styled(
-            fit_cell("☑", widths.done),
+            fit_cell("■", widths.done),
             theme.surface_title_style(SurfaceTone::Open),
         ),
         Span::raw(" "),
@@ -1750,7 +1750,7 @@ fn session_row_line(
     spans.extend([
         Span::raw(" "),
         Span::styled(
-            fit_cell(
+            checkbox_cell(
                 &(session.todo_count - session.done_count).to_string(),
                 widths.open,
             ),
@@ -1758,7 +1758,7 @@ fn session_row_line(
         ),
         Span::raw(" "),
         Span::styled(
-            fit_cell(&session.done_count.to_string(), widths.done),
+            checkbox_cell(&session.done_count.to_string(), widths.done),
             theme.text_style(TextTone::Completed),
         ),
         Span::raw(" "),
@@ -1865,6 +1865,17 @@ fn fit_cell(text: &str, width: usize) -> String {
     value
 }
 
+fn checkbox_cell(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return fit_cell(text, width);
+    }
+
+    center_cell(text, width)
+}
+
 fn fit_cell_with_ellipsis(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -1891,6 +1902,24 @@ fn right_align_cell(text: &str, width: usize) -> String {
     let value = text.chars().take(width).collect::<String>();
     let padding = width.saturating_sub(value.chars().count());
     format!("{}{}", " ".repeat(padding), value)
+}
+
+fn center_cell(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let value = text.chars().take(width).collect::<String>();
+    let padding = width.saturating_sub(value.chars().count());
+    let left_padding = padding / 2;
+    let right_padding = padding.saturating_sub(left_padding);
+
+    format!(
+        "{}{}{}",
+        " ".repeat(left_padding),
+        value,
+        " ".repeat(right_padding)
+    )
 }
 
 fn open_preview_todos(todos: Vec<Todo>) -> Vec<Todo> {
@@ -2032,7 +2061,7 @@ mod tests {
 
     use super::{
         OverviewDisplayRow, OverviewExit, OverviewScreen, WEEK_SECONDS, list_row_index,
-        todo_preview_line,
+        session_header_line, session_row_line, todo_preview_line,
     };
     use crate::config::Config;
     use crate::db::Database;
@@ -2340,6 +2369,41 @@ mod tests {
         assert!(empty_buffer.contains("General Notes"));
         assert!(empty_buffer.contains("Summary"));
         assert!(!empty_buffer.contains("Keys"));
+    }
+
+    #[test]
+    fn overview_session_list_hides_revision_column_before_truncating_name() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+
+        let narrow = render_widget_buffer(52, 8, |frame| {
+            frame.render_widget(screen.session_list(frame.area()), frame.area());
+        });
+        assert!(!narrow.contains("Rev"));
+        assert!(!narrow.contains("r2"));
+        assert!(narrow.contains("writing-sprint"));
+
+        let wide = render_widget_buffer(58, 8, |frame| {
+            frame.render_widget(screen.session_list(frame.area()), frame.area());
+        });
+        assert!(wide.contains("Rev"));
+        assert!(wide.contains("r2"));
+    }
+
+    #[test]
+    fn overview_uses_square_headers_for_count_columns() {
+        let (_directory, _database, screen) = seeded_overview_screen();
+        let header = lines_to_string(&[session_header_line(&screen.theme, 42)]);
+        let writing = screen
+            .sessions
+            .iter()
+            .find(|session| session.name == "writing-sprint")
+            .expect("writing sprint");
+        let row = lines_to_string(&[session_row_line(writing, &screen.theme, 42, false)]);
+
+        assert!(header.contains("□   "));
+        assert!(header.contains("■   "));
+        assert!(row.contains(" 1  "));
+        assert!(row.contains(" 0  "));
     }
 
     #[test]
