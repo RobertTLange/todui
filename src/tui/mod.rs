@@ -34,15 +34,29 @@ fn run_loop(
     initial_route: TuiRoute,
 ) -> Result<()> {
     let mut route = initial_route;
+    let mut overview_navigation = overview::OverviewNavigationState::default();
     loop {
         route = match route {
-            TuiRoute::Overview => match overview::run_in_terminal(terminal, database, config)? {
-                overview::OverviewExit::Quit => break Ok(()),
-                overview::OverviewExit::OpenSession(session_name) => TuiRoute::Session {
-                    session_name: Some(session_name),
-                    revision: None,
-                },
-            },
+            TuiRoute::Overview => {
+                match overview::run_in_terminal(
+                    terminal,
+                    database,
+                    config,
+                    overview_navigation.clone(),
+                )? {
+                    overview::OverviewExit::Quit => break Ok(()),
+                    overview::OverviewExit::OpenSession {
+                        session_name,
+                        navigation,
+                    } => {
+                        overview_navigation = navigation;
+                        TuiRoute::Session {
+                            session_name: Some(session_name),
+                            revision: None,
+                        }
+                    }
+                }
+            }
             TuiRoute::Session {
                 session_name,
                 revision,
