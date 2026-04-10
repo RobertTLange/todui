@@ -58,12 +58,20 @@ pub fn run(database: &mut Database, config: &Config) -> Result<()> {
     super::run(database, config, super::TuiRoute::Overview)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OverviewNavigationState {
+    selected_index: usize,
+    scroll_offset: usize,
+}
+
 pub(crate) fn run_in_terminal(
     terminal: &mut AppTerminal,
     database: &mut Database,
     config: &Config,
+    navigation: OverviewNavigationState,
 ) -> Result<OverviewExit> {
-    let mut screen = OverviewScreen::new(config.clone());
+    let mut screen = OverviewScreen::new(config.clone(), navigation);
+    screen.last_area = terminal.size()?.into();
     screen.reload(database)?;
 
     loop {
@@ -95,7 +103,10 @@ pub(crate) fn run_in_terminal(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverviewExit {
     Quit,
-    OpenSession(String),
+    OpenSession {
+        session_name: String,
+        navigation: OverviewNavigationState,
+    },
 }
 
 #[derive(Debug)]
@@ -189,7 +200,7 @@ impl Default for SessionEditorState {
 }
 
 impl OverviewScreen {
-    fn new(config: Config) -> Self {
+    fn new(config: Config, navigation: OverviewNavigationState) -> Self {
         Self {
             sessions: Vec::new(),
             detail_sessions: Vec::new(),
@@ -198,8 +209,8 @@ impl OverviewScreen {
             active_run: None,
             overview_notes: String::new(),
             has_any_sessions: false,
-            selected_index: 0,
-            scroll_offset: 0,
+            selected_index: navigation.selected_index,
+            scroll_offset: navigation.scroll_offset,
             theme: Theme::from_config(&config),
             config,
             last_area: Rect::default(),
@@ -229,7 +240,12 @@ impl OverviewScreen {
         self.overview_notes = database.get_overview_notes()?;
         self.selected_index = min(self.selected_index, self.sessions.len().saturating_sub(1));
         self.sync_expanded_sessions(database)?;
-        self.ensure_selection_visible(self.visible_rows());
+        if self.last_area.width == 0 || self.last_area.height == 0 {
+            let max_scroll = self.display_rows().len().saturating_sub(1);
+            self.scroll_offset = min(self.scroll_offset, max_scroll);
+        } else {
+            self.ensure_selection_visible(self.visible_rows());
+        }
         Ok(())
     }
 
@@ -368,9 +384,9 @@ impl OverviewScreen {
                 self.toggle_selected_session_todos(database)?;
                 None
             }
-            KeyCode::Right | KeyCode::Char('l') => {
-                self.selected_session_name().map(OverviewExit::OpenSession)
-            }
+            KeyCode::Right | KeyCode::Char('l') => self
+                .selected_session_name()
+                .map(|session_name| self.open_session_exit(session_name)),
             _ => None,
         };
 
@@ -1011,6 +1027,28 @@ impl OverviewScreen {
             .map(|session| session.name.clone())
     }
 
+    fn navigation_state(&self) -> OverviewNavigationState {
+        OverviewNavigationState {
+            selected_index: self.selected_index,
+            scroll_offset: self.scroll_offset,
+        }
+    }
+
+    fn open_session_exit(&self, session_name: String) -> OverviewExit {
+        let mut navigation = self.navigation_state();
+        if let Some(selected_index) = self
+            .sessions
+            .iter()
+            .position(|session| session.name == session_name)
+        {
+            navigation.selected_index = selected_index;
+        }
+        OverviewExit::OpenSession {
+            session_name,
+            navigation,
+        }
+    }
+
     fn visible_rows(&self) -> usize {
         self.visible_rows_for_height(self.list_area(self.last_area).height)
     }
@@ -1348,7 +1386,7 @@ impl OverviewScreen {
                     Ok(session) => {
                         self.reload(database)?;
                         self.close_session_editor();
-                        Ok(Some(OverviewExit::OpenSession(session.name)))
+                        Ok(Some(self.open_session_exit(session.name)))
                     }
                     Err(error) => {
                         self.session_editor.error = Some(error.to_string());
@@ -2060,8 +2098,8 @@ mod tests {
     use ratatui::text::Line;
 
     use super::{
-        OverviewDisplayRow, OverviewExit, OverviewScreen, WEEK_SECONDS, list_row_index,
-        session_header_line, session_row_line, todo_preview_line,
+        OverviewDisplayRow, OverviewExit, OverviewNavigationState, OverviewScreen, WEEK_SECONDS,
+        list_row_index, session_header_line, session_row_line, todo_preview_line,
     };
     use crate::config::Config;
     use crate::db::Database;
@@ -2097,7 +2135,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             exit,
-            Some(OverviewExit::OpenSession(String::from("writing-sprint")))
+            Some(OverviewExit::OpenSession {
+                session_name: String::from("writing-sprint"),
+                navigation: OverviewNavigationState {
+                    selected_index: 1,
+                    scroll_offset: 0,
+                },
+            })
         );
 
         let exit = screen
@@ -2275,7 +2319,16 @@ mod tests {
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
-        assert_eq!(exit, Some(OverviewExit::OpenSession(String::from("inbox"))));
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession {
+                session_name: String::from("inbox"),
+                navigation: OverviewNavigationState {
+                    selected_index: 0,
+                    scroll_offset: 0,
+                },
+            })
+        );
         assert_eq!(
             database
                 .get_session_by_name("inbox")
@@ -2359,7 +2412,7 @@ mod tests {
         assert!(!narrow_buffer.contains("Details"));
 
         let (_directory, database) = Database::open_temp().expect("database");
-        let mut empty = OverviewScreen::new(Config::default());
+        let mut empty = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         empty.reload(&database).expect("reload");
         let empty_buffer = render_buffer(&mut empty, 80, 20);
         assert!(empty_buffer.contains("No sessions yet."));
@@ -2584,7 +2637,7 @@ mod tests {
             .mark_session_opened(&work.name, 1_711_276_000)
             .expect("opened");
 
-        let mut screen = OverviewScreen::new(Config::default());
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
 
         assert_eq!(
@@ -2649,7 +2702,7 @@ mod tests {
             )
             .expect("done");
 
-        let mut screen = OverviewScreen::new(Config::default());
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
 
         let buffer = render_buffer(&mut screen, 80, 20);
@@ -2676,7 +2729,7 @@ mod tests {
             .mark_session_opened(&work.name, 1_711_276_000)
             .expect("opened");
 
-        let mut screen = OverviewScreen::new(Config::default());
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
 
         assert_eq!(
@@ -2822,7 +2875,7 @@ mod tests {
 
         let mut config = Config::default();
         config.keys.pomodoro = vec![String::from("x")];
-        let mut screen = OverviewScreen::new(config);
+        let mut screen = OverviewScreen::new(config, OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
 
         screen
@@ -2884,7 +2937,7 @@ mod tests {
             )
             .expect("mark done");
 
-        let mut screen = OverviewScreen::new(Config::default());
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
         let rendered = render_buffer(&mut screen, 120, 24);
 
@@ -3370,6 +3423,125 @@ mod tests {
     }
 
     #[test]
+    fn overview_restores_selection_after_opening_session() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("move to writing");
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Right))
+            .expect("open session");
+        let Some(OverviewExit::OpenSession {
+            session_name,
+            navigation,
+        }) = exit
+        else {
+            panic!("expected session open exit");
+        };
+        assert_eq!(session_name, "writing-sprint");
+
+        let mut restored = OverviewScreen::new(Config::default(), navigation);
+        restored.last_area = Rect::new(0, 0, 120, 24);
+        restored
+            .reload(&database)
+            .expect("reload restored overview");
+
+        assert_eq!(
+            restored.selected_session_name().as_deref(),
+            Some("writing-sprint")
+        );
+    }
+
+    #[test]
+    fn overview_return_does_not_reopen_expanded_session_rows() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("expand");
+        assert!(
+            screen
+                .display_rows()
+                .iter()
+                .any(|row| matches!(row, OverviewDisplayRow::EmptyTodos(_)))
+        );
+
+        let navigation = screen.navigation_state();
+        let mut restored = OverviewScreen::new(Config::default(), navigation);
+        restored.last_area = Rect::new(0, 0, 120, 24);
+        restored
+            .reload(&database)
+            .expect("reload restored overview");
+
+        assert!(restored.display_rows().iter().all(|row| !matches!(
+            row,
+            OverviewDisplayRow::Todo { .. } | OverviewDisplayRow::EmptyTodos(_)
+        )));
+    }
+
+    #[test]
+    fn overview_restores_scroll_offset_from_navigation_state() {
+        let (_directory, database, mut screen) = seeded_overview_screen_with_count(12);
+        screen.last_area = Rect::new(0, 0, 120, 8);
+        for _ in 0..7 {
+            screen.move_selection(1);
+        }
+        let selected_session_name = screen.selected_session_name();
+        let scroll_offset = screen.scroll_offset;
+        assert!(scroll_offset > 0);
+
+        let mut restored = OverviewScreen::new(Config::default(), screen.navigation_state());
+        restored.last_area = Rect::new(0, 0, 120, 8);
+        restored
+            .reload(&database)
+            .expect("reload restored overview");
+
+        assert_eq!(restored.selected_session_name(), selected_session_name);
+        assert_eq!(restored.scroll_offset, scroll_offset);
+    }
+
+    #[test]
+    fn overview_reload_with_unknown_viewport_keeps_saved_scroll_offset() {
+        let (_directory, database, mut screen) = seeded_overview_screen_with_count(12);
+        screen.last_area = Rect::new(0, 0, 120, 8);
+        for _ in 0..7 {
+            screen.move_selection(1);
+        }
+        let selected_index = screen.selected_index;
+        let scroll_offset = screen.scroll_offset;
+        let navigation = screen.navigation_state();
+
+        let mut restored = OverviewScreen::new(Config::default(), navigation);
+        restored
+            .reload(&database)
+            .expect("reload restored overview");
+
+        assert_eq!(restored.selected_index, selected_index);
+        assert_eq!(restored.scroll_offset, scroll_offset);
+    }
+
+    #[test]
+    fn overview_navigation_state_clamps_when_selected_session_is_gone() {
+        let (_directory, database, mut screen) = seeded_overview_screen_with_count(2);
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        screen.move_selection(1);
+        let mut navigation = screen.navigation_state();
+        navigation.selected_index = 9;
+        navigation.scroll_offset = 9;
+
+        let mut restored = OverviewScreen::new(Config::default(), navigation);
+        restored.last_area = Rect::new(0, 0, 120, 24);
+        restored
+            .reload(&database)
+            .expect("reload restored overview");
+
+        assert_eq!(restored.selected_index, 1);
+        assert_eq!(restored.scroll_offset, 0);
+    }
+
+    #[test]
     fn list_row_index_uses_inner_rows_only() {
         let area = Rect::new(0, 0, 40, 10);
         assert_eq!(list_row_index(area, 0, 0), None);
@@ -3394,7 +3566,36 @@ mod tests {
             .mark_session_opened(&reading.name, 1_711_275_800)
             .expect("opened");
 
-        let mut screen = OverviewScreen::new(Config::default());
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        (directory, database, screen)
+    }
+
+    fn seeded_overview_screen_with_count(
+        count: usize,
+    ) -> (tempfile::TempDir, Database, OverviewScreen) {
+        let (directory, mut database) = Database::open_temp().expect("database");
+        for index in 0..count {
+            let session = database
+                .create_session(
+                    &format!("Session {index:02}"),
+                    None,
+                    None,
+                    1_711_275_600 + index as i64,
+                )
+                .expect("session");
+            database
+                .add_todo(
+                    &session.name,
+                    &format!("Todo {index:02}"),
+                    "",
+                    None,
+                    1_711_275_700 + index as i64,
+                )
+                .expect("todo");
+        }
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
         screen.reload(&database).expect("reload");
         (directory, database, screen)
     }
