@@ -30,12 +30,14 @@ use crate::tui::widgets::markdown::{link_hitboxes, render_markdown};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
 const EVENT_POLL_MS: u64 = 250;
-const TAG_COLUMN_WIDTH: usize = 10;
+const TAG_COLUMN_WIDTH: usize = 6;
 const REV_COLUMN_WIDTH: usize = 5;
-const OPEN_COLUMN_WIDTH: usize = 5;
-const DONE_COLUMN_WIDTH: usize = 5;
+const OPEN_COLUMN_WIDTH: usize = 4;
+const DONE_COLUMN_WIDTH: usize = 4;
 const LAST_UPDATED_COLUMN_WIDTH: usize = 12;
 const SESSION_COLUMN_SPACING: usize = 5;
+const SESSION_COLUMN_SPACING_WITHOUT_REV: usize = 4;
+const MIN_PREFERRED_SESSION_NAME_WIDTH: usize = 17;
 const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
 const SESSION_METADATA_WIDTH: u16 = 60;
@@ -1681,7 +1683,7 @@ fn percentage_of(part: i64, total: i64) -> i64 {
 
 fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
     let widths = session_column_widths(inner_width);
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             fit_cell("Tag", widths.tag),
             theme.surface_title_style(SurfaceTone::Open),
@@ -1691,11 +1693,15 @@ fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
             fit_cell("Name", widths.name),
             theme.surface_title_style(SurfaceTone::Open),
         ),
-        Span::raw(" "),
-        Span::styled(
+    ];
+    if widths.shows_revision() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
             fit_cell("Rev", widths.rev),
             theme.surface_title_style(SurfaceTone::Open),
-        ),
+        ));
+    }
+    spans.extend([
         Span::raw(" "),
         Span::styled(
             fit_cell("☐", widths.open),
@@ -1711,7 +1717,8 @@ fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
             fit_cell("Last Updated", widths.updated),
             theme.surface_title_style(SurfaceTone::Open),
         ),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn session_row_line(
@@ -1721,7 +1728,7 @@ fn session_row_line(
     is_selected: bool,
 ) -> Line<'static> {
     let widths = session_column_widths(inner_width);
-    let mut line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             fit_cell(session.tag.as_deref().unwrap_or("-"), widths.tag),
             if session.tag.is_some() {
@@ -1732,11 +1739,15 @@ fn session_row_line(
         ),
         Span::raw(" "),
         Span::raw(fit_cell(&session.name, widths.name)),
-        Span::raw(" "),
-        Span::styled(
+    ];
+    if widths.shows_revision() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
             fit_cell(&format!("r{}", session.current_revision), widths.rev),
             theme.text_style(TextTone::Meta),
-        ),
+        ));
+    }
+    spans.extend([
         Span::raw(" "),
         Span::styled(
             fit_cell(
@@ -1756,6 +1767,7 @@ fn session_row_line(
             theme.text_style(TextTone::Muted),
         ),
     ]);
+    let mut line = Line::from(spans);
     if is_selected {
         line = line.style(theme.selection_style(SelectionTone::Open));
     }
@@ -1823,18 +1835,23 @@ fn session_open_todo_lines(
 }
 
 fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
-    let name_width = inner_width.saturating_sub(
-        TAG_COLUMN_WIDTH
+    let base_width =
+        TAG_COLUMN_WIDTH + OPEN_COLUMN_WIDTH + DONE_COLUMN_WIDTH + LAST_UPDATED_COLUMN_WIDTH;
+    let rev_visible = inner_width
+        >= base_width
             + REV_COLUMN_WIDTH
-            + OPEN_COLUMN_WIDTH
-            + DONE_COLUMN_WIDTH
-            + LAST_UPDATED_COLUMN_WIDTH
-            + SESSION_COLUMN_SPACING,
-    );
+            + SESSION_COLUMN_SPACING
+            + MIN_PREFERRED_SESSION_NAME_WIDTH;
+    let (rev_width, spacing_width) = if rev_visible {
+        (REV_COLUMN_WIDTH, SESSION_COLUMN_SPACING)
+    } else {
+        (0, SESSION_COLUMN_SPACING_WITHOUT_REV)
+    };
+    let name_width = inner_width.saturating_sub(base_width + rev_width + spacing_width);
     SessionColumnWidths {
         tag: TAG_COLUMN_WIDTH,
         name: name_width.max(1),
-        rev: REV_COLUMN_WIDTH,
+        rev: rev_width,
         open: OPEN_COLUMN_WIDTH,
         done: DONE_COLUMN_WIDTH,
         updated: LAST_UPDATED_COLUMN_WIDTH,
@@ -1965,6 +1982,12 @@ struct SessionColumnWidths {
     open: usize,
     done: usize,
     updated: usize,
+}
+
+impl SessionColumnWidths {
+    fn shows_revision(self) -> bool {
+        self.rev > 0
+    }
 }
 
 fn pomodoro_seconds(config: &Config, kind: PomodoroKind) -> i64 {
