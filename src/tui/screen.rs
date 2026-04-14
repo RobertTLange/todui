@@ -19,7 +19,7 @@ use crate::domain::todo::TodoStatus;
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
-use crate::tui::input::resolved_text_char;
+use crate::tui::input::{next_char_boundary, previous_char_boundary, resolved_text_char};
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
@@ -142,8 +142,11 @@ enum ToastTone {
 struct TodoEditorState {
     mode: TodoEditorMode,
     title: String,
+    title_cursor: usize,
     notes: String,
+    notes_cursor: usize,
     repo: String,
+    repo_cursor: usize,
     initial_repo_override: Option<String>,
     repo_dirty: bool,
     focused_field: EditorField,
@@ -430,7 +433,7 @@ impl SessionScreen {
                     && (key.modifiers.contains(KeyModifiers::SHIFT)
                         || key.modifiers.contains(KeyModifiers::SUPER)) =>
             {
-                self.todo_editor.notes.push('\n');
+                self.insert_todo_editor_char('\n');
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -439,30 +442,28 @@ impl SessionScreen {
                 Ok(None)
             }
             KeyCode::Backspace => {
-                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
-                let field = self.focused_todo_field();
-                field.pop();
-                if repo_field {
-                    self.todo_editor.repo_dirty = true;
-                }
+                self.backspace_todo_editor_char();
                 self.todo_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Left => {
+                self.move_todo_editor_cursor_left();
+                Ok(None)
+            }
+            KeyCode::Right => {
+                self.move_todo_editor_cursor_right();
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if matches!(character, '\n' | '\r') {
                     if matches!(self.todo_editor.focused_field, EditorField::Secondary) {
-                        self.todo_editor.notes.push('\n');
+                        self.insert_todo_editor_char('\n');
                         self.todo_editor.error = None;
                     }
                     return Ok(None);
                 }
 
-                let repo_field = matches!(self.todo_editor.focused_field, EditorField::Tertiary);
-                let field = self.focused_todo_field();
-                field.push(resolved_text_char(&key, character));
-                if repo_field {
-                    self.todo_editor.repo_dirty = true;
-                }
+                self.insert_todo_editor_char(resolved_text_char(&key, character));
                 self.todo_editor.error = None;
                 Ok(None)
             }
@@ -1256,6 +1257,13 @@ impl SessionScreen {
         self.todo_editor = TodoEditorState {
             mode: TodoEditorMode::Create,
             repo: self.snapshot().session.repo.clone().unwrap_or_default(),
+            repo_cursor: self
+                .snapshot()
+                .session
+                .repo
+                .as_ref()
+                .map(|repo| repo.len())
+                .unwrap_or(0),
             focused_field: EditorField::Primary,
             ..TodoEditorState::default()
         };
@@ -1286,6 +1294,9 @@ impl SessionScreen {
         };
         self.todo_editor = TodoEditorState {
             mode: TodoEditorMode::Edit { todo_id },
+            title_cursor: title.len(),
+            notes_cursor: notes.len(),
+            repo_cursor: repo.len(),
             title,
             notes,
             repo,
@@ -1411,14 +1422,6 @@ impl SessionScreen {
         Ok(())
     }
 
-    fn focused_todo_field(&mut self) -> &mut String {
-        match self.todo_editor.focused_field {
-            EditorField::Primary => &mut self.todo_editor.title,
-            EditorField::Secondary => &mut self.todo_editor.notes,
-            EditorField::Tertiary => &mut self.todo_editor.repo,
-        }
-    }
-
     fn todo_editor_title(&self) -> &'static str {
         match self.todo_editor.mode {
             TodoEditorMode::Create => "New Todo",
@@ -1431,15 +1434,95 @@ impl SessionScreen {
             title: self.todo_editor_title(),
             primary_label: "Title",
             primary_value: &self.todo_editor.title,
+            primary_cursor: Some(self.todo_editor.title_cursor),
             secondary_label: Some("Notes"),
             secondary_value: Some(&self.todo_editor.notes),
+            secondary_cursor: Some(self.todo_editor.notes_cursor),
             tertiary_label: Some("Repo"),
             tertiary_value: Some(&self.todo_editor.repo),
+            tertiary_cursor: Some(self.todo_editor.repo_cursor),
             tertiary_value_style: (!self.todo_editor.repo.is_empty())
                 .then_some(repo_value_style(&self.theme)),
             focused_field: self.todo_editor.focused_field,
             error: self.todo_editor.error.as_deref(),
             footer_hint: self.todo_editor_footer_hint(),
+        }
+    }
+
+    fn insert_todo_editor_char(&mut self, character: char) {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => insert_editor_char(
+                &mut self.todo_editor.title,
+                &mut self.todo_editor.title_cursor,
+                character,
+            ),
+            EditorField::Secondary => insert_editor_char(
+                &mut self.todo_editor.notes,
+                &mut self.todo_editor.notes_cursor,
+                character,
+            ),
+            EditorField::Tertiary => {
+                insert_editor_char(
+                    &mut self.todo_editor.repo,
+                    &mut self.todo_editor.repo_cursor,
+                    character,
+                );
+                self.todo_editor.repo_dirty = true;
+            }
+        }
+    }
+
+    fn backspace_todo_editor_char(&mut self) {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => backspace_editor_char(
+                &mut self.todo_editor.title,
+                &mut self.todo_editor.title_cursor,
+            ),
+            EditorField::Secondary => backspace_editor_char(
+                &mut self.todo_editor.notes,
+                &mut self.todo_editor.notes_cursor,
+            ),
+            EditorField::Tertiary => {
+                backspace_editor_char(
+                    &mut self.todo_editor.repo,
+                    &mut self.todo_editor.repo_cursor,
+                );
+                self.todo_editor.repo_dirty = true;
+            }
+        }
+    }
+
+    fn move_todo_editor_cursor_left(&mut self) {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => {
+                self.todo_editor.title_cursor =
+                    previous_char_boundary(&self.todo_editor.title, self.todo_editor.title_cursor);
+            }
+            EditorField::Secondary => {
+                self.todo_editor.notes_cursor =
+                    previous_char_boundary(&self.todo_editor.notes, self.todo_editor.notes_cursor);
+            }
+            EditorField::Tertiary => {
+                self.todo_editor.repo_cursor =
+                    previous_char_boundary(&self.todo_editor.repo, self.todo_editor.repo_cursor);
+            }
+        }
+    }
+
+    fn move_todo_editor_cursor_right(&mut self) {
+        match self.todo_editor.focused_field {
+            EditorField::Primary => {
+                self.todo_editor.title_cursor =
+                    next_char_boundary(&self.todo_editor.title, self.todo_editor.title_cursor);
+            }
+            EditorField::Secondary => {
+                self.todo_editor.notes_cursor =
+                    next_char_boundary(&self.todo_editor.notes, self.todo_editor.notes_cursor);
+            }
+            EditorField::Tertiary => {
+                self.todo_editor.repo_cursor =
+                    next_char_boundary(&self.todo_editor.repo, self.todo_editor.repo_cursor);
+            }
         }
     }
 
@@ -1676,6 +1759,21 @@ fn key_matches_binding(key: &KeyEvent, bindings: &[String]) -> bool {
         }
         _ => false,
     })
+}
+
+fn insert_editor_char(text: &mut String, cursor: &mut usize, character: char) {
+    text.insert(*cursor, character);
+    *cursor += character.len_utf8();
+}
+
+fn backspace_editor_char(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+
+    let start = previous_char_boundary(text, *cursor);
+    text.replace_range(start..*cursor, "");
+    *cursor = start;
 }
 
 #[cfg(test)]
