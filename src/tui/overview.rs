@@ -176,8 +176,11 @@ enum OverviewDisplayRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionEditorState {
     name: String,
+    name_cursor: usize,
     tag: String,
+    tag_cursor: usize,
     repo: String,
+    repo_cursor: usize,
     focused_field: EditorField,
     error: Option<String>,
 }
@@ -192,8 +195,11 @@ impl Default for SessionEditorState {
     fn default() -> Self {
         Self {
             name: String::new(),
+            name_cursor: 0,
             tag: String::new(),
+            tag_cursor: 0,
             repo: String::new(),
+            repo_cursor: 0,
             focused_field: EditorField::Primary,
             error: None,
         }
@@ -451,13 +457,22 @@ impl OverviewScreen {
             }
             KeyCode::Enter => self.submit_session_editor(database),
             KeyCode::Backspace => {
-                self.current_editor_field_mut().pop();
+                self.backspace_session_editor_char();
+                self.session_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Left => {
+                self.move_session_editor_cursor_left();
+                self.session_editor.error = None;
+                Ok(None)
+            }
+            KeyCode::Right => {
+                self.move_session_editor_cursor_right();
                 self.session_editor.error = None;
                 Ok(None)
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.current_editor_field_mut()
-                    .push(resolved_text_char(&key, character));
+                self.insert_session_editor_char(resolved_text_char(&key, character));
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -943,13 +958,13 @@ impl OverviewScreen {
                 title,
                 primary_label,
                 primary_value,
-                primary_cursor: Some(primary_value.len()),
+                primary_cursor: Some(self.session_editor.name_cursor),
                 secondary_label,
                 secondary_value,
-                secondary_cursor: secondary_value.map(str::len),
+                secondary_cursor: Some(self.session_editor.tag_cursor),
                 tertiary_label,
                 tertiary_value,
-                tertiary_cursor: tertiary_value.map(str::len),
+                tertiary_cursor: Some(self.session_editor.repo_cursor),
                 tertiary_value_style: None,
                 focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
@@ -1270,15 +1285,19 @@ impl OverviewScreen {
         let Some(session) = self.sessions.get(self.selected_index) else {
             return;
         };
+        let name = session.name.clone();
+        let tag = session.tag.clone().unwrap_or_default();
+        let repo = session.repo.clone().unwrap_or_default();
         self.overlay = Some(OverviewOverlay::SessionEditor(
-            SessionEditorMode::EditMetadata {
-                name: session.name.clone(),
-            },
+            SessionEditorMode::EditMetadata { name: name.clone() },
         ));
         self.session_editor = SessionEditorState {
-            name: session.name.clone(),
-            tag: session.tag.clone().unwrap_or_default(),
-            repo: session.repo.clone().unwrap_or_default(),
+            name_cursor: name.len(),
+            tag_cursor: tag.len(),
+            repo_cursor: repo.len(),
+            name,
+            tag,
+            repo,
             focused_field: EditorField::Primary,
             error: None,
         };
@@ -1316,6 +1335,83 @@ impl OverviewScreen {
     fn close_general_notes_editor(&mut self) {
         self.overlay = None;
         self.notes_editor = GeneralNotesEditorState::default();
+    }
+
+    fn insert_session_editor_char(&mut self, character: char) {
+        match self.session_editor.focused_field {
+            EditorField::Primary => insert_editor_char(
+                &mut self.session_editor.name,
+                &mut self.session_editor.name_cursor,
+                character,
+            ),
+            EditorField::Secondary => insert_editor_char(
+                &mut self.session_editor.tag,
+                &mut self.session_editor.tag_cursor,
+                character,
+            ),
+            EditorField::Tertiary => insert_editor_char(
+                &mut self.session_editor.repo,
+                &mut self.session_editor.repo_cursor,
+                character,
+            ),
+        }
+    }
+
+    fn backspace_session_editor_char(&mut self) {
+        match self.session_editor.focused_field {
+            EditorField::Primary => backspace_editor_char(
+                &mut self.session_editor.name,
+                &mut self.session_editor.name_cursor,
+            ),
+            EditorField::Secondary => backspace_editor_char(
+                &mut self.session_editor.tag,
+                &mut self.session_editor.tag_cursor,
+            ),
+            EditorField::Tertiary => backspace_editor_char(
+                &mut self.session_editor.repo,
+                &mut self.session_editor.repo_cursor,
+            ),
+        }
+    }
+
+    fn move_session_editor_cursor_left(&mut self) {
+        match self.session_editor.focused_field {
+            EditorField::Primary => {
+                self.session_editor.name_cursor = previous_char_boundary(
+                    &self.session_editor.name,
+                    self.session_editor.name_cursor,
+                );
+            }
+            EditorField::Secondary => {
+                self.session_editor.tag_cursor = previous_char_boundary(
+                    &self.session_editor.tag,
+                    self.session_editor.tag_cursor,
+                );
+            }
+            EditorField::Tertiary => {
+                self.session_editor.repo_cursor = previous_char_boundary(
+                    &self.session_editor.repo,
+                    self.session_editor.repo_cursor,
+                );
+            }
+        }
+    }
+
+    fn move_session_editor_cursor_right(&mut self) {
+        match self.session_editor.focused_field {
+            EditorField::Primary => {
+                self.session_editor.name_cursor =
+                    next_char_boundary(&self.session_editor.name, self.session_editor.name_cursor);
+            }
+            EditorField::Secondary => {
+                self.session_editor.tag_cursor =
+                    next_char_boundary(&self.session_editor.tag, self.session_editor.tag_cursor);
+            }
+            EditorField::Tertiary => {
+                self.session_editor.repo_cursor =
+                    next_char_boundary(&self.session_editor.repo, self.session_editor.repo_cursor);
+            }
+        }
     }
 
     fn insert_notes_editor_char(&mut self, character: char) {
@@ -1436,14 +1532,6 @@ impl OverviewScreen {
                 }
             }
             _ => Ok(None),
-        }
-    }
-
-    fn current_editor_field_mut(&mut self) -> &mut String {
-        match self.session_editor.focused_field {
-            EditorField::Primary => &mut self.session_editor.name,
-            EditorField::Secondary => &mut self.session_editor.tag,
-            EditorField::Tertiary => &mut self.session_editor.repo,
         }
     }
 
@@ -2031,6 +2119,21 @@ fn byte_offset_for_char_column(text: &str, column: usize) -> usize {
     }
 
     text.len()
+}
+
+fn insert_editor_char(text: &mut String, cursor: &mut usize, character: char) {
+    text.insert(*cursor, character);
+    *cursor += character.len_utf8();
+}
+
+fn backspace_editor_char(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+
+    let start = previous_char_boundary(text, *cursor);
+    text.replace_range(start..*cursor, "");
+    *cursor = start;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3106,6 +3209,99 @@ mod tests {
             Some("exampleorg/todui-keymove")
         );
         assert!(database.get_session_by_name("reading-sprint").is_err());
+    }
+
+    #[test]
+    fn overview_session_metadata_editor_moves_cursor_with_arrow_keys() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .update_session_repo("reading-sprint", Some("openai/codex"), 1_711_275_810)
+            .expect("set repo");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .expect("open metadata editor");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in name");
+        assert!(render_buffer(&mut screen, 120, 24).contains("Name: reading-sprin|t"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Tab))
+            .expect("focus tag");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in tag");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in tag again");
+        assert!(render_buffer(&mut screen, 120, 24).contains("Tag: priva|te"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Tab))
+            .expect("focus repo");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in repo");
+        assert!(render_buffer(&mut screen, 120, 24).contains("Repo: openai/code|x"));
+    }
+
+    #[test]
+    fn overview_session_metadata_editor_edits_at_cursor_position() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        database
+            .update_session_repo("reading-sprint", Some("openai/codex"), 1_711_275_810)
+            .expect("set repo");
+        screen.reload(&database).expect("reload");
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .expect("open metadata editor");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in name");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('x')))
+            .expect("insert in name");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Tab))
+            .expect("focus tag");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in tag");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in tag again");
+        screen
+            .handle_key(&mut database, key(KeyCode::Backspace))
+            .expect("backspace in tag");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Tab))
+            .expect("focus repo");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in repo");
+        screen
+            .handle_key(&mut database, key(KeyCode::Left))
+            .expect("move left in repo again");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('y')))
+            .expect("insert in repo");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .expect("save metadata");
+
+        let session = database
+            .get_session_by_name("reading-sprinxt")
+            .expect("renamed session");
+        assert_eq!(session.tag.as_deref(), Some("privte"));
+        assert_eq!(session.repo.as_deref(), Some("openai/codyex"));
     }
 
     #[test]
