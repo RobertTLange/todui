@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Cell, Row, Table, TableState};
 
 use crate::domain::pomodoro::PomodoroRun;
 use crate::domain::revision::RevisionTodo;
-use crate::domain::todo::TodoStatus;
+use crate::domain::todo::{TodoActorKind, TodoStatus};
 use crate::timestamp::format_month_day_local;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 
@@ -36,14 +36,23 @@ pub struct GroupedTodos<'a> {
 
 impl<'a> GroupedTodos<'a> {
     pub fn new(todos: &'a [RevisionTodo]) -> Self {
+        Self::new_with_filter(todos, |_| true)
+    }
+
+    pub fn new_with_filter<F>(todos: &'a [RevisionTodo], mut include: F) -> Self
+    where
+        F: FnMut(&RevisionTodo) -> bool,
+    {
         let mut open = todos
             .iter()
+            .filter(|todo| include(todo))
             .filter(|todo| matches!(todo.status, TodoStatus::Open))
             .collect::<Vec<_>>();
         open.sort_by_key(|todo| (todo.position, todo.todo_id));
 
         let mut completed = todos
             .iter()
+            .filter(|todo| include(todo))
             .filter(|todo| matches!(todo.status, TodoStatus::Done))
             .collect::<Vec<_>>();
         completed.sort_by(compare_completed_todos);
@@ -258,10 +267,27 @@ fn section_click_target(
 fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>, theme: &Theme) -> Row<'static> {
     Row::new([
         Cell::from(todo_checkbox(todo)).style(todo_checkbox_style(theme, todo)),
-        Cell::from(todo.title.clone()).style(todo_title_style(theme, todo)),
+        Cell::from(format!("{} {}", todo_provenance_badge(todo), todo.title))
+            .style(todo_title_style(theme, todo)),
         Cell::from(todo_status_label(todo, run)).style(todo_status_style(theme, todo, run)),
         Cell::from(todo_time_label(todo)).style(todo_timestamp_style(theme, todo)),
     ])
+}
+
+pub fn todo_provenance_badge(todo: &RevisionTodo) -> String {
+    match todo.completed_by_kind {
+        Some(completed_by_kind) if matches!(todo.status, TodoStatus::Done) => {
+            match todo.created_by_kind == completed_by_kind {
+                true => format!("[{}]", actor_short_label(todo.created_by_kind)),
+                false => format!(
+                    "[{}>{}]",
+                    actor_short_label(todo.created_by_kind),
+                    actor_short_label(completed_by_kind)
+                ),
+            }
+        }
+        _ => format!("[{}]", actor_short_label(todo.created_by_kind)),
+    }
 }
 
 fn section_surface_tone(section: TodoSection) -> SurfaceTone {
@@ -313,6 +339,10 @@ fn todo_checkbox(todo: &RevisionTodo) -> &'static str {
     }
 }
 
+fn actor_short_label(actor_kind: TodoActorKind) -> &'static str {
+    actor_kind.short_label()
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::Color;
@@ -321,8 +351,8 @@ mod tests {
 
     use super::{
         GroupedTodos, TodoClickTarget, TodoSection, section_highlight_style, todo_checkbox_style,
-        todo_click_target, todo_status_label, todo_status_style, todo_time_label,
-        todo_timestamp_style,
+        todo_click_target, todo_provenance_badge, todo_status_label, todo_status_style,
+        todo_time_label, todo_timestamp_style,
     };
     use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState};
     use crate::domain::revision::RevisionTodo;
@@ -449,6 +479,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provenance_badge_distinguishes_mixed_completion() {
+        let mut todo = todo(41, TodoStatus::Done, 1, 120, 180, Some(240));
+        todo.created_by_kind = crate::domain::todo::TodoActorKind::Agent;
+        todo.completed_by_kind = Some(crate::domain::todo::TodoActorKind::Human);
+
+        assert_eq!(todo_provenance_badge(&todo), "[A>H]");
+    }
+
     fn todo(
         todo_id: i64,
         status: TodoStatus,
@@ -462,6 +501,9 @@ mod tests {
             title: format!("todo-{todo_id}"),
             notes: String::new(),
             repo: None,
+            created_by_kind: crate::domain::todo::TodoActorKind::Human,
+            completed_by_kind: matches!(status, TodoStatus::Done)
+                .then_some(crate::domain::todo::TodoActorKind::Human),
             status,
             position,
             created_at,

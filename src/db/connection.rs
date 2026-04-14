@@ -198,6 +198,70 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("revision todo repo column");
+        let todo_created_by_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('todos') WHERE name = 'created_by_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("todo created by column");
+        let todo_completed_by_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('todos') WHERE name = 'completed_by_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("todo completed by column");
+        let revision_todo_created_by_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('session_revision_todos') WHERE name = 'created_by_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revision todo created by column");
+        let revision_todo_completed_by_exists: String = reopened
+            .connection
+            .query_row(
+                "SELECT name FROM pragma_table_info('session_revision_todos') WHERE name = 'completed_by_kind'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("revision todo completed by column");
+        reopened
+            .connection
+            .execute(
+                "INSERT INTO sessions (slug, created_at, updated_at, last_opened_at, current_revision)
+                 VALUES ('migration-check', 1, 1, 1, 1)",
+                [],
+            )
+            .expect("insert migrated session");
+        reopened
+            .connection
+            .execute(
+                "INSERT INTO todos (session_id, title, notes, status, position, created_at, updated_at, completed_at)
+                 VALUES (1, 'Legacy open', '', 'open', 1, 1, 1, NULL)",
+                [],
+            )
+            .expect("insert migrated todo");
+        let todo_created_by_value: String = reopened
+            .connection
+            .query_row(
+                "SELECT created_by_kind FROM todos WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("todo created by value");
+        let todo_completed_by_value: Option<String> = reopened
+            .connection
+            .query_row(
+                "SELECT completed_by_kind FROM todos WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("todo completed by value");
         let pomodoro_session_not_null: i64 = reopened
             .connection
             .query_row(
@@ -215,6 +279,12 @@ mod tests {
         assert_eq!(todo_repo_exists, "repo");
         assert_eq!(revision_repo_exists, "session_repo");
         assert_eq!(revision_todo_repo_exists, "repo");
+        assert_eq!(todo_created_by_exists, "created_by_kind");
+        assert_eq!(todo_completed_by_exists, "completed_by_kind");
+        assert_eq!(revision_todo_created_by_exists, "created_by_kind");
+        assert_eq!(revision_todo_completed_by_exists, "completed_by_kind");
+        assert_eq!(todo_created_by_value, "human");
+        assert_eq!(todo_completed_by_value, None);
         assert_eq!(pomodoro_session_not_null, 0);
     }
 }

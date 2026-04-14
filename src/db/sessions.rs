@@ -15,6 +15,10 @@ pub(crate) struct OverviewAggregateSnapshot {
     pub tagged_sessions: i64,
     pub total_todos: i64,
     pub done_todos: i64,
+    pub human_open_todos: i64,
+    pub agent_open_todos: i64,
+    pub human_completed_todos: i64,
+    pub agent_completed_todos: i64,
     pub average_revision: u32,
 }
 
@@ -97,13 +101,17 @@ impl Database {
     }
 
     pub(crate) fn overview_aggregate_as_of(&self, as_of: i64) -> Result<OverviewAggregateSnapshot> {
-        let (total_sessions, tagged_sessions, total_todos, done_todos, total_revisions): (
-            i64,
-            i64,
-            i64,
-            i64,
-            i64,
-        ) = self.connection.query_row(
+        let (
+            total_sessions,
+            tagged_sessions,
+            total_todos,
+            done_todos,
+            human_open_todos,
+            agent_open_todos,
+            human_completed_todos,
+            agent_completed_todos,
+            total_revisions,
+        ): (i64, i64, i64, i64, i64, i64, i64, i64, i64) = self.connection.query_row(
             "WITH latest_revisions AS (
                 SELECT session_id, MAX(revision_number) AS revision_number
                 FROM session_revisions
@@ -115,6 +123,34 @@ impl Database {
                 COALESCE(SUM(CASE WHEN revisions.session_tag IS NOT NULL THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(revisions.todo_count), 0),
                 COALESCE(SUM(revisions.done_count), 0),
+                COALESCE(SUM((
+                    SELECT COUNT(*)
+                    FROM session_revision_todos revision_todos
+                    WHERE revision_todos.revision_id = revisions.id
+                      AND revision_todos.status = 'open'
+                      AND revision_todos.created_by_kind = 'human'
+                )), 0),
+                COALESCE(SUM((
+                    SELECT COUNT(*)
+                    FROM session_revision_todos revision_todos
+                    WHERE revision_todos.revision_id = revisions.id
+                      AND revision_todos.status = 'open'
+                      AND revision_todos.created_by_kind = 'agent'
+                )), 0),
+                COALESCE(SUM((
+                    SELECT COUNT(*)
+                    FROM session_revision_todos revision_todos
+                    WHERE revision_todos.revision_id = revisions.id
+                      AND revision_todos.status = 'done'
+                      AND revision_todos.completed_by_kind = 'human'
+                )), 0),
+                COALESCE(SUM((
+                    SELECT COUNT(*)
+                    FROM session_revision_todos revision_todos
+                    WHERE revision_todos.revision_id = revisions.id
+                      AND revision_todos.status = 'done'
+                      AND revision_todos.completed_by_kind = 'agent'
+                )), 0),
                 COALESCE(SUM(revisions.revision_number), 0)
              FROM sessions
              JOIN latest_revisions
@@ -135,6 +171,10 @@ impl Database {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )?;
@@ -150,6 +190,10 @@ impl Database {
             tagged_sessions,
             total_todos,
             done_todos,
+            human_open_todos,
+            agent_open_todos,
+            human_completed_todos,
+            agent_completed_todos,
             average_revision,
         })
     }
@@ -435,9 +479,9 @@ pub(crate) fn create_revision_snapshot(
 
     transaction.execute(
         "INSERT INTO session_revision_todos (
-            revision_id, todo_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+            revision_id, todo_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
          )
-         SELECT ?1, id, title, notes, repo, status, position, created_at, updated_at, completed_at
+         SELECT ?1, id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
          FROM todos
          WHERE session_id = ?2
          ORDER BY position",
@@ -601,23 +645,45 @@ mod tests {
             .create_session("Baseline Sprint", Some("work"), None, baseline_time)
             .expect("baseline session");
         database
-            .add_todo(&baseline.name, "Draft spec", "", None, baseline_time + 60)
+            .add_todo_with_actor(
+                &baseline.name,
+                "Draft spec",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Human,
+                baseline_time + 60,
+            )
             .expect("baseline todo");
 
         let recent = database
             .create_session("Recent Sprint", Some("private"), None, recent_time)
             .expect("recent session");
         let recent_done = database
-            .add_todo(&recent.name, "Done task", "", None, recent_time + 60)
+            .add_todo_with_actor(
+                &recent.name,
+                "Done task",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Agent,
+                recent_time + 60,
+            )
             .expect("recent done todo");
         database
-            .add_todo(&recent.name, "Open task", "", None, recent_time + 120)
+            .add_todo_with_actor(
+                &recent.name,
+                "Open task",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Human,
+                recent_time + 120,
+            )
             .expect("recent open todo");
         database
-            .set_todo_status(
+            .set_todo_status_with_actor(
                 recent_done.id,
                 Some(&recent.name),
                 crate::domain::todo::TodoStatus::Done,
+                crate::domain::todo::TodoActorKind::Agent,
                 recent_time + 180,
             )
             .expect("mark done");
@@ -629,6 +695,10 @@ mod tests {
         assert_eq!(before_recent.tagged_sessions, 1);
         assert_eq!(before_recent.total_todos, 1);
         assert_eq!(before_recent.done_todos, 0);
+        assert_eq!(before_recent.human_open_todos, 1);
+        assert_eq!(before_recent.agent_open_todos, 0);
+        assert_eq!(before_recent.human_completed_todos, 0);
+        assert_eq!(before_recent.agent_completed_todos, 0);
         assert_eq!(before_recent.average_revision, 2);
 
         let after_recent = database
@@ -638,6 +708,10 @@ mod tests {
         assert_eq!(after_recent.tagged_sessions, 2);
         assert_eq!(after_recent.total_todos, 3);
         assert_eq!(after_recent.done_todos, 1);
+        assert_eq!(after_recent.human_open_todos, 2);
+        assert_eq!(after_recent.agent_open_todos, 0);
+        assert_eq!(after_recent.human_completed_todos, 0);
+        assert_eq!(after_recent.agent_completed_todos, 1);
         assert_eq!(after_recent.average_revision, 3);
     }
 

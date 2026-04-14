@@ -18,6 +18,9 @@ fn top_level_help_describes_main_commands() {
             "Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`",
         ))
         .stdout(predicate::str::contains(
+            "CLI todo mutations default to agent provenance; pass `--human` to override.",
+        ))
+        .stdout(predicate::str::contains(
             "Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`",
         ))
         .stdout(predicate::str::contains(
@@ -91,6 +94,9 @@ fn add_help_explains_stdout_and_kwargs() {
             "On success, stdout contains the new todo id as a single integer.",
         ))
         .stdout(predicate::str::contains(
+            "CLI-created todos default to agent provenance; pass `--human` to override.",
+        ))
+        .stdout(predicate::str::contains(
             "todui add \"Review keybindings\" --session writing-sprint --note \"Ghostty + mouse\"",
         ))
         .stdout(predicate::str::contains(
@@ -109,7 +115,7 @@ fn repo_help_explains_search_output_and_inputs() {
             "List todos associated with a GitHub repository.",
         ))
         .stdout(predicate::str::contains(
-            "<todo-id>\\t<session-name>\\t<title>\\t<status>\\t<effective-repo>\\t<source>",
+            "<todo-id>\\t<session-name>\\t<title>\\t<status>\\t<created-by>\\t<completed-by-or->\\t<effective-repo>\\t<source>",
         ))
         .stdout(predicate::str::contains(
             "todui repo @exampleorg/todui-keymove",

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use crate::error::Result;
 
-pub const LATEST_USER_VERSION: i32 = 5;
+pub const LATEST_USER_VERSION: i32 = 6;
 
 const MIGRATION_V1_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -151,6 +151,24 @@ const MIGRATION_V5_SQL: &str = r#"
 ALTER TABLE sessions DROP COLUMN name;
 "#;
 
+const MIGRATION_V6_SQL: &str = r#"
+ALTER TABLE todos ADD COLUMN created_by_kind TEXT NOT NULL DEFAULT 'human' CHECK (created_by_kind IN ('human', 'agent'));
+ALTER TABLE todos ADD COLUMN completed_by_kind TEXT CHECK (completed_by_kind IN ('human', 'agent'));
+UPDATE todos
+SET completed_by_kind = CASE
+    WHEN status = 'done' THEN 'human'
+    ELSE NULL
+END;
+
+ALTER TABLE session_revision_todos ADD COLUMN created_by_kind TEXT NOT NULL DEFAULT 'human' CHECK (created_by_kind IN ('human', 'agent'));
+ALTER TABLE session_revision_todos ADD COLUMN completed_by_kind TEXT CHECK (completed_by_kind IN ('human', 'agent'));
+UPDATE session_revision_todos
+SET completed_by_kind = CASE
+    WHEN status = 'done' THEN 'human'
+    ELSE NULL
+END;
+"#;
+
 pub fn apply(connection: &Connection, current_version: i32) -> Result<()> {
     if current_version < 1 {
         connection.execute_batch(MIGRATION_V1_SQL)?;
@@ -171,6 +189,10 @@ pub fn apply(connection: &Connection, current_version: i32) -> Result<()> {
     if current_version < 5 {
         connection.execute_batch(MIGRATION_V5_SQL)?;
         connection.pragma_update(None, "user_version", 5)?;
+    }
+    if current_version < 6 {
+        connection.execute_batch(MIGRATION_V6_SQL)?;
+        connection.pragma_update(None, "user_version", 6)?;
     }
 
     Ok(())

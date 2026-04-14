@@ -7,13 +7,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config;
 use crate::db::Database;
-use crate::domain::todo::TodoStatus;
+use crate::domain::todo::{TodoActorKind, TodoStatus};
 use crate::error::{AppError, Result};
 use crate::export::markdown::{self, MarkdownOptions};
 use crate::timestamp::{format_export_local, now_utc_timestamp};
 use crate::tui;
 
-const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, `repo` to search todos by GitHub repository, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`\n  Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  `session list` prints tab-separated rows.\n  `repo` prints one matching todo per tab-separated row.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.";
+const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, `repo` to search todos by GitHub repository, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`\n  Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  CLI todo mutations default to agent provenance; pass `--human` to override.\n  `session list` prints tab-separated rows.\n  `repo` prints one matching todo per tab-separated row.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.";
 
 const SESSION_LONG_ABOUT: &str = "Create, list, tag, assign repos, delete, and inspect revision history for sessions.\n\nUse `todui session list` to discover available session names before calling `add`, `resume`, `repo`, or `export md`.";
 
@@ -23,9 +23,9 @@ const SESSION_LIST_LONG_ABOUT: &str = "Print one session per line in a tab-separ
 
 const SESSION_HISTORY_LONG_ABOUT: &str = "Print one revision per line in a tab-separated format for scripts and agents.\n\nColumns:\n  r<revision-number>\\t<created-at-local-time>\\t<reason>\\t<todo-count>\\t<done-count>";
 
-const ADD_LONG_ABOUT: &str = "Create a new todo in a session.\n\nIf `--session` is omitted, todui resolves the most recently opened session. On success, stdout contains the new todo id as a single integer.";
+const ADD_LONG_ABOUT: &str = "Create a new todo in a session.\n\nIf `--session` is omitted, todui resolves the most recently opened session. CLI-created todos default to agent provenance; pass `--human` to override. On success, stdout contains the new todo id as a single integer.";
 
-const ADD_LONG_HELP: &str = "Examples:\n  todui add \"Draft spec\" --session writing-sprint\n  todui add \"Review keybindings\" --session writing-sprint --note \"Ghostty + mouse\"\n  todui add \"Audit reducer\" --session writing-sprint --repo @exampleorg/todui-keymove";
+const ADD_LONG_HELP: &str = "Examples:\n  todui add \"Draft spec\" --session writing-sprint\n  todui add \"Review keybindings\" --session writing-sprint --note \"Ghostty + mouse\"\n  todui add \"Audit reducer\" --session writing-sprint --repo @exampleorg/todui-keymove\n  todui add \"Interview notes\" --session writing-sprint --human";
 
 const EDIT_LONG_ABOUT: &str = "Update the title, note, and/or GitHub repo for an existing todo.\n\nPass at least one of `--title`, `--note`, `--clear-note`, `--repo`, or `--clear-repo`. On success, stdout prints `<todo-id>\\tedited`.";
 
@@ -33,7 +33,7 @@ const EDIT_LONG_HELP: &str = "Examples:\n  todui edit 7 --session writing-sprint
 
 const RESUME_LONG_ABOUT: &str = "Open a session in the full-screen TUI.\n\nWithout arguments, todui resumes the most recently opened session head. `--revision` opens a historical snapshot in read-only mode.";
 
-const REPO_LONG_ABOUT: &str = "List todos associated with a GitHub repository.\n\nAccepts a GitHub repo URL, `@owner/repo`, or plain `owner/repo`. Matches use the todo repo when present, otherwise the session repo.\n\nColumns:\n  <todo-id>\\t<session-name>\\t<title>\\t<status>\\t<effective-repo>\\t<source>";
+const REPO_LONG_ABOUT: &str = "List todos associated with a GitHub repository.\n\nAccepts a GitHub repo URL, `@owner/repo`, or plain `owner/repo`. Matches use the todo repo when present, otherwise the session repo.\n\nColumns:\n  <todo-id>\\t<session-name>\\t<title>\\t<status>\\t<created-by>\\t<completed-by-or->\\t<effective-repo>\\t<source>";
 
 const REPO_LONG_HELP: &str = "Examples:\n  todui repo @exampleorg/todui-keymove\n  todui repo https://github.com/ExampleOrg/todui-keymove\n  todui repo exampleorg/todui-keymove";
 
@@ -84,6 +84,18 @@ pub enum Command {
             help = "Optional GitHub repo for this todo. Accepts URL, @owner/repo, or owner/repo"
         )]
         repo: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "human",
+            help = "Record this todo as agent-authored"
+        )]
+        agent: bool,
+        #[arg(
+            long,
+            conflicts_with = "agent",
+            help = "Record this todo as human-authored"
+        )]
+        human: bool,
     },
     #[command(about = "Delete a todo from a session")]
     Delete {
@@ -136,6 +148,18 @@ pub enum Command {
             help = "Session name. Defaults to the most recently opened session"
         )]
         session: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "human",
+            help = "Record completion as agent-authored"
+        )]
+        agent: bool,
+        #[arg(
+            long,
+            conflicts_with = "agent",
+            help = "Record completion as human-authored"
+        )]
+        human: bool,
     },
     #[command(about = "Mark a todo as open again")]
     Undone {
@@ -326,13 +350,16 @@ fn execute_with_runner<W: Write>(
             session,
             note,
             repo,
+            agent,
+            human,
         }) => {
             let session_name = database.resolve_session_name(session.as_deref())?;
-            let todo = database.add_todo(
+            let todo = database.add_todo_with_actor(
                 &session_name,
                 &title,
                 note.as_deref().unwrap_or(""),
                 repo.as_deref(),
+                cli_actor_kind(agent, human),
                 now_utc_timestamp(),
             )?;
             writeln!(writer, "{}", todo.id)?;
@@ -364,21 +391,28 @@ fn execute_with_runner<W: Write>(
                 clear_repo,
             },
         ),
-        Some(Command::Done { todo_id, session }) => {
-            let todo = database.set_todo_status(
+        Some(Command::Done {
+            todo_id,
+            session,
+            agent,
+            human,
+        }) => {
+            let todo = database.set_todo_status_with_actor(
                 todo_id,
                 session.as_deref(),
                 TodoStatus::Done,
+                cli_actor_kind(agent, human),
                 now_utc_timestamp(),
             )?;
             writeln!(writer, "{}\tdone", todo.id)?;
             Ok(())
         }
         Some(Command::Undone { todo_id, session }) => {
-            let todo = database.set_todo_status(
+            let todo = database.set_todo_status_with_actor(
                 todo_id,
                 session.as_deref(),
                 TodoStatus::Open,
+                TodoActorKind::Agent,
                 now_utc_timestamp(),
             )?;
             writeln!(writer, "{}\topen", todo.id)?;
@@ -391,7 +425,7 @@ fn execute_with_runner<W: Write>(
             for todo in database.search_todos_by_repo(&repo)? {
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     todo.todo_id,
                     todo.session_name,
                     todo.title,
@@ -399,6 +433,10 @@ fn execute_with_runner<W: Write>(
                         TodoStatus::Open => "open",
                         TodoStatus::Done => "done",
                     },
+                    todo.created_by_kind.as_str(),
+                    todo.completed_by_kind
+                        .map(TodoActorKind::as_str)
+                        .unwrap_or("-"),
                     todo.effective_repo,
                     todo.source.as_str()
                 )?;
@@ -407,6 +445,15 @@ fn execute_with_runner<W: Write>(
         }
         Some(Command::Export { command }) => handle_export_command(database, writer, command),
         None => runner.run_overview(database, config),
+    }
+}
+
+fn cli_actor_kind(agent: bool, human: bool) -> TodoActorKind {
+    if human {
+        TodoActorKind::Human
+    } else {
+        let _ = agent;
+        TodoActorKind::Agent
     }
 }
 
@@ -804,6 +851,7 @@ mod execute_tests {
         assert!(rendered.contains("# Session: writing-sprint"));
         assert!(rendered.contains("- tag: work"));
         assert!(rendered.contains("- [ ] Draft spec"));
+        assert!(rendered.contains("created-by: agent"));
     }
 
     #[test]
@@ -1018,6 +1066,49 @@ mod tests {
         let cli = parse_from(["todui", "repo", "exampleorg/todui-keymove"]);
         match cli.command.expect("command") {
             Command::Repo { repo } => assert_eq!(repo, "exampleorg/todui-keymove"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_add_and_done_actor_flags() {
+        let cli = parse_from([
+            "todui",
+            "add",
+            "Draft spec",
+            "--session",
+            "writing-sprint",
+            "--human",
+        ]);
+
+        match cli.command.expect("command") {
+            Command::Add {
+                title,
+                session,
+                human,
+                agent,
+                ..
+            } => {
+                assert_eq!(title, "Draft spec");
+                assert_eq!(session.as_deref(), Some("writing-sprint"));
+                assert!(human);
+                assert!(!agent);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse_from(["todui", "done", "7", "--agent"]);
+        match cli.command.expect("command") {
+            Command::Done {
+                todo_id,
+                human,
+                agent,
+                ..
+            } => {
+                assert_eq!(todo_id, 7);
+                assert!(agent);
+                assert!(!human);
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

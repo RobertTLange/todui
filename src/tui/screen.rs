@@ -15,7 +15,7 @@ use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
 use crate::domain::session::SessionHeadToken;
-use crate::domain::todo::TodoStatus;
+use crate::domain::todo::{TodoActorKind, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
@@ -180,6 +180,7 @@ struct SessionScreen {
     toast: Option<ToastState>,
     pending_completion_bell: bool,
     viewport_area: Rect,
+    provenance_filter: TodoProvenanceFilter,
     theme: Theme,
     config: Config,
 }
@@ -204,6 +205,14 @@ enum DetailPanelMode {
     Inline,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TodoProvenanceFilter {
+    #[default]
+    All,
+    HumanOnly,
+    AgentOnly,
+}
+
 impl SessionScreen {
     fn new(session_name: String, revision: Option<u32>, config: Config) -> Self {
         Self {
@@ -223,6 +232,7 @@ impl SessionScreen {
             toast: None,
             pending_completion_bell: false,
             viewport_area: Rect::new(0, 0, 120, 24),
+            provenance_filter: TodoProvenanceFilter::All,
             theme: Theme::from_config(&config),
             config,
         }
@@ -314,6 +324,10 @@ impl SessionScreen {
             }
             KeyCode::Char('h') => {
                 self.overlay = Some(Overlay::Help);
+                Ok(None)
+            }
+            KeyCode::Char('f') => {
+                self.cycle_provenance_filter();
                 Ok(None)
             }
             KeyCode::Up | KeyCode::Char('k')
@@ -790,7 +804,7 @@ impl SessionScreen {
             frame.render_widget(self.details_panel(snapshot, area.width), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
-            let area = centered_rect(frame.area(), 60, 16);
+            let area = centered_rect(frame.area(), 60, 17);
             frame.render_widget(Clear, area);
             frame.render_widget(self.help_overlay(), area);
         }
@@ -860,8 +874,9 @@ impl SessionScreen {
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
         let mut lines = vec![Line::from(format!(
-            "todui | {} | {revision} | h = help",
-            snapshot.session.name
+            "todui | {} | {revision} | filter: {} | h = help",
+            snapshot.session.name,
+            self.provenance_filter_label()
         ))];
         if self.is_read_only() {
             lines.push(Line::styled(
@@ -1009,7 +1024,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nOpen repo: u or click repo\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nFilter provenance: f\nDetails: i or Right\nOpen repo: u or click repo\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -1088,11 +1103,14 @@ impl SessionScreen {
 
     fn current_todo(&self) -> Option<&RevisionTodo> {
         let snapshot = self.snapshot.as_ref()?;
-        GroupedTodos::new(&snapshot.todos).todo_at_flat_index(self.selected_index)
+        GroupedTodos::new_with_filter(&snapshot.todos, |todo| self.todo_matches_filter(todo))
+            .todo_at_flat_index(self.selected_index)
     }
 
     fn grouped_todos(&self) -> GroupedTodos<'_> {
-        GroupedTodos::new(&self.snapshot().todos)
+        GroupedTodos::new_with_filter(&self.snapshot().todos, |todo| {
+            self.todo_matches_filter(todo)
+        })
     }
 
     fn snapshot(&self) -> &SessionSnapshot {
@@ -1244,6 +1262,39 @@ impl SessionScreen {
         let pending = self.pending_completion_bell;
         self.pending_completion_bell = false;
         pending
+    }
+
+    fn todo_matches_filter(&self, todo: &RevisionTodo) -> bool {
+        match self.provenance_filter {
+            TodoProvenanceFilter::All => true,
+            TodoProvenanceFilter::HumanOnly => self.todo_matches_actor(todo, TodoActorKind::Human),
+            TodoProvenanceFilter::AgentOnly => self.todo_matches_actor(todo, TodoActorKind::Agent),
+        }
+    }
+
+    fn todo_matches_actor(&self, todo: &RevisionTodo, actor_kind: TodoActorKind) -> bool {
+        todo.created_by_kind == actor_kind || todo.completed_by_kind == Some(actor_kind)
+    }
+
+    fn cycle_provenance_filter(&mut self) {
+        self.provenance_filter = match self.provenance_filter {
+            TodoProvenanceFilter::All => TodoProvenanceFilter::HumanOnly,
+            TodoProvenanceFilter::HumanOnly => TodoProvenanceFilter::AgentOnly,
+            TodoProvenanceFilter::AgentOnly => TodoProvenanceFilter::All,
+        };
+        self.reselect(None);
+        self.set_toast(
+            format!("Filter: {}", self.provenance_filter_label()),
+            ToastTone::Success,
+        );
+    }
+
+    fn provenance_filter_label(&self) -> &'static str {
+        match self.provenance_filter {
+            TodoProvenanceFilter::All => "all",
+            TodoProvenanceFilter::HumanOnly => "human",
+            TodoProvenanceFilter::AgentOnly => "agent",
+        }
     }
 
     fn open_todo_editor(&mut self) {
@@ -1554,20 +1605,7 @@ impl SessionScreen {
         mode: DetailPanelMode,
     ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
-            let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
-            let mut lines = vec![
-                Line::from(format!("title: {}", todo.title)),
-                Line::from(format!(
-                    "status: {}",
-                    if todo.status == TodoStatus::Done {
-                        "done"
-                    } else {
-                        "open"
-                    }
-                )),
-                repo_line(&self.theme, effective_repo.as_deref()),
-                Line::from(format!("repo source: {repo_source}")),
-            ];
+            let (mut lines, _, effective_repo) = self.detail_summary_lines(todo);
             let rendered_notes = render_labeled_text(
                 &self.theme,
                 "notes",
@@ -1670,14 +1708,10 @@ impl SessionScreen {
             .unwrap_or_default()
     }
 
-    fn detail_repo_hitbox(&self, area: Rect, mode: DetailPanelMode) -> Option<Rect> {
-        let repo = self
-            .current_todo()
-            .and_then(|todo| self.current_todo_repo_details(todo).0);
-        let line_index = match mode {
-            DetailPanelMode::Overlay | DetailPanelMode::Inline => 2,
-        };
-        repo_hitbox(area, line_index, repo.as_deref())
+    fn detail_repo_hitbox(&self, area: Rect, _mode: DetailPanelMode) -> Option<Rect> {
+        let todo = self.current_todo()?;
+        let (_, repo_line_index, effective_repo) = self.detail_summary_lines(todo);
+        repo_hitbox(area, repo_line_index, effective_repo.as_deref())
     }
 
     fn detail_note_link_hitboxes(
@@ -1734,6 +1768,35 @@ impl SessionScreen {
         if let Err(error) = browser::open_url(url) {
             self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
         }
+    }
+
+    fn detail_summary_lines(
+        &self,
+        todo: &RevisionTodo,
+    ) -> (Vec<Line<'static>>, u16, Option<String>) {
+        let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
+        let mut lines = vec![
+            Line::from(format!("title: {}", todo.title)),
+            Line::from(format!(
+                "status: {}",
+                if todo.status == TodoStatus::Done {
+                    "done"
+                } else {
+                    "open"
+                }
+            )),
+            Line::from(format!("created by: {}", todo.created_by_kind.as_str())),
+            Line::from(format!(
+                "completed by: {}",
+                todo.completed_by_kind
+                    .map(TodoActorKind::as_str)
+                    .unwrap_or("-")
+            )),
+        ];
+        let repo_line_index = lines.len() as u16;
+        lines.push(repo_line(&self.theme, effective_repo.as_deref()));
+        lines.push(Line::from(format!("repo source: {repo_source}")));
+        (lines, repo_line_index, effective_repo)
     }
 }
 
@@ -2992,6 +3055,39 @@ mod tests {
     }
 
     #[test]
+    fn provenance_filter_cycles_between_all_human_and_agent() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .add_todo_with_actor(
+                &screen.session_name,
+                "Agent follow-up",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Agent,
+                1_711_275_900,
+            )
+            .expect("agent todo");
+        screen.reload(&database).expect("reload");
+
+        assert_eq!(screen.grouped_todos().len(), 3);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("human filter");
+        assert_eq!(screen.grouped_todos().len(), 2);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("agent filter");
+        assert_eq!(screen.grouped_todos().len(), 1);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("all filter");
+        assert_eq!(screen.grouped_todos().len(), 3);
+    }
+
+    #[test]
     fn wide_history_panel_renders_indented_truncated_title_preview() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
@@ -3153,12 +3249,13 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Char('i')))
             .expect("open details");
-        let hitbox = screen.details_repo_hitbox().expect("repo hitbox");
+        let buffer = render_test_buffer(&screen, 120, 24);
+        let hitbox = find_text_position(&buffer, "openai/codex").expect("repo text position");
         screen
             .handle_mouse(
                 &mut database,
                 Rect::new(0, 0, 120, 24),
-                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.0, hitbox.1),
             )
             .expect("click repo");
 
@@ -3221,14 +3318,13 @@ mod tests {
         screen.reload(&database).expect("reload");
         reset_test_browser();
 
-        let hitbox = screen
-            .inline_details_repo_hitbox(Rect::new(0, 0, 120, 24))
-            .expect("repo hitbox");
+        let buffer = render_test_buffer(&screen, 120, 24);
+        let hitbox = find_text_position(&buffer, "openai/codex").expect("repo text position");
         screen
             .handle_mouse(
                 &mut database,
                 Rect::new(0, 0, 120, 24),
-                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.0, hitbox.1),
             )
             .expect("click repo");
 
@@ -3518,6 +3614,19 @@ mod tests {
 
     fn line_index_containing(lines: &[&str], needle: &str) -> Option<usize> {
         lines.iter().position(|line| line.contains(needle))
+    }
+
+    fn find_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buffer.area.height {
+            let mut line = String::new();
+            for x in 0..buffer.area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(index) = line.find(needle) {
+                return Some((index as u16, y));
+            }
+        }
+        None
     }
 
     fn key(code: KeyCode) -> KeyEvent {

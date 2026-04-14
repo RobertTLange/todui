@@ -49,8 +49,8 @@ const OVERVIEW_LIST_PERCENT: u16 = 40;
 const OVERVIEW_NOTES_PERCENT: u16 = 40;
 const OVERVIEW_SUMMARY_PERCENT: u16 = 20;
 const OVERVIEW_WIDE_LEFT_TOP_PERCENT: u16 = 50;
-const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 50;
-const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 50;
+const OVERVIEW_WIDE_RIGHT_TOP_PERCENT: u16 = 33;
+const OVERVIEW_WIDE_RIGHT_BOTTOM_PERCENT: u16 = 67;
 const OVERVIEW_WIDE_PRIMARY_PERCENT: u16 = 58;
 const OVERVIEW_WIDE_SECONDARY_PERCENT: u16 = 42;
 const OVERVIEW_INLINE_POMODORO_MIN_WIDTH: u16 = 90;
@@ -114,6 +114,7 @@ struct OverviewScreen {
     sessions: Vec<SessionOverview>,
     detail_sessions: Vec<ExpandedSessionState>,
     expanded_sessions: Vec<ExpandedSessionState>,
+    current_summary: OverviewAggregateSnapshot,
     previous_week_summary: OverviewAggregateSnapshot,
     active_run: Option<PomodoroRun>,
     overview_notes: String,
@@ -205,6 +206,7 @@ impl OverviewScreen {
             sessions: Vec::new(),
             detail_sessions: Vec::new(),
             expanded_sessions: Vec::new(),
+            current_summary: OverviewAggregateSnapshot::default(),
             previous_week_summary: OverviewAggregateSnapshot::default(),
             active_run: None,
             overview_notes: String::new(),
@@ -224,6 +226,7 @@ impl OverviewScreen {
     fn reload(&mut self, database: &Database) -> Result<()> {
         self.has_any_sessions = database.has_any_sessions()?;
         self.sessions = database.list_session_overview()?;
+        self.current_summary = database.overview_aggregate_as_of(now_utc_timestamp())?;
         self.previous_week_summary =
             database.overview_aggregate_as_of(now_utc_timestamp() - WEEK_SECONDS)?;
         self.detail_sessions = self
@@ -787,17 +790,6 @@ impl OverviewScreen {
         let untagged_share = percentage_of(stats.untagged_sessions, stats.total_sessions);
         let open_share = percentage_of(stats.open_todos, stats.total_todos);
         let completed_share = percentage_of(stats.done_todos, stats.total_todos);
-        let newest_updated = if stats.total_sessions == 0 {
-            String::from("n/a")
-        } else {
-            format_month_day_local(stats.newest_updated_at)
-        };
-        let oldest_updated = if stats.total_sessions == 0 {
-            String::from("n/a")
-        } else {
-            format_month_day_local(stats.oldest_updated_at)
-        };
-
         Paragraph::new(vec![
             Line::from(format!(
                 "sessions: {} ({})",
@@ -832,6 +824,26 @@ impl OverviewScreen {
                 format_wow_delta(stats.done_todos - previous.done_todos)
             )),
             Line::from(format!(
+                "human open: {} ({})",
+                stats.human_open_todos,
+                format_wow_delta(stats.human_open_todos - previous.human_open_todos)
+            )),
+            Line::from(format!(
+                "agent open: {} ({})",
+                stats.agent_open_todos,
+                format_wow_delta(stats.agent_open_todos - previous.agent_open_todos)
+            )),
+            Line::from(format!(
+                "human completed: {} ({})",
+                stats.human_completed_todos,
+                format_wow_delta(stats.human_completed_todos - previous.human_completed_todos)
+            )),
+            Line::from(format!(
+                "agent completed: {} ({})",
+                stats.agent_completed_todos,
+                format_wow_delta(stats.agent_completed_todos - previous.agent_completed_todos)
+            )),
+            Line::from(format!(
                 "completion: {}% ({})",
                 stats.completion_rate,
                 format_percentage_point_wow(stats.completion_rate - previous.completion_rate())
@@ -843,8 +855,6 @@ impl OverviewScreen {
                     i64::from(stats.average_revision) - i64::from(previous.average_revision)
                 )
             )),
-            Line::from(format!("newest: {newest_updated}")),
-            Line::from(format!("oldest: {oldest_updated}")),
         ])
         .wrap(Wrap { trim: false })
         .block(
@@ -1202,16 +1212,8 @@ impl OverviewScreen {
             .iter()
             .filter(|session| session.tag.is_some())
             .count() as i64;
-        let total_todos = self
-            .sessions
-            .iter()
-            .map(|session| session.todo_count)
-            .sum::<i64>();
-        let done_todos = self
-            .sessions
-            .iter()
-            .map(|session| session.done_count)
-            .sum::<i64>();
+        let total_todos = self.current_summary.total_todos;
+        let done_todos = self.current_summary.done_todos;
         let open_todos = total_todos - done_todos;
         let completion_rate = if total_todos == 0 {
             0
@@ -1248,6 +1250,10 @@ impl OverviewScreen {
             total_todos,
             open_todos,
             done_todos,
+            human_open_todos: self.current_summary.human_open_todos,
+            agent_open_todos: self.current_summary.agent_open_todos,
+            human_completed_todos: self.current_summary.human_completed_todos,
+            agent_completed_todos: self.current_summary.agent_completed_todos,
             completion_rate,
             newest_updated_at,
             oldest_updated_at,
@@ -1659,6 +1665,10 @@ struct OverviewSummaryStats {
     total_todos: i64,
     open_todos: i64,
     done_todos: i64,
+    human_open_todos: i64,
+    agent_open_todos: i64,
+    human_completed_todos: i64,
+    agent_completed_todos: i64,
     completion_rate: i64,
     newest_updated_at: i64,
     oldest_updated_at: i64,
@@ -2259,6 +2269,8 @@ mod tests {
                 title: String::from("Draft spec"),
                 notes: String::new(),
                 repo: None,
+                created_by_kind: crate::domain::todo::TodoActorKind::Human,
+                completed_by_kind: None,
                 status: TodoStatus::Open,
                 position: 1,
                 created_at: 1_711_275_900,
@@ -2575,8 +2587,8 @@ mod tests {
         assert_eq!(details.x, body.summary.x);
         assert_eq!(details.width, body.summary.width);
         assert!(body.summary.y > details.y);
-        assert_eq!(body.summary.height, details.height);
-        assert_eq!(body.summary.height, body.notes.height);
+        assert!(body.summary.height > details.height);
+        assert!(body.summary.height > body.notes.height);
     }
 
     #[test]
@@ -2881,6 +2893,10 @@ mod tests {
         assert_eq!(stats.total_todos, 1);
         assert_eq!(stats.open_todos, 1);
         assert_eq!(stats.done_todos, 0);
+        assert_eq!(stats.human_open_todos, 1);
+        assert_eq!(stats.agent_open_todos, 0);
+        assert_eq!(stats.human_completed_todos, 0);
+        assert_eq!(stats.agent_completed_todos, 0);
         assert_eq!(stats.completion_rate, 0);
         assert_eq!(stats.newest_updated_at, 1_711_275_700);
         assert_eq!(stats.oldest_updated_at, 1_711_275_650);
@@ -2898,23 +2914,45 @@ mod tests {
             .create_session("Baseline Sprint", Some("work"), None, baseline_time)
             .expect("baseline session");
         database
-            .add_todo(&baseline.name, "Draft spec", "", None, baseline_time + 60)
+            .add_todo_with_actor(
+                &baseline.name,
+                "Draft spec",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Human,
+                baseline_time + 60,
+            )
             .expect("baseline todo");
 
         let recent = database
             .create_session("Recent Sprint", Some("private"), None, recent_time)
             .expect("recent session");
         let recent_done = database
-            .add_todo(&recent.name, "Done task", "", None, recent_time + 60)
+            .add_todo_with_actor(
+                &recent.name,
+                "Done task",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Agent,
+                recent_time + 60,
+            )
             .expect("recent done todo");
         database
-            .add_todo(&recent.name, "Open task", "", None, recent_time + 120)
+            .add_todo_with_actor(
+                &recent.name,
+                "Open task",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Human,
+                recent_time + 120,
+            )
             .expect("recent open todo");
         database
-            .set_todo_status(
+            .set_todo_status_with_actor(
                 recent_done.id,
                 Some(&recent.name),
                 TodoStatus::Done,
+                crate::domain::todo::TodoActorKind::Agent,
                 recent_time + 180,
             )
             .expect("mark done");
@@ -2929,6 +2967,10 @@ mod tests {
         assert!(rendered.contains("todos: 3 (+2 WoW)"));
         assert!(rendered.contains("open: 2 (67%, +1 WoW)"));
         assert!(rendered.contains("completed: 1 (33%, +1 WoW)"));
+        assert!(rendered.contains("human open: 2 (+1 WoW)"));
+        assert!(rendered.contains("agent open: 0 (0 WoW)"));
+        assert!(rendered.contains("human completed: 0 (0 WoW)"));
+        assert!(rendered.contains("agent completed: 1 (+1 WoW)"));
         assert!(rendered.contains("completion: 33% (+33pp WoW)"));
         assert!(rendered.contains("avg rev: r3 (+1 WoW)"));
     }

@@ -86,6 +86,10 @@ pub fn render(snapshot: &SessionSnapshot, options: &MarkdownOptions) -> String {
         if options.include_notes && !todo.notes.trim().is_empty() {
             lines.push(format!("  - notes: {}", todo.notes.trim()));
         }
+        lines.push(format!("  - created-by: {}", todo.created_by_kind.as_str()));
+        if let Some(completed_by_kind) = todo.completed_by_kind {
+            lines.push(format!("  - completed-by: {}", completed_by_kind.as_str()));
+        }
         lines.push(String::new());
     }
 
@@ -125,6 +129,8 @@ mod tests {
                 title: String::from("Draft spec"),
                 notes: String::from("cover db"),
                 repo: None,
+                created_by_kind: crate::domain::todo::TodoActorKind::Human,
+                completed_by_kind: None,
                 status: TodoStatus::Open,
                 position: 1,
                 created_at: 1_711_275_700,
@@ -148,5 +154,6 @@ mod tests {
         assert!(output.contains("- [ ] Draft spec"));
         assert!(output.contains("- tag: work"));
         assert!(output.contains("notes: cover db"));
+        assert!(output.contains("created-by: human"));
     }
 }

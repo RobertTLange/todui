@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::db::Database;
 use crate::db::sessions::create_revision_snapshot;
 use crate::domain::github::normalize_optional_repo;
-use crate::domain::todo::{RepoSource, RepoTodoMatch, Todo, TodoStatus};
+use crate::domain::todo::{RepoSource, RepoTodoMatch, Todo, TodoActorKind, TodoStatus};
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -13,6 +13,18 @@ impl Database {
         title: &str,
         notes: &str,
         repo: Option<&str>,
+        now: i64,
+    ) -> Result<Todo> {
+        self.add_todo_with_actor(session_name, title, notes, repo, TodoActorKind::Human, now)
+    }
+
+    pub fn add_todo_with_actor(
+        &mut self,
+        session_name: &str,
+        title: &str,
+        notes: &str,
+        repo: Option<&str>,
+        created_by_kind: TodoActorKind,
         now: i64,
     ) -> Result<Todo> {
         let transaction = self.connection.transaction()?;
@@ -34,9 +46,17 @@ impl Database {
 
         transaction.execute(
             "INSERT INTO todos (
-                session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
-             ) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, ?6, NULL)",
-            params![session_id, title, notes, resolved_repo, position, now],
+                session_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'open', ?6, ?7, ?7, NULL)",
+            params![
+                session_id,
+                title,
+                notes,
+                resolved_repo,
+                created_by_kind.as_str(),
+                position,
+                now
+            ],
         )?;
         let todo_id = transaction.last_insert_rowid();
 
@@ -59,6 +79,17 @@ impl Database {
         todo_id: i64,
         session_name: Option<&str>,
         status: TodoStatus,
+        now: i64,
+    ) -> Result<Todo> {
+        self.set_todo_status_with_actor(todo_id, session_name, status, TodoActorKind::Human, now)
+    }
+
+    pub fn set_todo_status_with_actor(
+        &mut self,
+        todo_id: i64,
+        session_name: Option<&str>,
+        status: TodoStatus,
+        actor_kind: TodoActorKind,
         now: i64,
     ) -> Result<Todo> {
         let transaction = self.connection.transaction()?;
@@ -91,11 +122,15 @@ impl Database {
                 TodoStatus::Open => None,
                 TodoStatus::Done => Some(now),
             };
+            let completed_by_kind = match status {
+                TodoStatus::Open => None,
+                TodoStatus::Done => Some(actor_kind.as_str()),
+            };
             transaction.execute(
                 "UPDATE todos
-                 SET status = ?1, completed_at = ?2, updated_at = ?3
-                 WHERE id = ?4",
-                params![next_status, completed_at, now, todo_id],
+                 SET status = ?1, completed_at = ?2, completed_by_kind = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![next_status, completed_at, completed_by_kind, now, todo_id],
             )?;
             transaction.execute(
                 "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
@@ -183,7 +218,7 @@ impl Database {
         let transaction = self.connection.transaction()?;
         let todo = transaction
             .query_row(
-                "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+                "SELECT id, session_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
                  FROM todos
                  WHERE id = ?1",
                 [todo_id],
@@ -230,7 +265,7 @@ impl Database {
 
     pub fn get_live_todos(&self, session_id: i64) -> Result<Vec<Todo>> {
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+            "SELECT id, session_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
              FROM todos
              WHERE session_id = ?1
              ORDER BY position ASC",
@@ -242,7 +277,7 @@ impl Database {
     pub fn get_todo(&self, todo_id: i64) -> Result<Todo> {
         self.connection
             .query_row(
-                "SELECT id, session_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+                "SELECT id, session_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
                  FROM todos WHERE id = ?1",
                 [todo_id],
                 map_todo,
@@ -261,6 +296,8 @@ impl Database {
                 sessions.slug,
                 todos.title,
                 todos.status,
+                todos.created_by_kind,
+                todos.completed_by_kind,
                 COALESCE(todos.repo, sessions.repo) AS effective_repo,
                 CASE WHEN todos.repo IS NOT NULL THEN 'todo' ELSE 'session' END AS source
              FROM todos
@@ -274,7 +311,7 @@ impl Database {
 }
 
 fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
-    let status = match row.get::<_, String>(5)?.as_str() {
+    let status = match row.get::<_, String>(7)?.as_str() {
         "done" => TodoStatus::Done,
         _ => TodoStatus::Open,
     };
@@ -285,11 +322,16 @@ fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
         title: row.get(2)?,
         notes: row.get(3)?,
         repo: row.get(4)?,
+        created_by_kind: TodoActorKind::from_db(&row.get::<_, String>(5)?),
+        completed_by_kind: row
+            .get::<_, Option<String>>(6)?
+            .as_deref()
+            .map(TodoActorKind::from_db),
         status,
-        position: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        completed_at: row.get(9)?,
+        position: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        completed_at: row.get(11)?,
     })
 }
 
@@ -298,7 +340,7 @@ fn map_repo_todo_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoTodoMatc
         "done" => TodoStatus::Done,
         _ => TodoStatus::Open,
     };
-    let source = match row.get::<_, String>(5)?.as_str() {
+    let source = match row.get::<_, String>(7)?.as_str() {
         "todo" => RepoSource::Todo,
         _ => RepoSource::Session,
     };
@@ -308,7 +350,12 @@ fn map_repo_todo_match(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepoTodoMatc
         session_name: row.get(1)?,
         title: row.get(2)?,
         status,
-        effective_repo: row.get(4)?,
+        created_by_kind: TodoActorKind::from_db(&row.get::<_, String>(4)?),
+        completed_by_kind: row
+            .get::<_, Option<String>>(5)?
+            .as_deref()
+            .map(TodoActorKind::from_db),
+        effective_repo: row.get(6)?,
         source,
     })
 }
@@ -325,7 +372,7 @@ impl TodoStatus {
 #[cfg(test)]
 mod tests {
     use crate::db::Database;
-    use crate::domain::todo::TodoStatus;
+    use crate::domain::todo::{TodoActorKind, TodoStatus};
 
     #[test]
     fn adds_todos_and_tracks_revisions() {
@@ -334,10 +381,18 @@ mod tests {
             .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.name, "Draft spec", "cover db", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "cover db",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
 
         assert_eq!(todo.position, 1);
+        assert_eq!(todo.created_by_kind, TodoActorKind::Human);
 
         let updated_session = database
             .get_session_by_name(&session.name)
@@ -352,30 +407,41 @@ mod tests {
             .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
 
         let done = database
-            .set_todo_status(
+            .set_todo_status_with_actor(
                 todo.id,
                 Some(&session.name),
                 TodoStatus::Done,
+                TodoActorKind::Agent,
                 1_711_275_800,
             )
             .expect("done");
         assert_eq!(done.status, TodoStatus::Done);
         assert_eq!(done.completed_at, Some(1_711_275_800));
+        assert_eq!(done.completed_by_kind, Some(TodoActorKind::Agent));
 
         let reopened = database
-            .set_todo_status(
+            .set_todo_status_with_actor(
                 todo.id,
                 Some(&session.name),
                 TodoStatus::Open,
+                TodoActorKind::Human,
                 1_711_275_900,
             )
             .expect("open");
         assert_eq!(reopened.status, TodoStatus::Open);
         assert_eq!(reopened.completed_at, None);
+        assert_eq!(reopened.completed_by_kind, None);
     }
 
     #[test]
@@ -385,7 +451,14 @@ mod tests {
             .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.name, "Draft spec", "cover db", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "cover db",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
 
         let edited = database
@@ -419,13 +492,34 @@ mod tests {
             .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let first = database
-            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
         let second = database
-            .add_todo(&session.name, "Review bindings", "", None, 1_711_275_800)
+            .add_todo_with_actor(
+                &session.name,
+                "Review bindings",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_800,
+            )
             .expect("todo");
         let third = database
-            .add_todo(&session.name, "Ship release", "", None, 1_711_275_900)
+            .add_todo_with_actor(
+                &session.name,
+                "Ship release",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_900,
+            )
             .expect("todo");
 
         let deleted = database
@@ -456,7 +550,14 @@ mod tests {
             .create_session("Writing Sprint", None, None, 1_711_275_600)
             .expect("session");
         let todo = database
-            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
         let run = database
             .start_pomodoro(
@@ -490,14 +591,22 @@ mod tests {
             )
             .expect("session");
         let inherited = database
-            .add_todo(&session.name, "Draft spec", "", None, 1_711_275_700)
+            .add_todo_with_actor(
+                &session.name,
+                "Draft spec",
+                "",
+                None,
+                TodoActorKind::Human,
+                1_711_275_700,
+            )
             .expect("todo");
         let override_todo = database
-            .add_todo(
+            .add_todo_with_actor(
                 &session.name,
                 "Review CLI",
                 "",
                 Some("@OpenAI/codex"),
+                TodoActorKind::Agent,
                 1_711_275_800,
             )
             .expect("todo");
@@ -515,5 +624,6 @@ mod tests {
         assert_eq!(override_matches.len(), 1);
         assert_eq!(override_matches[0].todo_id, override_todo.id);
         assert_eq!(override_matches[0].source.as_str(), "todo");
+        assert_eq!(override_matches[0].created_by_kind, TodoActorKind::Agent);
     }
 }
