@@ -2417,6 +2417,57 @@ mod tests {
     }
 
     #[test]
+    fn new_todo_editor_inserts_at_cursor_position() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Draftspec".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        for _ in 0..4 {
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Char(' ')))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(screen.current_todo().expect("selected").title, "Draft spec");
+    }
+
+    #[test]
+    fn edit_todo_editor_backspace_removes_character_before_cursor() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let todo_id = screen.current_todo().expect("selected").todo_id;
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('e')))
+            .unwrap();
+        for _ in 0..4 {
+            screen
+                .handle_key(&mut database, key(KeyCode::Left))
+                .unwrap();
+        }
+        screen
+            .handle_key(&mut database, key(KeyCode::Backspace))
+            .unwrap();
+        screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+
+        assert_eq!(database.get_todo(todo_id).expect("todo").title, "Draftspec");
+    }
+
+    #[test]
     fn new_todo_modal_shows_session_repo() {
         let (_directory, mut database, mut screen) = seeded_screen();
         database
