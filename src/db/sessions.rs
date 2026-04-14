@@ -435,9 +435,9 @@ pub(crate) fn create_revision_snapshot(
 
     transaction.execute(
         "INSERT INTO session_revision_todos (
-            revision_id, todo_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+            revision_id, todo_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
          )
-         SELECT ?1, id, title, notes, repo, status, position, created_at, updated_at, completed_at
+         SELECT ?1, id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
          FROM todos
          WHERE session_id = ?2
          ORDER BY position",

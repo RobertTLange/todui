@@ -20,6 +20,8 @@ pub struct RevisionTodo {
     pub title: String,
     pub notes: String,
     pub repo: Option<String>,
+    pub created_by_kind: crate::domain::todo::TodoActorKind,
+    pub completed_by_kind: Option<crate::domain::todo::TodoActorKind>,
     pub status: crate::domain::todo::TodoStatus,
     pub position: i64,
     pub created_at: i64,

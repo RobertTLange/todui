@@ -2259,6 +2259,8 @@ mod tests {
                 title: String::from("Draft spec"),
                 notes: String::new(),
                 repo: None,
+                created_by_kind: crate::domain::todo::TodoActorKind::Human,
+                completed_by_kind: None,
                 status: TodoStatus::Open,
                 position: 1,
                 created_at: 1_711_275_900,

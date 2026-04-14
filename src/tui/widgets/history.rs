@@ -358,6 +358,9 @@ mod tests {
             title: title.to_string(),
             notes: notes.to_string(),
             repo: repo.map(str::to_string),
+            created_by_kind: crate::domain::todo::TodoActorKind::Human,
+            completed_by_kind: matches!(status, TodoStatus::Done)
+                .then_some(crate::domain::todo::TodoActorKind::Human),
             status,
             position: 1,
             created_at: 1_711_275_600,

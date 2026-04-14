@@ -15,7 +15,7 @@ use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
 use crate::domain::session::SessionHeadToken;
-use crate::domain::todo::TodoStatus;
+use crate::domain::todo::{TodoActorKind, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::{format_compact_local, format_full_local, now_utc_timestamp};
 use crate::tui::browser;
@@ -180,6 +180,7 @@ struct SessionScreen {
     toast: Option<ToastState>,
     pending_completion_bell: bool,
     viewport_area: Rect,
+    provenance_filter: TodoProvenanceFilter,
     theme: Theme,
     config: Config,
 }
@@ -204,6 +205,14 @@ enum DetailPanelMode {
     Inline,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TodoProvenanceFilter {
+    #[default]
+    All,
+    HumanOnly,
+    AgentOnly,
+}
+
 impl SessionScreen {
     fn new(session_name: String, revision: Option<u32>, config: Config) -> Self {
         Self {
@@ -223,6 +232,7 @@ impl SessionScreen {
             toast: None,
             pending_completion_bell: false,
             viewport_area: Rect::new(0, 0, 120, 24),
+            provenance_filter: TodoProvenanceFilter::All,
             theme: Theme::from_config(&config),
             config,
         }
@@ -314,6 +324,10 @@ impl SessionScreen {
             }
             KeyCode::Char('h') => {
                 self.overlay = Some(Overlay::Help);
+                Ok(None)
+            }
+            KeyCode::Char('f') => {
+                self.cycle_provenance_filter();
                 Ok(None)
             }
             KeyCode::Up | KeyCode::Char('k')
@@ -790,7 +804,7 @@ impl SessionScreen {
             frame.render_widget(self.details_panel(snapshot, area.width), area);
         }
         if matches!(self.overlay, Some(Overlay::Help)) {
-            let area = centered_rect(frame.area(), 60, 16);
+            let area = centered_rect(frame.area(), 60, 17);
             frame.render_widget(Clear, area);
             frame.render_widget(self.help_overlay(), area);
         }
@@ -860,8 +874,9 @@ impl SessionScreen {
             .revision
             .map_or_else(|| String::from("HEAD"), |value| format!("r{value}"));
         let mut lines = vec![Line::from(format!(
-            "todui | {} | {revision} | h = help",
-            snapshot.session.name
+            "todui | {} | {revision} | filter: {} | h = help",
+            snapshot.session.name,
+            self.provenance_filter_label()
         ))];
         if self.is_read_only() {
             lines.push(Line::styled(
@@ -1009,7 +1024,7 @@ impl SessionScreen {
 
     fn help_overlay(&self) -> Paragraph<'static> {
         Paragraph::new(
-            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nDetails: i or Right\nOpen repo: u or click repo\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
+            "Navigation: j/k, arrows, PageUp/PageDown\nHelp: h\nFilter provenance: f\nDetails: i or Right\nOpen repo: u or click repo\nNew todo: n\nEdit todo: e\nDelete todo: d\nDelete session: D\nToggle: space or x\nHistory: H\nPomodoro: p start/pause/resume focus\nBreaks: b short break, B long break\nCancel timer: c\nOverview: Left or o\nQuit: q or Esc",
         )
         .wrap(Wrap { trim: false })
         .block(
@@ -1088,11 +1103,14 @@ impl SessionScreen {
 
     fn current_todo(&self) -> Option<&RevisionTodo> {
         let snapshot = self.snapshot.as_ref()?;
-        GroupedTodos::new(&snapshot.todos).todo_at_flat_index(self.selected_index)
+        GroupedTodos::new_with_filter(&snapshot.todos, |todo| self.todo_matches_filter(todo))
+            .todo_at_flat_index(self.selected_index)
     }
 
     fn grouped_todos(&self) -> GroupedTodos<'_> {
-        GroupedTodos::new(&self.snapshot().todos)
+        GroupedTodos::new_with_filter(&self.snapshot().todos, |todo| {
+            self.todo_matches_filter(todo)
+        })
     }
 
     fn snapshot(&self) -> &SessionSnapshot {
@@ -1244,6 +1262,39 @@ impl SessionScreen {
         let pending = self.pending_completion_bell;
         self.pending_completion_bell = false;
         pending
+    }
+
+    fn todo_matches_filter(&self, todo: &RevisionTodo) -> bool {
+        match self.provenance_filter {
+            TodoProvenanceFilter::All => true,
+            TodoProvenanceFilter::HumanOnly => self.todo_matches_actor(todo, TodoActorKind::Human),
+            TodoProvenanceFilter::AgentOnly => self.todo_matches_actor(todo, TodoActorKind::Agent),
+        }
+    }
+
+    fn todo_matches_actor(&self, todo: &RevisionTodo, actor_kind: TodoActorKind) -> bool {
+        todo.created_by_kind == actor_kind || todo.completed_by_kind == Some(actor_kind)
+    }
+
+    fn cycle_provenance_filter(&mut self) {
+        self.provenance_filter = match self.provenance_filter {
+            TodoProvenanceFilter::All => TodoProvenanceFilter::HumanOnly,
+            TodoProvenanceFilter::HumanOnly => TodoProvenanceFilter::AgentOnly,
+            TodoProvenanceFilter::AgentOnly => TodoProvenanceFilter::All,
+        };
+        self.reselect(None);
+        self.set_toast(
+            format!("Filter: {}", self.provenance_filter_label()),
+            ToastTone::Success,
+        );
+    }
+
+    fn provenance_filter_label(&self) -> &'static str {
+        match self.provenance_filter {
+            TodoProvenanceFilter::All => "all",
+            TodoProvenanceFilter::HumanOnly => "human",
+            TodoProvenanceFilter::AgentOnly => "agent",
+        }
     }
 
     fn open_todo_editor(&mut self) {
@@ -1564,6 +1615,13 @@ impl SessionScreen {
                     } else {
                         "open"
                     }
+                )),
+                Line::from(format!("created by: {}", todo.created_by_kind.as_str())),
+                Line::from(format!(
+                    "completed by: {}",
+                    todo.completed_by_kind
+                        .map(TodoActorKind::as_str)
+                        .unwrap_or("-")
                 )),
                 repo_line(&self.theme, effective_repo.as_deref()),
                 Line::from(format!("repo source: {repo_source}")),
@@ -2989,6 +3047,39 @@ mod tests {
         let next = render_buffer(&screen, 120, 24);
         assert!(next.contains("title: Review bindings"));
         assert!(!next.contains("title: Draft spec"));
+    }
+
+    #[test]
+    fn provenance_filter_cycles_between_all_human_and_agent() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        database
+            .add_todo_with_actor(
+                &screen.session_name,
+                "Agent follow-up",
+                "",
+                None,
+                crate::domain::todo::TodoActorKind::Agent,
+                1_711_275_900,
+            )
+            .expect("agent todo");
+        screen.reload(&database).expect("reload");
+
+        assert_eq!(screen.grouped_todos().len(), 3);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("human filter");
+        assert_eq!(screen.grouped_todos().len(), 2);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("agent filter");
+        assert_eq!(screen.grouped_todos().len(), 1);
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('f')))
+            .expect("all filter");
+        assert_eq!(screen.grouped_todos().len(), 3);
     }
 
     #[test]

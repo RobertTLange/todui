@@ -82,9 +82,44 @@ fn session_todo_history_and_export_flow() {
         .stdout(predicate::str::contains("# Session: writing-sprint"))
         .stdout(predicate::str::contains("- tag: work"))
         .stdout(predicate::str::contains("- [x] Draft design spec"))
+        .stdout(predicate::str::contains("created-by: agent"))
+        .stdout(predicate::str::contains("completed-by: agent"))
         .stdout(predicate::str::contains(
             "notes: cover CLI, TUI, DB, pomodoro",
         ));
+}
+
+#[test]
+fn cli_human_override_changes_provenance() {
+    let env = TestEnv::new();
+
+    env.command()
+        .args(["session", "new", "Writing Sprint"])
+        .assert()
+        .success();
+
+    env.command()
+        .args([
+            "add",
+            "Interview notes",
+            "--session",
+            "writing-sprint",
+            "--human",
+        ])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["done", "1", "--session", "writing-sprint", "--human"])
+        .assert()
+        .success();
+
+    env.command()
+        .args(["export", "md", "writing-sprint"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created-by: human"))
+        .stdout(predicate::str::contains("completed-by: human"));
 }
 
 #[test]
@@ -377,7 +412,7 @@ fn cli_repo_search_and_repo_edit_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "1\twriting-sprint\tDraft spec\topen\tsakanaai/todui-keymove\tsession",
+            "1\twriting-sprint\tDraft spec\topen\tagent\t-\tsakanaai/todui-keymove\tsession",
         ))
         .stdout(predicate::str::contains("Review CLI").not());
 
@@ -386,7 +421,7 @@ fn cli_repo_search_and_repo_edit_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "2\twriting-sprint\tReview CLI\topen\topenai/codex\ttodo",
+            "2\twriting-sprint\tReview CLI\topen\tagent\t-\topenai/codex\ttodo",
         ));
 
     env.command()
@@ -400,10 +435,10 @@ fn cli_repo_search_and_repo_edit_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "1\twriting-sprint\tDraft spec\topen\tsakanaai/todui-keymove\tsession",
+            "1\twriting-sprint\tDraft spec\topen\tagent\t-\tsakanaai/todui-keymove\tsession",
         ))
         .stdout(predicate::str::contains(
-            "2\twriting-sprint\tReview CLI\topen\tsakanaai/todui-keymove\tsession",
+            "2\twriting-sprint\tReview CLI\topen\tagent\t-\tsakanaai/todui-keymove\tsession",
         ));
 
     env.command()

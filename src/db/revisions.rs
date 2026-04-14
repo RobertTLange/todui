@@ -3,6 +3,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::db::Database;
 use crate::db::sessions::map_revision_summary;
 use crate::domain::revision::{RevisionMode, RevisionSummary, RevisionTodo, SessionSnapshot};
+use crate::domain::todo::TodoActorKind;
 use crate::error::{AppError, Result};
 
 impl Database {
@@ -49,7 +50,7 @@ impl Database {
             })?;
 
         let mut statement = self.connection.prepare(
-            "SELECT todo_id, title, notes, repo, status, position, created_at, updated_at, completed_at
+            "SELECT todo_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
              FROM session_revision_todos
              WHERE revision_id = ?1
              ORDER BY position ASC",
@@ -82,6 +83,8 @@ impl Database {
                     title: todo.title,
                     notes: todo.notes,
                     repo: todo.repo,
+                    created_by_kind: todo.created_by_kind,
+                    completed_by_kind: todo.completed_by_kind,
                     status: todo.status,
                     position: todo.position,
                     created_at: todo.created_at,
@@ -170,7 +173,7 @@ impl Database {
 }
 
 fn map_revision_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<RevisionTodo> {
-    let status = match row.get::<_, String>(4)?.as_str() {
+    let status = match row.get::<_, String>(6)?.as_str() {
         "done" => crate::domain::todo::TodoStatus::Done,
         _ => crate::domain::todo::TodoStatus::Open,
     };
@@ -180,11 +183,16 @@ fn map_revision_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<RevisionTodo> 
         title: row.get(1)?,
         notes: row.get(2)?,
         repo: row.get(3)?,
+        created_by_kind: TodoActorKind::from_db(&row.get::<_, String>(4)?),
+        completed_by_kind: row
+            .get::<_, Option<String>>(5)?
+            .as_deref()
+            .map(TodoActorKind::from_db),
         status,
-        position: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        completed_at: row.get(8)?,
+        position: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        completed_at: row.get(10)?,
     })
 }
 
