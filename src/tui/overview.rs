@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
 use crate::timestamp::{format_compact_local, format_full_local, format_month_day_local};
 use crate::tui::browser;
-use crate::tui::input::resolved_text_char;
+use crate::tui::input::{next_char_boundary, previous_char_boundary, resolved_text_char};
 use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
@@ -933,10 +933,13 @@ impl OverviewScreen {
                 title,
                 primary_label,
                 primary_value,
+                primary_cursor: Some(primary_value.len()),
                 secondary_label,
                 secondary_value,
+                secondary_cursor: secondary_value.map(str::len),
                 tertiary_label,
                 tertiary_value,
+                tertiary_cursor: tertiary_value.map(str::len),
                 tertiary_value_style: None,
                 focused_field: self.session_editor.focused_field,
                 error: self.session_editor.error.as_deref(),
@@ -1965,27 +1968,6 @@ fn open_preview_todos(todos: Vec<Todo>) -> Vec<Todo> {
         .into_iter()
         .filter(|todo| matches!(todo.status, TodoStatus::Open))
         .collect()
-}
-
-fn previous_char_boundary(text: &str, cursor: usize) -> usize {
-    text[..cursor]
-        .char_indices()
-        .last()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(text: &str, cursor: usize) -> usize {
-    if cursor >= text.len() {
-        return text.len();
-    }
-
-    cursor
-        + text[cursor..]
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(0)
 }
 
 fn move_cursor_vertical(text: &str, cursor: usize, delta: isize) -> usize {

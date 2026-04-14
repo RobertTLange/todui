@@ -16,10 +16,13 @@ pub struct EditorView<'a> {
     pub title: &'a str,
     pub primary_label: &'a str,
     pub primary_value: &'a str,
+    pub primary_cursor: Option<usize>,
     pub secondary_label: Option<&'a str>,
     pub secondary_value: Option<&'a str>,
+    pub secondary_cursor: Option<usize>,
     pub tertiary_label: Option<&'a str>,
     pub tertiary_value: Option<&'a str>,
+    pub tertiary_cursor: Option<usize>,
     pub tertiary_value_style: Option<Style>,
     pub focused_field: EditorField,
     pub error: Option<&'a str>,
@@ -51,6 +54,7 @@ fn editor_content_lines(view: &EditorView<'_>, inner_width: u16) -> Vec<Line<'st
         view.primary_label,
         view.primary_value,
         matches!(view.focused_field, EditorField::Primary),
+        view.primary_cursor,
         inner_width,
     );
 
@@ -60,6 +64,7 @@ fn editor_content_lines(view: &EditorView<'_>, inner_width: u16) -> Vec<Line<'st
             label,
             value,
             matches!(view.focused_field, EditorField::Secondary),
+            view.secondary_cursor,
             inner_width,
         ));
     }
@@ -70,6 +75,7 @@ fn editor_content_lines(view: &EditorView<'_>, inner_width: u16) -> Vec<Line<'st
             label,
             value,
             matches!(view.focused_field, EditorField::Tertiary),
+            view.tertiary_cursor,
             view.tertiary_value_style,
             inner_width,
         ));
@@ -84,10 +90,11 @@ fn editor_content_lines(view: &EditorView<'_>, inner_width: u16) -> Vec<Line<'st
     lines
 }
 
-fn display_field(value: &str, focused: bool) -> String {
+fn display_field(value: &str, focused: bool, cursor: Option<usize>) -> String {
     let mut display = normalize_line_breaks(value);
     if focused {
-        display.push('|');
+        let cursor = cursor.unwrap_or(display.len());
+        insert_cursor_marker(&mut display, cursor);
     }
     display
 }
@@ -96,14 +103,23 @@ fn normalize_line_breaks(value: &str) -> String {
     value.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+fn insert_cursor_marker(display: &mut String, cursor: usize) {
+    let mut cursor = cursor.min(display.len());
+    while cursor > 0 && !display.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    display.insert(cursor, '|');
+}
+
 fn styled_field_lines(
     label: &str,
     value: &str,
     focused: bool,
+    cursor: Option<usize>,
     value_style: Option<Style>,
     inner_width: u16,
 ) -> Vec<Line<'static>> {
-    let display = display_field(value, focused);
+    let display = display_field(value, focused, cursor);
     let mut display_lines = display.split('\n');
     let first = display_lines.next().unwrap_or_default();
     let continuation_indent = " ".repeat(label.chars().count() + 2);
@@ -123,8 +139,14 @@ fn styled_field_lines(
     lines
 }
 
-fn field_lines(label: &str, value: &str, focused: bool, inner_width: u16) -> Vec<Line<'static>> {
-    styled_field_lines(label, value, focused, None, inner_width)
+fn field_lines(
+    label: &str,
+    value: &str,
+    focused: bool,
+    cursor: Option<usize>,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
+    styled_field_lines(label, value, focused, cursor, None, inner_width)
 }
 
 fn available_width(inner_width: u16, prefix_width: usize) -> usize {
@@ -245,10 +267,13 @@ mod tests {
                             title: "New Todo",
                             primary_label: "Title",
                             primary_value: "Draft spec",
+                            primary_cursor: Some("Draft spec".len()),
                             secondary_label: Some("Notes"),
                             secondary_value: Some("cover TUI"),
+                            secondary_cursor: Some("cover TUI".len()),
                             tertiary_label: Some("Repo"),
                             tertiary_value: Some("@exampleorg/todui-keymove"),
+                            tertiary_cursor: Some("@exampleorg/todui-keymove".len()),
                             tertiary_value_style: None,
                             focused_field: EditorField::Tertiary,
                             error: Some("Todo title is required"),
@@ -281,10 +306,13 @@ mod tests {
                             title: "New Todo",
                             primary_label: "Title",
                             primary_value: "Draft spec",
+                            primary_cursor: Some("Draft spec".len()),
                             secondary_label: Some("Notes"),
                             secondary_value: Some("first line\nsecond line"),
+                            secondary_cursor: Some("first line\nsecond line".len()),
                             tertiary_label: None,
                             tertiary_value: None,
+                            tertiary_cursor: None,
                             tertiary_value_style: None,
                             focused_field: EditorField::Secondary,
                             error: None,
@@ -303,6 +331,42 @@ mod tests {
     }
 
     #[test]
+    fn editor_places_cursor_inside_focused_field() {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    render_editor(
+                        &Theme::default(),
+                        EditorView {
+                            title: "Edit Todo",
+                            primary_label: "Title",
+                            primary_value: "Draftspec",
+                            primary_cursor: Some(5),
+                            secondary_label: None,
+                            secondary_value: None,
+                            secondary_cursor: None,
+                            tertiary_label: None,
+                            tertiary_value: None,
+                            tertiary_cursor: None,
+                            tertiary_value_style: None,
+                            focused_field: EditorField::Primary,
+                            error: None,
+                            footer_hint: "Enter save  Esc cancel",
+                        },
+                        frame.area().width,
+                    ),
+                    frame.area(),
+                );
+            })
+            .expect("draw");
+
+        let text = buffer_to_string(terminal.backend().buffer());
+        assert!(text.contains("Title: Draft|spec"));
+    }
+
+    #[test]
     fn editor_keeps_hanging_indent_for_wrapped_multiline_notes() {
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -315,12 +379,17 @@ mod tests {
                             title: "Edit Todo",
                             primary_label: "Title",
                             primary_value: "Prep talks",
+                            primary_cursor: Some("Prep talks".len()),
                             secondary_label: Some("Notes"),
                             secondary_value: Some(
                                 "alpha\n1234567890123456789012345678901TAIL\nbeta",
                             ),
+                            secondary_cursor: Some(
+                                "alpha\n1234567890123456789012345678901TAIL\nbeta".len(),
+                            ),
                             tertiary_label: Some("Repo"),
                             tertiary_value: Some("exampleorg/shinkaevolve"),
+                            tertiary_cursor: Some("exampleorg/shinkaevolve".len()),
                             tertiary_value_style: None,
                             focused_field: EditorField::Secondary,
                             error: None,
@@ -351,10 +420,13 @@ mod tests {
                             title: "Edit Todo",
                             primary_label: "Title",
                             primary_value: "Draft spec",
+                            primary_cursor: Some("Draft spec".len()),
                             secondary_label: None,
                             secondary_value: None,
+                            secondary_cursor: None,
                             tertiary_label: Some("Repo"),
                             tertiary_value: Some("openai/codex"),
+                            tertiary_cursor: Some("openai/codex".len()),
                             tertiary_value_style: Some(
                                 Theme::default()
                                     .text_style(crate::tui::theme::TextTone::Open)
