@@ -47,16 +47,20 @@ todui --help
 todui session new "Writing Sprint" --tag work
 todui add "Draft design spec" --session writing-sprint --note "cover CLI and TUI"
 todui add "Review keybindings" --session writing-sprint --repo @sakanaai/todui-keymove
+todui add "Interview notes" --session writing-sprint --human
 todui resume writing-sprint
 todui session history writing-sprint
 todui export md writing-sprint --include-notes
 ```
+
+CLI todo mutations default to agent provenance. Pass `--human` on `add` or `done` when the action should be recorded as human-authored.
 
 ## What You Get
 
 - Session-based todo lists with one canonical session name per workspace.
 - Full-screen TUI plus scriptable CLI for the same local SQLite data.
 - Immutable revision history with read-only historical resume/export flows.
+- Human vs agent provenance tracked for todo creation and completion.
 - App-wide overview notes, todo notes, repo-aware metadata, and markdown export.
 - Global Pomodoro timer surfaced in overview and live session views.
 
@@ -84,6 +88,7 @@ cp config.example.toml ~/.config/todui/config.toml
 - `j` / `k`, arrows: move selection
 - `n`: create a session or todo
 - `e`: edit the selected session or todo
+- `f`: cycle provenance filter (`all`, `human`, `agent`)
 - `space` / `x`: toggle completion
 - `H`: open session history
 - `r`: return from a revision to the live head
