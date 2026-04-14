@@ -1605,27 +1605,7 @@ impl SessionScreen {
         mode: DetailPanelMode,
     ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
-            let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
-            let mut lines = vec![
-                Line::from(format!("title: {}", todo.title)),
-                Line::from(format!(
-                    "status: {}",
-                    if todo.status == TodoStatus::Done {
-                        "done"
-                    } else {
-                        "open"
-                    }
-                )),
-                Line::from(format!("created by: {}", todo.created_by_kind.as_str())),
-                Line::from(format!(
-                    "completed by: {}",
-                    todo.completed_by_kind
-                        .map(TodoActorKind::as_str)
-                        .unwrap_or("-")
-                )),
-                repo_line(&self.theme, effective_repo.as_deref()),
-                Line::from(format!("repo source: {repo_source}")),
-            ];
+            let (mut lines, _, effective_repo) = self.detail_summary_lines(todo);
             let rendered_notes = render_labeled_text(
                 &self.theme,
                 "notes",
@@ -1728,14 +1708,10 @@ impl SessionScreen {
             .unwrap_or_default()
     }
 
-    fn detail_repo_hitbox(&self, area: Rect, mode: DetailPanelMode) -> Option<Rect> {
-        let repo = self
-            .current_todo()
-            .and_then(|todo| self.current_todo_repo_details(todo).0);
-        let line_index = match mode {
-            DetailPanelMode::Overlay | DetailPanelMode::Inline => 2,
-        };
-        repo_hitbox(area, line_index, repo.as_deref())
+    fn detail_repo_hitbox(&self, area: Rect, _mode: DetailPanelMode) -> Option<Rect> {
+        let todo = self.current_todo()?;
+        let (_, repo_line_index, effective_repo) = self.detail_summary_lines(todo);
+        repo_hitbox(area, repo_line_index, effective_repo.as_deref())
     }
 
     fn detail_note_link_hitboxes(
@@ -1792,6 +1768,35 @@ impl SessionScreen {
         if let Err(error) = browser::open_url(url) {
             self.set_toast(format!("Failed to open URL: {error}"), ToastTone::Warning);
         }
+    }
+
+    fn detail_summary_lines(
+        &self,
+        todo: &RevisionTodo,
+    ) -> (Vec<Line<'static>>, u16, Option<String>) {
+        let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
+        let mut lines = vec![
+            Line::from(format!("title: {}", todo.title)),
+            Line::from(format!(
+                "status: {}",
+                if todo.status == TodoStatus::Done {
+                    "done"
+                } else {
+                    "open"
+                }
+            )),
+            Line::from(format!("created by: {}", todo.created_by_kind.as_str())),
+            Line::from(format!(
+                "completed by: {}",
+                todo.completed_by_kind
+                    .map(TodoActorKind::as_str)
+                    .unwrap_or("-")
+            )),
+        ];
+        let repo_line_index = lines.len() as u16;
+        lines.push(repo_line(&self.theme, effective_repo.as_deref()));
+        lines.push(Line::from(format!("repo source: {repo_source}")));
+        (lines, repo_line_index, effective_repo)
     }
 }
 
@@ -3244,12 +3249,13 @@ mod tests {
         screen
             .handle_key(&mut database, key(KeyCode::Char('i')))
             .expect("open details");
-        let hitbox = screen.details_repo_hitbox().expect("repo hitbox");
+        let buffer = render_test_buffer(&screen, 120, 24);
+        let hitbox = find_text_position(&buffer, "openai/codex").expect("repo text position");
         screen
             .handle_mouse(
                 &mut database,
                 Rect::new(0, 0, 120, 24),
-                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.0, hitbox.1),
             )
             .expect("click repo");
 
@@ -3312,14 +3318,13 @@ mod tests {
         screen.reload(&database).expect("reload");
         reset_test_browser();
 
-        let hitbox = screen
-            .inline_details_repo_hitbox(Rect::new(0, 0, 120, 24))
-            .expect("repo hitbox");
+        let buffer = render_test_buffer(&screen, 120, 24);
+        let hitbox = find_text_position(&buffer, "openai/codex").expect("repo text position");
         screen
             .handle_mouse(
                 &mut database,
                 Rect::new(0, 0, 120, 24),
-                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.x, hitbox.y),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.0, hitbox.1),
             )
             .expect("click repo");
 
@@ -3609,6 +3614,19 @@ mod tests {
 
     fn line_index_containing(lines: &[&str], needle: &str) -> Option<usize> {
         lines.iter().position(|line| line.contains(needle))
+    }
+
+    fn find_text_position(buffer: &Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in 0..buffer.area.height {
+            let mut line = String::new();
+            for x in 0..buffer.area.width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(index) = line.find(needle) {
+                return Some((index as u16, y));
+            }
+        }
+        None
     }
 
     fn key(code: KeyCode) -> KeyEvent {
