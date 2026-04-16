@@ -44,6 +44,7 @@ const SESSION_METADATA_WIDTH: u16 = 60;
 const SESSION_METADATA_HEIGHT: u16 = 21;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
+const NOTES_EDITOR_SEPARATOR_HEIGHT: u16 = 1;
 const NOTES_EDITOR_FOOTER_HEIGHT: u16 = 2;
 const NOTES_EDITOR_FOOTER_TEXT: &str =
     "Enter save  Shift+Enter newline  Ctrl+J newline\nArrows move  Esc cancel";
@@ -1029,8 +1030,9 @@ impl OverviewScreen {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let [text_area, footer_area] = Layout::vertical([
+        let [text_area, separator_area, footer_area] = Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(NOTES_EDITOR_SEPARATOR_HEIGHT),
             Constraint::Length(NOTES_EDITOR_FOOTER_HEIGHT),
         ])
         .areas(inner);
@@ -1043,6 +1045,11 @@ impl OverviewScreen {
                 ))
                 .style(self.theme.surface_style(SurfaceTone::Overlay)),
             text_area,
+        );
+        frame.render_widget(
+            Paragraph::new("-".repeat(separator_area.width as usize))
+                .style(self.theme.surface_style(SurfaceTone::Overlay)),
+            separator_area,
         );
         frame.render_widget(
             Paragraph::new(NOTES_EDITOR_FOOTER_TEXT)
@@ -1475,8 +1482,9 @@ impl OverviewScreen {
 
     fn general_notes_editor_text_area(&self, area: Rect) -> Rect {
         let inner = area.inner(ratatui::layout::Margin::new(1, 1));
-        let [text_area, _footer_area] = Layout::vertical([
+        let [text_area, _separator_area, _footer_area] = Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(NOTES_EDITOR_SEPARATOR_HEIGHT),
             Constraint::Length(NOTES_EDITOR_FOOTER_HEIGHT),
         ])
         .areas(inner);
