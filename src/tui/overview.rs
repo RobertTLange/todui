@@ -5,7 +5,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
@@ -44,6 +44,9 @@ const SESSION_METADATA_WIDTH: u16 = 60;
 const SESSION_METADATA_HEIGHT: u16 = 21;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
+const NOTES_EDITOR_FOOTER_HEIGHT: u16 = 2;
+const NOTES_EDITOR_FOOTER_TEXT: &str =
+    "Enter save  Shift+Enter newline  Ctrl+J newline\nArrows move  Esc cancel";
 const WEEK_SECONDS: i64 = 7 * 24 * 60 * 60;
 const OVERVIEW_LIST_PERCENT: u16 = 40;
 const OVERVIEW_NOTES_PERCENT: u16 = 40;
@@ -189,6 +192,8 @@ struct SessionEditorState {
 struct GeneralNotesEditorState {
     text: String,
     cursor: usize,
+    scroll_row: usize,
+    scroll_col: usize,
 }
 
 impl Default for SessionEditorState {
@@ -660,8 +665,9 @@ impl OverviewScreen {
         }
         if matches!(self.overlay, Some(OverviewOverlay::GeneralNotesEditor)) {
             let area = centered_rect(frame.area(), NOTES_EDITOR_WIDTH, NOTES_EDITOR_HEIGHT);
+            self.sync_notes_editor_viewport(self.general_notes_editor_text_area(area));
             frame.render_widget(Clear, area);
-            frame.render_widget(self.general_notes_editor_modal(), area);
+            self.render_general_notes_editor(frame, area);
         }
         if let Some(OverviewOverlay::DeleteSession { name }) = &self.overlay {
             let area = centered_rect(frame.area(), 58, 9);
@@ -1013,24 +1019,41 @@ impl OverviewScreen {
             .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
-    fn general_notes_editor_modal(&self) -> Paragraph<'static> {
-        let mut body = self.notes_editor.text.clone();
-        body.insert(self.notes_editor.cursor, '|');
-        body.push_str(
-            "\n\nEnter save  Shift+Enter newline  Ctrl+J newline  Arrows move  Esc cancel",
+    fn render_general_notes_editor(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Edit General Notes")
+            .style(self.theme.surface_style(SurfaceTone::Overlay))
+            .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
+            .title_style(self.theme.surface_title_style(SurfaceTone::Overlay));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [text_area, footer_area] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(NOTES_EDITOR_FOOTER_HEIGHT),
+        ])
+        .areas(inner);
+
+        frame.render_widget(
+            Paragraph::new(self.notes_editor.text.as_str())
+                .scroll((
+                    self.notes_editor.scroll_row.min(u16::MAX as usize) as u16,
+                    self.notes_editor.scroll_col.min(u16::MAX as usize) as u16,
+                ))
+                .style(self.theme.surface_style(SurfaceTone::Overlay)),
+            text_area,
+        );
+        frame.render_widget(
+            Paragraph::new(NOTES_EDITOR_FOOTER_TEXT)
+                .wrap(Wrap { trim: false })
+                .style(self.theme.surface_style(SurfaceTone::Overlay)),
+            footer_area,
         );
 
-        Paragraph::new(body)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Edit General Notes")
-                    .style(self.theme.surface_style(SurfaceTone::Overlay))
-                    .border_style(self.theme.surface_border_style(SurfaceTone::Overlay))
-                    .title_style(self.theme.surface_title_style(SurfaceTone::Overlay)),
-            )
-            .style(self.theme.surface_style(SurfaceTone::Overlay))
+        if let Some(cursor) = self.general_notes_cursor_position(text_area) {
+            frame.set_cursor_position(cursor);
+        }
     }
 
     fn delete_session_modal(&self, name: &str) -> Paragraph<'static> {
@@ -1315,6 +1338,8 @@ impl OverviewScreen {
         self.notes_editor = GeneralNotesEditorState {
             text: self.overview_notes.clone(),
             cursor: self.overview_notes.len(),
+            scroll_row: 0,
+            scroll_col: 0,
         };
     }
 
@@ -1446,6 +1471,57 @@ impl OverviewScreen {
     fn move_notes_cursor_vertical(&mut self, delta: isize) {
         self.notes_editor.cursor =
             move_cursor_vertical(&self.notes_editor.text, self.notes_editor.cursor, delta);
+    }
+
+    fn general_notes_editor_text_area(&self, area: Rect) -> Rect {
+        let inner = area.inner(ratatui::layout::Margin::new(1, 1));
+        let [text_area, _footer_area] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(NOTES_EDITOR_FOOTER_HEIGHT),
+        ])
+        .areas(inner);
+        text_area
+    }
+
+    fn sync_notes_editor_viewport(&mut self, text_area: Rect) {
+        if text_area.width == 0 || text_area.height == 0 {
+            self.notes_editor.scroll_row = 0;
+            self.notes_editor.scroll_col = 0;
+            return;
+        }
+
+        let (cursor_row, cursor_col) =
+            note_cursor_row_col(&self.notes_editor.text, self.notes_editor.cursor);
+        let visible_rows = usize::from(text_area.height);
+        let visible_cols = usize::from(text_area.width);
+
+        let min_row = cursor_row.saturating_add(1).saturating_sub(visible_rows);
+        self.notes_editor.scroll_row = self.notes_editor.scroll_row.clamp(min_row, cursor_row);
+
+        let min_col = cursor_col.saturating_add(1).saturating_sub(visible_cols);
+        self.notes_editor.scroll_col = self.notes_editor.scroll_col.clamp(min_col, cursor_col);
+    }
+
+    fn general_notes_cursor_position(&self, text_area: Rect) -> Option<Position> {
+        if text_area.width == 0 || text_area.height == 0 {
+            return None;
+        }
+
+        let (cursor_row, cursor_col) =
+            note_cursor_row_col(&self.notes_editor.text, self.notes_editor.cursor);
+        let relative_row = cursor_row.checked_sub(self.notes_editor.scroll_row)?;
+        let relative_col = cursor_col.checked_sub(self.notes_editor.scroll_col)?;
+
+        if relative_row >= usize::from(text_area.height)
+            || relative_col >= usize::from(text_area.width)
+        {
+            return None;
+        }
+
+        Some(Position::new(
+            text_area.x + relative_col as u16,
+            text_area.y + relative_row as u16,
+        ))
     }
 
     fn toggle_selected_session_todos(&mut self, database: &Database) -> Result<()> {
@@ -2097,6 +2173,15 @@ fn move_cursor_vertical(text: &str, cursor: usize, delta: isize) -> usize {
     target_start + byte_offset_for_char_column(&text[target_start..target_end], current_column)
 }
 
+fn note_cursor_row_col(text: &str, cursor: usize) -> (usize, usize) {
+    let line_starts = note_line_starts(text);
+    let row = line_starts
+        .partition_point(|start| *start <= cursor)
+        .saturating_sub(1);
+    let col = text[line_starts[row]..cursor].chars().count();
+    (row, col)
+}
+
 fn note_line_starts(text: &str) -> Vec<usize> {
     let mut starts = vec![0];
     for (index, character) in text.char_indices() {
@@ -2187,14 +2272,15 @@ mod tests {
         MouseEventKind,
     };
     use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
+    use ratatui::layout::{Position, Rect};
     use ratatui::text::Line;
 
     use super::{
-        OverviewDisplayRow, OverviewExit, OverviewNavigationState, OverviewScreen, WEEK_SECONDS,
-        list_row_index, session_header_line, session_row_line, todo_preview_line,
+        NOTES_EDITOR_HEIGHT, NOTES_EDITOR_WIDTH, OverviewDisplayRow, OverviewExit,
+        OverviewNavigationState, OverviewScreen, WEEK_SECONDS, list_row_index, note_cursor_row_col,
+        session_header_line, session_row_line, todo_preview_line,
     };
     use crate::config::Config;
     use crate::db::Database;
@@ -2205,6 +2291,7 @@ mod tests {
     use crate::tui::browser::{
         reset_test_browser, set_test_browser_should_fail, take_test_browser_opened_urls,
     };
+    use crate::tui::layout::centered_rect;
     use crate::tui::theme::{TextTone, Theme};
 
     #[test]
@@ -3620,6 +3707,79 @@ mod tests {
     }
 
     #[test]
+    fn overview_general_notes_editor_scrolls_to_keep_last_lines_visible() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        let notes = (1..=20)
+            .map(|index| format!("line {index:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        database.save_overview_notes(&notes).expect("save notes");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+
+        let rendered = render_general_notes_editor_buffer(&mut screen, 120, 24);
+        assert!(rendered.contains("line 20"));
+        assert!(!rendered.contains("line 01"));
+    }
+
+    #[test]
+    fn overview_general_notes_editor_scrolls_horizontally_with_cursor() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+
+        let note = format!("prefix {}", "x".repeat(90));
+        database.save_overview_notes(&note).expect("save notes");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+
+        let rendered = render_general_notes_editor_buffer(&mut screen, 120, 24);
+        assert!(rendered.contains(&"x".repeat(20)));
+        assert!(!rendered.contains("prefix"));
+    }
+
+    #[test]
+    fn overview_general_notes_editor_sets_terminal_cursor_position() {
+        let (_directory, mut database, mut screen) = seeded_overview_screen();
+        screen.last_area = Rect::new(0, 0, 120, 24);
+        database
+            .save_overview_notes("top line\nmiddle line\nfinal spot")
+            .expect("save notes");
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('m')))
+            .expect("open notes editor");
+        screen
+            .handle_key(&mut database, key(KeyCode::Up))
+            .expect("move to middle line");
+
+        let cursor = render_cursor_position(&mut screen, 120, 24);
+        let modal = centered_rect(
+            Rect::new(0, 0, 120, 24),
+            NOTES_EDITOR_WIDTH,
+            NOTES_EDITOR_HEIGHT,
+        );
+        let text_area = screen.general_notes_editor_text_area(modal);
+        let (cursor_row, cursor_col) =
+            note_cursor_row_col(&screen.notes_editor.text, screen.notes_editor.cursor);
+        assert_eq!(
+            cursor,
+            Position::new(
+                text_area.x + (cursor_col - screen.notes_editor.scroll_col) as u16,
+                text_area.y + (cursor_row - screen.notes_editor.scroll_row) as u16,
+            )
+        );
+    }
+
+    #[test]
     fn overview_mouse_click_ignores_inline_todo_rows() {
         let (_directory, mut database, mut screen) = seeded_overview_screen();
         screen.last_area = Rect::new(0, 0, 120, 24);
@@ -3838,11 +3998,41 @@ mod tests {
         buffer_to_string(terminal.backend().buffer())
     }
 
+    fn render_cursor_position(screen: &mut OverviewScreen, width: u16, height: u16) -> Position {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| screen.render(frame)).expect("draw");
+        terminal
+            .backend_mut()
+            .get_cursor_position()
+            .expect("cursor")
+    }
+
+    fn render_general_notes_editor_buffer(
+        screen: &mut OverviewScreen,
+        width: u16,
+        height: u16,
+    ) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| screen.render(frame)).expect("draw");
+        let modal = centered_rect(
+            Rect::new(0, 0, width, height),
+            NOTES_EDITOR_WIDTH,
+            NOTES_EDITOR_HEIGHT,
+        );
+        buffer_rect_to_string(terminal.backend().buffer(), modal)
+    }
+
     fn buffer_to_string(buffer: &Buffer) -> String {
+        buffer_rect_to_string(buffer, buffer.area)
+    }
+
+    fn buffer_rect_to_string(buffer: &Buffer, area: Rect) -> String {
         let mut lines = Vec::new();
-        for y in 0..buffer.area.height {
+        for y in area.y..area.y + area.height {
             let mut line = String::new();
-            for x in 0..buffer.area.width {
+            for x in area.x..area.x + area.width {
                 line.push_str(buffer[(x, y)].symbol());
             }
             lines.push(line);
