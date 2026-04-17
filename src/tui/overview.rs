@@ -33,7 +33,6 @@ const EVENT_POLL_MS: u64 = 250;
 const TAG_COLUMN_WIDTH: usize = 6;
 const REV_COLUMN_WIDTH: usize = 5;
 const OPEN_COLUMN_WIDTH: usize = 4;
-const DONE_COLUMN_WIDTH: usize = 4;
 const LAST_UPDATED_COLUMN_WIDTH: usize = 12;
 const SESSION_COLUMN_SPACING: usize = 5;
 const SESSION_COLUMN_SPACING_WITHOUT_REV: usize = 4;
@@ -1932,11 +1931,6 @@ fn session_header_line(theme: &Theme, inner_width: usize) -> Line<'static> {
         ),
         Span::raw(" "),
         Span::styled(
-            fit_cell("■", widths.done),
-            theme.surface_title_style(SurfaceTone::Open),
-        ),
-        Span::raw(" "),
-        Span::styled(
             fit_cell("Last Updated", widths.updated),
             theme.surface_title_style(SurfaceTone::Open),
         ),
@@ -1978,11 +1972,6 @@ fn session_row_line(
                 widths.open,
             ),
             theme.text_style(TextTone::Open),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            checkbox_cell(&session.done_count.to_string(), widths.done),
-            theme.text_style(TextTone::Completed),
         ),
         Span::raw(" "),
         Span::styled(
@@ -2058,8 +2047,7 @@ fn session_open_todo_lines(
 }
 
 fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
-    let base_width =
-        TAG_COLUMN_WIDTH + OPEN_COLUMN_WIDTH + DONE_COLUMN_WIDTH + LAST_UPDATED_COLUMN_WIDTH;
+    let base_width = TAG_COLUMN_WIDTH + OPEN_COLUMN_WIDTH + LAST_UPDATED_COLUMN_WIDTH;
     let rev_visible = inner_width
         >= base_width
             + REV_COLUMN_WIDTH
@@ -2076,7 +2064,6 @@ fn session_column_widths(inner_width: usize) -> SessionColumnWidths {
         name: name_width.max(1),
         rev: rev_width,
         open: OPEN_COLUMN_WIDTH,
-        done: DONE_COLUMN_WIDTH,
         updated: LAST_UPDATED_COLUMN_WIDTH,
     }
 }
@@ -2235,7 +2222,6 @@ struct SessionColumnWidths {
     name: usize,
     rev: usize,
     open: usize,
-    done: usize,
     updated: usize,
 }
 
@@ -2620,14 +2606,14 @@ mod tests {
     fn overview_session_list_hides_revision_column_before_truncating_name() {
         let (_directory, _database, screen) = seeded_overview_screen();
 
-        let narrow = render_widget_buffer(52, 8, |frame| {
+        let narrow = render_widget_buffer(50, 8, |frame| {
             frame.render_widget(screen.session_list(frame.area()), frame.area());
         });
         assert!(!narrow.contains("Rev"));
         assert!(!narrow.contains("r2"));
         assert!(narrow.contains("writing-sprint"));
 
-        let wide = render_widget_buffer(58, 8, |frame| {
+        let wide = render_widget_buffer(51, 8, |frame| {
             frame.render_widget(screen.session_list(frame.area()), frame.area());
         });
         assert!(wide.contains("Rev"));
@@ -2635,7 +2621,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_uses_square_headers_for_count_columns() {
+    fn overview_uses_single_square_header_for_open_count_column() {
         let (_directory, _database, screen) = seeded_overview_screen();
         let header = lines_to_string(&[session_header_line(&screen.theme, 42)]);
         let writing = screen
@@ -2646,9 +2632,8 @@ mod tests {
         let row = lines_to_string(&[session_row_line(writing, &screen.theme, 42, false)]);
 
         assert!(header.contains("□   "));
-        assert!(header.contains("■   "));
+        assert!(!header.contains("■   "));
         assert!(row.contains(" 1  "));
-        assert!(row.contains(" 0  "));
     }
 
     #[test]
