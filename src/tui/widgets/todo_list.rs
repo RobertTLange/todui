@@ -150,14 +150,14 @@ pub fn todo_section_table(
     todos: &[&RevisionTodo],
     scroll_offset: usize,
     visible_rows: usize,
-    run: Option<&PomodoroRun>,
+    _run: Option<&PomodoroRun>,
     theme: &Theme,
 ) -> Table<'static> {
     let rows = todos
         .iter()
         .skip(scroll_offset)
         .take(visible_rows)
-        .map(|todo| todo_table_row(todo, run, theme))
+        .map(|todo| todo_table_row(todo, theme))
         .collect::<Vec<_>>();
 
     let tone = section_surface_tone(section);
@@ -167,7 +167,6 @@ pub fn todo_section_table(
         [
             Constraint::Length(3),
             Constraint::Fill(1),
-            Constraint::Length(6),
             Constraint::Length(11),
         ],
     )
@@ -175,7 +174,6 @@ pub fn todo_section_table(
         Row::new([
             Cell::from(""),
             Cell::from("Title"),
-            Cell::from("Status"),
             Cell::from("Last Update"),
         ])
         .style(theme.surface_title_style(tone)),
@@ -214,13 +212,6 @@ pub fn todo_click_target(
             y,
         )
     })
-}
-
-pub fn todo_status_label(todo: &RevisionTodo, _run: Option<&PomodoroRun>) -> &'static str {
-    match todo.status {
-        TodoStatus::Open => "open",
-        TodoStatus::Done => "done",
-    }
 }
 
 pub fn todo_time_label(todo: &RevisionTodo) -> String {
@@ -264,12 +255,11 @@ fn section_click_target(
     }
 }
 
-fn todo_table_row(todo: &RevisionTodo, run: Option<&PomodoroRun>, theme: &Theme) -> Row<'static> {
+fn todo_table_row(todo: &RevisionTodo, theme: &Theme) -> Row<'static> {
     Row::new([
         Cell::from(todo_checkbox(todo)).style(todo_checkbox_style(theme, todo)),
         Cell::from(format!("{} {}", todo_provenance_badge(todo), todo.title))
             .style(todo_title_style(theme, todo)),
-        Cell::from(todo_status_label(todo, run)).style(todo_status_style(theme, todo, run)),
         Cell::from(todo_time_label(todo)).style(todo_timestamp_style(theme, todo)),
     ])
 }
@@ -318,13 +308,6 @@ fn todo_title_style(theme: &Theme, todo: &RevisionTodo) -> Style {
     }
 }
 
-fn todo_status_style(theme: &Theme, todo: &RevisionTodo, _run: Option<&PomodoroRun>) -> Style {
-    match todo.status {
-        TodoStatus::Open => theme.text_style(TextTone::Open),
-        TodoStatus::Done => theme.text_style(TextTone::Completed),
-    }
-}
-
 fn todo_timestamp_style(theme: &Theme, todo: &RevisionTodo) -> Style {
     match todo.status {
         TodoStatus::Open => theme.text_style(TextTone::Muted),
@@ -351,10 +334,8 @@ mod tests {
 
     use super::{
         GroupedTodos, TodoClickTarget, TodoSection, section_highlight_style, todo_checkbox_style,
-        todo_click_target, todo_provenance_badge, todo_status_label, todo_status_style,
-        todo_time_label, todo_timestamp_style,
+        todo_click_target, todo_provenance_badge, todo_time_label, todo_timestamp_style,
     };
-    use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState};
     use crate::domain::revision::RevisionTodo;
     use crate::domain::todo::TodoStatus;
     use crate::tui::theme::Theme;
@@ -409,29 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_and_status_helpers_preserve_focus_and_completion_semantics() {
+    fn timestamp_helper_preserves_completion_semantics() {
         let open = todo(21, TodoStatus::Open, 1, 120, 180, None);
         let done = todo(22, TodoStatus::Done, 2, 121, 181, Some(240));
-        let focus_run = PomodoroRun {
-            id: 1,
-            session_id: None,
-            todo_id: None,
-            kind: PomodoroKind::Focus,
-            state: PomodoroState::Running,
-            planned_seconds: 100,
-            started_at: 0,
-            paused_at: None,
-            accumulated_pause: 0,
-            ended_at: None,
-            updated_at: 0,
-        };
-
-        assert_eq!(todo_status_label(&open, Some(&focus_run)), "open");
         assert_eq!(
             todo_time_label(&open),
             crate::timestamp::format_month_day_local(120)
         );
-        assert_eq!(todo_status_label(&done, None), "done");
         assert_eq!(
             todo_time_label(&done),
             crate::timestamp::format_month_day_local(240)
@@ -439,23 +404,10 @@ mod tests {
     }
 
     #[test]
-    fn styling_helpers_separate_open_focus_completed_and_timestamps() {
+    fn styling_helpers_separate_open_completed_and_timestamps() {
         let theme = Theme::default();
         let open = todo(31, TodoStatus::Open, 1, 120, 180, None);
         let done = todo(32, TodoStatus::Done, 2, 121, 181, Some(240));
-        let focus_run = PomodoroRun {
-            id: 1,
-            session_id: None,
-            todo_id: None,
-            kind: PomodoroKind::Focus,
-            state: PomodoroState::Running,
-            planned_seconds: 100,
-            started_at: 0,
-            paused_at: None,
-            accumulated_pause: 0,
-            ended_at: None,
-            updated_at: 0,
-        };
 
         assert_eq!(
             section_highlight_style(&theme, TodoSection::Open).bg,
@@ -468,10 +420,6 @@ mod tests {
         assert_ne!(
             todo_checkbox_style(&theme, &open).fg,
             todo_checkbox_style(&theme, &done).fg
-        );
-        assert_ne!(
-            todo_status_style(&theme, &open, Some(&focus_run)).fg,
-            todo_status_style(&theme, &done, None).fg
         );
         assert_ne!(
             todo_timestamp_style(&theme, &open).fg,

@@ -1861,8 +1861,7 @@ mod tests {
     use crate::domain::todo::TodoStatus;
     use crate::tui::browser::{reset_test_browser, take_test_browser_opened_urls};
     use crate::tui::widgets::todo_list::{
-        TodoClickTarget, TodoSection, split_todo_list_area, todo_click_target, todo_status_label,
-        todo_time_label,
+        TodoClickTarget, TodoSection, split_todo_list_area, todo_click_target, todo_time_label,
     };
 
     #[test]
@@ -2878,6 +2877,7 @@ mod tests {
         assert!(wide.contains("writing-sprint"));
         assert!(wide.contains("Open"));
         assert!(wide.contains("Completed"));
+        assert!(!wide.contains("Status"));
         assert!(wide.contains("Note Details"));
         assert!(wide.contains("History"));
         assert!(wide.contains(" - Added"));
@@ -2894,6 +2894,7 @@ mod tests {
         let medium = render_buffer(&screen, 80, 24);
         assert!(medium.contains("h = help"));
         assert!(medium.contains("History"));
+        assert!(!medium.contains("Status"));
         assert!(medium.contains("  Review bindings"));
         assert!(!medium.contains("Note Details"));
         assert!(!medium.contains("Keys"));
@@ -3532,11 +3533,10 @@ mod tests {
     }
 
     #[test]
-    fn todo_row_retains_stateful_timestamp_semantics() {
+    fn todo_row_retains_completion_timestamp_semantics() {
         let (_directory, _database, screen) = seeded_screen();
         let open = &screen.snapshot().todos[0];
 
-        assert_eq!(todo_status_label(open, None), "open");
         assert_eq!(
             todo_time_label(open),
             crate::timestamp::format_month_day_local(open.created_at)
@@ -3548,7 +3548,6 @@ mod tests {
             completed_at: Some(open_time + 60),
             ..screen.snapshot().todos[1].clone()
         };
-        assert_eq!(todo_status_label(&done, None), "done");
         assert_eq!(
             todo_time_label(&done),
             crate::timestamp::format_month_day_local(open_time + 60)
