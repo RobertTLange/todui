@@ -179,7 +179,7 @@ jobs:
           path: release-assets/*
 
   release:
-    name: Publish npm + create GitHub release
+    name: Create GitHub release + publish npm
     needs:
       - validate
       - build-linux
@@ -213,11 +213,6 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Extract release notes from CHANGELOG
         run: node scripts/release-notes.mjs "${{ needs.validate.outputs.pkg_version }}" > release-notes.md
 
@@ -230,3 +225,8 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "${{ needs.validate.outputs.tag }}" \
             --notes-file release-notes.md
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

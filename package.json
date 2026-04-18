@@ -9,6 +9,8 @@
   "files": [
     "bin/**",
     "scripts/npm/**",
+    "config.example.toml",
+    "docs/logo.png",
     "README.md",
     "LICENSE",
     "package.json"

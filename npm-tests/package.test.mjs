@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { readCargoPackageVersion, assertVersionSync } from "../scripts/npm/check-version-sync.mjs";
+import { isSourceCheckout } from "../scripts/npm/install.mjs";
 import { extractReleaseNotes } from "../scripts/release-notes.mjs";
 import {
   parseChecksumFile,
@@ -77,4 +79,25 @@ test("extractReleaseNotes returns the requested changelog section", () => {
 - Earlier release
 `;
   assert.equal(extractReleaseNotes(changelog, "0.1.0"), "### Added\n\n- Initial release");
+});
+
+test("isSourceCheckout detects repo installs from a Cargo checkout", () => {
+  assert.equal(isSourceCheckout(), true);
+  assert.equal(isSourceCheckout("/definitely/not/a/todui/repo"), false);
+});
+
+test("package files include assets referenced by the published README", () => {
+  const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.ok(packageJson.files.includes("config.example.toml"));
+  assert.ok(packageJson.files.includes("docs/logo.png"));
+});
+
+test("release workflow creates the GitHub release before publishing to npm", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const createReleaseIndex = workflow.indexOf("- name: Create GitHub release");
+  const publishNpmIndex = workflow.indexOf("- name: Publish to npm");
+
+  assert.notEqual(createReleaseIndex, -1);
+  assert.notEqual(publishNpmIndex, -1);
+  assert.ok(createReleaseIndex < publishNpmIndex);
 });

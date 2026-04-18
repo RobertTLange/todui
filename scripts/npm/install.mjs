@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   PACKAGE_ROOT,
@@ -42,7 +43,11 @@ function installBinary(destinationPath, contents) {
   chmodSync(destinationPath, 0o755);
 }
 
-async function main() {
+export function isSourceCheckout(packageRoot = PACKAGE_ROOT) {
+  return existsSync(join(packageRoot, "Cargo.toml"));
+}
+
+export async function main() {
   if (process.env.TODOUI_SKIP_DOWNLOAD === "1") {
     log("Skipping binary download because TODOUI_SKIP_DOWNLOAD=1.");
     return;
@@ -59,6 +64,11 @@ async function main() {
     copyFileSync(sourcePath, destinationPath);
     chmodSync(destinationPath, 0o755);
     log(`Installed local binary from ${sourcePath}.`);
+    return;
+  }
+
+  if (isSourceCheckout()) {
+    log("Skipping binary download in a source checkout; build with Cargo or set TODOUI_BINARY_PATH.");
     return;
   }
 
@@ -87,7 +97,11 @@ async function main() {
   log(`Installed ${assetName} to ${destinationPath}.`);
 }
 
-main().catch((error) => {
-  console.error(`[todui] Failed to install binary: ${error.message}`);
-  process.exit(1);
-});
+const scriptPath = fileURLToPath(import.meta.url);
+
+if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+  main().catch((error) => {
+    console.error(`[todui] Failed to install binary: ${error.message}`);
+    process.exit(1);
+  });
+}
