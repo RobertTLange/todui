@@ -1,2 +1,7 @@
 /target
 .DS_Store
+.thicket-cache/
+vendor/
+*.tgz
+fixtures/screenshots/
+examples/seed_screenshot_fixtures.rs
