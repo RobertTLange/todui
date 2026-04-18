@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-04-18
+
+### Fixed
+
+- The published npm launcher now treats the `node_modules/.bin/todui` symlink as a direct invocation, so `npx -y @roberttlange/todui --version` and related commands actually execute the bundled binary.
+
 ## [0.1.1] - 2026-04-18
 
 ### Fixed

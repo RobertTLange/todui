@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -101,6 +101,18 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   });
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+export function isDirectInvocation(argv1 = process.argv[1], entryPath = scriptPath) {
+  if (!argv1) {
+    return false;
+  }
+
+  try {
+    return realpathSync(argv1) === realpathSync(entryPath);
+  } catch {
+    return resolve(argv1) === resolve(entryPath);
+  }
+}
+
+if (isDirectInvocation()) {
   main();
 }

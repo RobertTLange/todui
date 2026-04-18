@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { localBuildBinaryPaths, resolveBinaryPath } from "../bin/todui.js";
+import { isDirectInvocation, localBuildBinaryPaths, resolveBinaryPath } from "../bin/todui.js";
 import { readCargoPackageVersion, assertVersionSync } from "../scripts/npm/check-version-sync.mjs";
 import { isSourceCheckout } from "../scripts/npm/install.mjs";
 import { extractReleaseNotes } from "../scripts/release-notes.mjs";
@@ -60,8 +60,8 @@ edition = "2024"
 
 test("assertVersionSync matches Cargo.toml and package.json", () => {
   assert.deepEqual(assertVersionSync(), {
-    cargoVersion: "0.1.1",
-    npmVersion: "0.1.1",
+    cargoVersion: "0.1.2",
+    npmVersion: "0.1.2",
   });
 });
 
@@ -140,4 +140,17 @@ test("launcher checks target-specific local release builds first", () => {
     resolveBinaryPath({}, packageRoot, "darwin", "x64"),
     targetReleasePath,
   );
+});
+
+test("launcher treats a symlinked bin path as a direct invocation", () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), "todui-symlink-"));
+  const entryPath = join(tempRoot, "bin", "todui.js");
+  const symlinkPath = join(tempRoot, ".bin", "todui");
+
+  mkdirSync(join(tempRoot, "bin"), { recursive: true });
+  mkdirSync(join(tempRoot, ".bin"), { recursive: true });
+  writeFileSync(entryPath, "#!/usr/bin/env node\n");
+  symlinkSync(entryPath, symlinkPath);
+
+  assert.equal(isDirectInvocation(symlinkPath, entryPath), true);
 });

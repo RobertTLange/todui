@@ -1,6 +1,6 @@
 [package]
 name = "todui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Local-first terminal todo app with session history, a full-screen TUI, and SQLite persistence."
 license = "MIT"
