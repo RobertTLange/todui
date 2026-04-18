@@ -29,6 +29,12 @@ When work spans shell scripts, scratch markdown, and half-finished terminal note
 npx -y @roberttlange/todui --help
 ```
 
+### Install skills via `npx`
+
+```bash
+npx skills add RobertTLange/todui --skill '*' -a claude-code -a codex -y
+```
+
 ### Install globally
 
 ```bash
