@@ -50,12 +50,19 @@ Running `todui` without a subcommand opens the overview screen. If you mostly wo
 ## 60-Second Usage
 
 ```bash
+# Create a new session for the work you want to track.
 todui session new "Writing Sprint" --tag work
+# Add a concrete drafting task with an attached note.
 todui add "Draft design spec" --session writing-sprint --note "cover CLI and TUI"
+# Attach a todo to a GitHub repo so it can be queried later.
 todui add "Review keybindings" --session writing-sprint --repo @exampleorg/todui-keymove
+# Record a human-authored item instead of the default agent provenance.
 todui add "Interview notes" --session writing-sprint --human
+# Jump straight into the live session in the TUI.
 todui resume writing-sprint
+# Open the immutable revision history for that session.
 todui session history writing-sprint
+# Export the current session, including notes, as markdown.
 todui export md writing-sprint --include-notes
 ```
 
