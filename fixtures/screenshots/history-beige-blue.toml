@@ -1,0 +1,12 @@
+[database]
+path = "/Users/rob/Dropbox/2026_sakana/todui/fixtures/screenshots/history-beige-blue.db"
+
+[theme]
+mode = "beige"
+accent = "blue"
+
+[pomodoro]
+focus_minutes = 40
+short_break_minutes = 8
+long_break_minutes = 16
+notify_on_complete = false

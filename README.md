@@ -17,6 +17,10 @@
 
 When work spans shell scripts, scratch markdown, and half-finished terminal notes, preserving a clean session history gets noisy fast. `todui` gives you one local place to capture todo sessions, browse immutable revisions, keep notes close to the work, and stay in the terminal from quick CLI automation to full-screen planning.
 
+<p align="center">
+  <img src="docs/release-three-views.png" alt="todui overview, live session, and historical session views shown side by side with different themes" width="1100" />
+</p>
+
 ## Quick Start
 
 ### Fastest: run with `npx`
