@@ -29,12 +29,6 @@ When work spans shell scripts, scratch markdown, and half-finished terminal note
 npx -y @roberttlange/todui --help
 ```
 
-### Install skills via `npx`
-
-```bash
-npx skills add RobertTLange/todui --skill '*' -a claude-code -a codex -y
-```
-
 ### Install globally
 
 ```bash
@@ -50,6 +44,8 @@ The npm package downloads a prebuilt binary for macOS/Linux on `x64` and `arm64`
 cargo install --path .
 todui --help
 ```
+
+Running `todui` without a subcommand opens the overview screen. If you mostly work from scripts or agent loops, you can stay in CLI mode with `session`, `add`, `done`, `repo`, and `export`.
 
 ## 60-Second Usage
 
@@ -67,38 +63,30 @@ CLI todo mutations default to agent provenance. Pass `--human` on `add` or `done
 
 ## What You Get
 
-- Session-based todo lists with one canonical session name per workspace.
-- Full-screen TUI plus scriptable CLI for the same local SQLite data.
-- Immutable revision history with read-only historical resume/export flows.
-- Human vs agent provenance tracked for todo creation and completion.
-- App-wide overview notes, todo notes, repo-aware metadata, and markdown export.
-- Global Pomodoro timer surfaced in overview and live session views.
+- Session-based todo lists with one canonical session name per workspace, so project work stays grouped instead of getting scattered across ad hoc scratch files.
+- A full-screen TUI and a scriptable CLI backed by the same local SQLite database, which makes it practical to mix interactive planning with shell automation.
+- Immutable revision history for sessions, including read-only resume and export flows for older states when you need to audit what changed.
+- Human versus agent provenance on todo creation and completion, which is useful when multiple tools or collaborators are touching the same session.
+- Overview notes, per-todo notes, repo metadata, and markdown export so the session can double as a lightweight working log.
+- A built-in Pomodoro timer surfaced in both overview and live session screens rather than living in a separate app.
 
 ## Config
 
-Default paths:
+`todui` looks for a config file and database path independently. The config file location decides which TOML file gets loaded; the database path is then resolved from CLI or env overrides first, then from the loaded config file.
 
-- config: `~/.config/todui/config.toml`
-- database: `~/.local/share/todui/todui.db`
+| Setting | Default | Override order | Notes |
+| --- | --- | --- | --- |
+| Config file path | `~/.config/todui/config.toml` | `todui --config /absolute/path/to/config.toml` -> `TODO_TUI_CONFIG` -> default path | If the file does not exist, `todui` falls back to built-in defaults. |
+| Database path | `~/.local/share/todui/todui.db` | `TODO_TUI_DB` -> `[database].path` in the selected config file -> default path | Use an absolute path in config if you want the DB somewhere else. |
 
-Overrides:
+The example config exposes four areas:
 
-- config file: `[database].path = "/absolute/path/to/todui.db"`
-- `TODO_TUI_CONFIG`
-- `TODO_TUI_DB`
-- CLI: `todui --config /absolute/path/to/config.toml ...`
-
-Precedence for the config path:
-
-- `--config`
-- `TODO_TUI_CONFIG`
-- default `~/.config/todui/config.toml`
-
-Precedence for the database path after selecting the config file:
-
-- `TODO_TUI_DB`
-- `[database].path` in `config.toml`
-- default `~/.local/share/todui/todui.db`
+| Section | Purpose | Example keys |
+| --- | --- | --- |
+| `[database]` | Point `todui` at a specific SQLite file. | `path` |
+| `[theme]` | Pick the overall color mode and accent. | `mode`, `accent` |
+| `[pomodoro]` | Tune timer lengths and completion notifications. | `focus_minutes`, `short_break_minutes`, `long_break_minutes`, `notify_on_complete` |
+| `[keys]` | Override default key bindings for core navigation and actions. | `up`, `down`, `toggle_done`, `history`, `pomodoro` |
 
 From a source checkout or unpacked npm tarball, seed a config file from the example:
 
@@ -115,6 +103,8 @@ mode = "dark"
 accent = "cyan"
 ```
 
+If you only want a quick visual change, setting `[theme]` is enough. If you are integrating `todui` into a larger local workflow, the most common next step is pinning `[database].path` so scripts and the TUI both point at an explicit database location.
+
 ## Common TUI Keys
 
 - `j` / `k`, arrows: move selection
@@ -129,8 +119,31 @@ accent = "cyan"
 
 ## Skills
 
-- [Project Build skill](skills/project-build/SKILL.md)
-- [Project Plan skill](skills/project-plan/SKILL.md)
+This repo ships two workflow skills for long-running agent work. They are meant for Codex or Claude-style coding agents that need a repeatable planning/execution loop and a shared `todui` session as their ledger.
+
+### Install the bundled skills
+
+```bash
+npx skills add RobertTLange/todui --skill '*' -a claude-code -a codex -y
+```
+
+That command installs both bundled skills from this repository for supported agents.
+
+### `project-plan`
+
+See [skills/project-plan/SKILL.md](skills/project-plan/SKILL.md).
+
+Use this when you have a spec and want an agent to turn it into an execution pack under `docs/`. The skill reads a source spec, creates or reuses a deterministic `todui` session for the repo, writes `docs/prompt.md`, `docs/plan.md`, `docs/implement.md`, and `docs/documentation.md`, and keeps fixed planning todos in sync while it does so.
+
+In practice, `project-plan` is the right starting point when the work is still ambiguous and you want the agent to freeze scope, milestones, assumptions, and validation steps before touching code.
+
+### `project-build`
+
+See [skills/project-build/SKILL.md](skills/project-build/SKILL.md).
+
+Use this after a plan pack already exists under `docs/`. The skill treats the planning pack as the source of truth, creates or reuses one repo session in `todui`, mirrors milestones into todos, executes them one at a time, records blockers, and leaves the current repo state resumable for another agent.
+
+In practice, `project-build` is the execution companion to `project-plan`: first generate the pack, then ship against it without losing milestone state in a long chat thread.
 
 ## Verification
 
