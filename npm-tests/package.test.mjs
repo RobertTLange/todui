@@ -101,3 +101,12 @@ test("release workflow creates the GitHub release before publishing to npm", () 
   assert.notEqual(publishNpmIndex, -1);
   assert.ok(createReleaseIndex < publishNpmIndex);
 });
+
+test("release workflow pins the aarch64 linux linker for cross-compiles", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+
+  assert.match(
+    workflow,
+    /CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:\s*aarch64-linux-gnu-gcc/,
+  );
+});
