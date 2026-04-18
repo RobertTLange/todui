@@ -34,6 +34,8 @@ If they conflict, follow the higher-authority file and record the conflict in `d
 
 Use one deterministic repo session throughout execution.
 
+If `todui` is not installed yet, install it with `npm install -g @roberttlange/todui` or run it ad hoc with `npx -y @roberttlange/todui ...`.
+
 1. Derive the session name as `agent-<repo-dir-slug>`.
 2. Use session tag `agent`.
 3. Reuse the existing session if present; otherwise create it.

@@ -38,6 +38,8 @@ If none exists, stop and ask for the spec path.
 
 Before writing docs, bootstrap `todui`.
 
+If `todui` is not installed yet, install it with `npm install -g @roberttlange/todui` or run it ad hoc with `npx -y @roberttlange/todui ...`.
+
 1. Derive the session name from the repo directory:
    - session name: `agent-<repo-dir-slug>`
    - example for `todui`: `agent-todui`
