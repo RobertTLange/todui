@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-04-18
+
+### Fixed
+
+- npm launcher now falls back to local Cargo build outputs when run from a source checkout, so `npx -y @roberttlange/todui --help` works inside the repository.
+- Linux `aarch64-unknown-linux-gnu` release builds now pin the correct cross-linker in CI, with a regression test covering the workflow wiring.
+
 ## [0.1.0] - 2026-04-18
 
 ### Added

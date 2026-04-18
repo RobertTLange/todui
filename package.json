@@ -1,6 +1,6 @@
 {
   "name": "@roberttlange/todui",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first terminal todo app with session history, a full-screen TUI, and SQLite persistence.",
   "type": "module",
   "bin": {

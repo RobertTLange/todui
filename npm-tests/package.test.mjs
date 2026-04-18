@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
+import { localBuildBinaryPaths, resolveBinaryPath } from "../bin/todui.js";
 import { readCargoPackageVersion, assertVersionSync } from "../scripts/npm/check-version-sync.mjs";
 import { isSourceCheckout } from "../scripts/npm/install.mjs";
 import { extractReleaseNotes } from "../scripts/release-notes.mjs";
@@ -57,8 +60,8 @@ edition = "2024"
 
 test("assertVersionSync matches Cargo.toml and package.json", () => {
   assert.deepEqual(assertVersionSync(), {
-    cargoVersion: "0.1.0",
-    npmVersion: "0.1.0",
+    cargoVersion: "0.1.1",
+    npmVersion: "0.1.1",
   });
 });
 
@@ -108,5 +111,33 @@ test("release workflow pins the aarch64 linux linker for cross-compiles", () => 
   assert.match(
     workflow,
     /CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER:\s*aarch64-linux-gnu-gcc/,
+  );
+});
+
+test("launcher prefers a local cargo build in a source checkout", () => {
+  const packageRoot = mkdtempSync(join(tmpdir(), "todui-launcher-"));
+  writeFileSync(join(packageRoot, "Cargo.toml"), "[package]\nname = \"todui\"\nversion = \"0.1.0\"\n");
+
+  const binaryPath = join(packageRoot, "target", "debug", "todui");
+  mkdirSync(join(packageRoot, "target", "debug"), { recursive: true });
+  writeFileSync(binaryPath, "");
+
+  assert.equal(
+    resolveBinaryPath({}, packageRoot, "darwin", "x64"),
+    binaryPath,
+  );
+});
+
+test("launcher checks target-specific local release builds first", () => {
+  const packageRoot = mkdtempSync(join(tmpdir(), "todui-launcher-"));
+  writeFileSync(join(packageRoot, "Cargo.toml"), "[package]\nname = \"todui\"\nversion = \"0.1.0\"\n");
+
+  const [targetReleasePath] = localBuildBinaryPaths(packageRoot, "x86_64-apple-darwin");
+  mkdirSync(join(packageRoot, "target", "x86_64-apple-darwin", "release"), { recursive: true });
+  writeFileSync(targetReleasePath, "");
+
+  assert.equal(
+    resolveBinaryPath({}, packageRoot, "darwin", "x64"),
+    targetReleasePath,
   );
 });
