@@ -100,11 +100,19 @@ Precedence for the database path after selecting the config file:
 - `[database].path` in `config.toml`
 - default `~/.local/share/todui/todui.db`
 
-Seed a config file from the example:
+From a source checkout or unpacked npm tarball, seed a config file from the example:
 
 ```bash
 mkdir -p ~/.config/todui
 cp config.example.toml ~/.config/todui/config.toml
+```
+
+Minimal example:
+
+```toml
+[theme]
+mode = "dark"
+accent = "cyan"
 ```
 
 ## Common TUI Keys
