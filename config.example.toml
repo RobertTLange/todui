@@ -1,3 +1,7 @@
+[database]
+# Absolute SQLite path to use instead of the default ~/.local/share/todui/todui.db
+# path = "/Users/you/.local/share/todui/todui.db"
+
 [theme]
 # modes: dark, light, beige
 mode = "dark"

@@ -73,8 +73,22 @@ Default paths:
 
 Overrides:
 
+- config file: `[database].path = "/absolute/path/to/todui.db"`
 - `TODO_TUI_CONFIG`
 - `TODO_TUI_DB`
+- CLI: `todui --config /absolute/path/to/config.toml ...`
+
+Precedence for the config path:
+
+- `--config`
+- `TODO_TUI_CONFIG`
+- default `~/.config/todui/config.toml`
+
+Precedence for the database path after selecting the config file:
+
+- `TODO_TUI_DB`
+- `[database].path` in `config.toml`
+- default `~/.local/share/todui/todui.db`
 
 Seed a config file from the example:
 

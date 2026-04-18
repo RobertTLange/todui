@@ -249,6 +249,57 @@ fn cli_edit_updates_title_and_notes() {
 }
 
 #[test]
+fn cli_config_flag_overrides_env_config_and_uses_selected_settings() {
+    let env = TestEnv::new();
+    let db_dir = env.db_path.parent().expect("parent");
+    let env_db_path = db_dir.join("env.db");
+    let cli_db_path = db_dir.join("cli.db");
+    let cli_config_path = db_dir.join("cli-config.toml");
+    fs::write(
+        &env.config_path,
+        format!("[database]\npath = \"{}\"\n", env_db_path.display()),
+    )
+    .expect("config");
+    fs::write(
+        &cli_config_path,
+        format!("[database]\npath = \"{}\"\n", cli_db_path.display()),
+    )
+    .expect("cli config");
+
+    let mut create = Command::cargo_bin("todui").expect("binary");
+    create
+        .env("TODO_TUI_CONFIG", &env.config_path)
+        .env_remove("TODO_TUI_DB")
+        .args([
+            "--config",
+            cli_config_path.to_str().expect("utf8 path"),
+            "session",
+            "new",
+            "CLI DB",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cli-db\n"));
+
+    let mut env_config_command = Command::cargo_bin("todui").expect("binary");
+    env_config_command
+        .env("TODO_TUI_CONFIG", &env.config_path)
+        .env_remove("TODO_TUI_DB")
+        .args(["session", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+
+    let mut cli_db_command = env.command();
+    cli_db_command.env("TODO_TUI_DB", &cli_db_path);
+    cli_db_command
+        .args(["session", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cli-db\t"));
+}
+
+#[test]
 fn cli_edit_requires_at_least_one_change_flag() {
     let env = TestEnv::new();
 

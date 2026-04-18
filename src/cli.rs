@@ -49,6 +49,8 @@ const EXPORT_MD_LONG_HELP: &str = "Examples:\n  todui export md writing-sprint -
     long_about = CLI_LONG_ABOUT
 )]
 pub struct Cli {
+    #[arg(long, global = true, help = "Override the config.toml path")]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -320,7 +322,7 @@ where
     T: Into<OsString> + Clone,
 {
     let cli = parse_from(args);
-    let paths = config::resolve_paths()?;
+    let paths = config::resolve_paths_with_overrides(cli.config.clone(), None)?;
     let config = config::load(&paths)?;
     let mut database = Database::open(&paths.db_path)?;
     let mut stdout = std::io::stdout().lock();
@@ -687,7 +689,10 @@ mod dispatch_tests {
             &mut database,
             &Config::default(),
             &mut writer,
-            Cli { command: None },
+            Cli {
+                config: None,
+                command: None,
+            },
             &mut runner,
         )
         .expect("execute");
@@ -708,6 +713,7 @@ mod dispatch_tests {
             &Config::default(),
             &mut writer,
             Cli {
+                config: None,
                 command: Some(Command::Resume {
                     session: Some(String::from("writing-sprint")),
                     revision: Some(3),
@@ -735,6 +741,7 @@ mod dispatch_tests {
             &Config::default(),
             &mut writer,
             Cli {
+                config: None,
                 command: Some(Command::Session {
                     command: SessionCommand::New {
                         name: String::from("Writing Sprint"),
@@ -832,6 +839,7 @@ mod execute_tests {
             &Config::default(),
             &mut export,
             Cli {
+                config: None,
                 command: Some(super::Command::Export {
                     command: super::ExportCommand::Md {
                         session: Some(String::from("writing-sprint")),
@@ -888,6 +896,7 @@ mod execute_tests {
             &Config::default(),
             &mut edit_output,
             Cli {
+                config: None,
                 command: Some(Command::Edit {
                     todo_id: 1,
                     session: Some(String::from("writing-sprint")),
@@ -933,6 +942,7 @@ mod execute_tests {
             &Config::default(),
             &mut delete_output,
             Cli {
+                config: None,
                 command: Some(Command::Delete {
                     todo_id: 1,
                     session: Some(String::from("writing-sprint")),
@@ -967,6 +977,7 @@ mod execute_tests {
             &Config::default(),
             &mut delete_output,
             Cli {
+                config: None,
                 command: Some(Command::Session {
                     command: SessionCommand::Delete {
                         session: Some(String::from("writing-sprint")),
@@ -987,10 +998,13 @@ mod execute_tests {
 #[cfg(test)]
 mod tests {
     use super::{Command, ExportCommand, ExportFormat, SessionCommand, TimestampMode, parse_from};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_session_new_command() {
         let cli = parse_from(["todui", "session", "new", "Writing Sprint"]);
+
+        assert_eq!(cli.config, None);
 
         match cli.command.expect("command") {
             Command::Session {
@@ -1225,5 +1239,24 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_global_config_flag() {
+        let cli = parse_from([
+            "todui",
+            "--config",
+            "/tmp/custom/config.toml",
+            "session",
+            "list",
+        ]);
+
+        assert_eq!(cli.config, Some(PathBuf::from("/tmp/custom/config.toml")));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                command: SessionCommand::List
+            })
+        ));
     }
 }

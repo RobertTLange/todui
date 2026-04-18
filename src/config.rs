@@ -17,11 +17,19 @@ pub struct AppPaths {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Config {
     #[serde(default)]
+    pub database: DatabaseConfig,
+    #[serde(default)]
     pub theme: ThemeConfig,
     #[serde(default)]
     pub pomodoro: PomodoroConfig,
     #[serde(default)]
     pub keys: KeyBindings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DatabaseConfig {
+    #[serde(default)]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,7 +99,19 @@ impl Default for KeyBindings {
 }
 
 pub fn resolve_paths() -> Result<AppPaths> {
-    resolve_paths_from(|key| std::env::var_os(key), home_dir())
+    resolve_paths_with_overrides(None, None)
+}
+
+pub fn resolve_paths_with_overrides(
+    config_path_override: Option<PathBuf>,
+    db_path_override: Option<PathBuf>,
+) -> Result<AppPaths> {
+    resolve_paths_from(
+        config_path_override,
+        db_path_override,
+        |key| std::env::var_os(key),
+        home_dir(),
+    )
 }
 
 pub fn load(paths: &AppPaths) -> Result<Config> {
@@ -112,24 +132,36 @@ fn load_from_path(path: &Path) -> Result<Config> {
     }
 }
 
-fn resolve_paths_from<F>(get_env: F, home_dir: Option<PathBuf>) -> Result<AppPaths>
+fn resolve_paths_from<F>(
+    config_path_override: Option<PathBuf>,
+    db_path_override: Option<PathBuf>,
+    get_env: F,
+    home_dir: Option<PathBuf>,
+) -> Result<AppPaths>
 where
     F: Fn(&str) -> Option<OsString>,
 {
-    if let (Some(config_path), Some(db_path)) = (get_env(CONFIG_ENV), get_env(DB_ENV)) {
-        return Ok(AppPaths {
-            config_path: PathBuf::from(config_path),
-            db_path: PathBuf::from(db_path),
-        });
-    }
-
-    let home_dir = home_dir.ok_or(AppError::HomeDirUnavailable)?;
-    let config_path = get_env(CONFIG_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir.join(".config/todui/config.toml"));
-    let db_path = get_env(DB_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir.join(".local/share/todui/todui.db"));
+    let config_path = if let Some(path) =
+        config_path_override.or_else(|| get_env(CONFIG_ENV).map(PathBuf::from))
+    {
+        path
+    } else {
+        home_dir
+            .as_ref()
+            .ok_or(AppError::HomeDirUnavailable)?
+            .join(".config/todui/config.toml")
+    };
+    let config = load_from_path(&config_path)?;
+    let db_path = if let Some(path) = db_path_override
+        .or_else(|| get_env(DB_ENV).map(PathBuf::from))
+        .or(config.database.path)
+    {
+        path
+    } else {
+        home_dir
+            .ok_or(AppError::HomeDirUnavailable)?
+            .join(".local/share/todui/todui.db")
+    };
 
     Ok(AppPaths {
         config_path,
@@ -195,8 +227,13 @@ mod tests {
 
     #[test]
     fn resolves_default_paths_from_home_dir() {
-        let paths = resolve_paths_from(|_| None::<OsString>, Some(PathBuf::from("/tmp/rob")))
-            .expect("paths should resolve");
+        let paths = resolve_paths_from(
+            None,
+            None,
+            |_| None::<OsString>,
+            Some(PathBuf::from("/tmp/rob")),
+        )
+        .expect("paths should resolve");
 
         assert_eq!(
             paths.config_path,
@@ -211,6 +248,8 @@ mod tests {
     #[test]
     fn env_overrides_are_applied_independently() {
         let paths = resolve_paths_from(
+            None,
+            None,
             |key| match key {
                 "TODO_TUI_CONFIG" => Some(OsString::from("/tmp/custom/config.toml")),
                 "TODO_TUI_DB" => Some(OsString::from("/tmp/custom/todui.db")),
@@ -243,5 +282,125 @@ mod tests {
         let config = load_from_path(&config_path).expect("parsed config");
 
         assert!(!config.pomodoro.notify_on_complete);
+    }
+
+    #[test]
+    fn loads_database_path_from_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[database]\npath = \"/tmp/configured/todui.db\"\n",
+        )
+        .expect("config");
+
+        let config = load_from_path(&config_path).expect("parsed config");
+
+        assert_eq!(
+            config.database.path,
+            Some(PathBuf::from("/tmp/configured/todui.db"))
+        );
+    }
+
+    #[test]
+    fn config_database_path_overrides_default_db_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[database]\npath = \"/tmp/from-config/todui.db\"\n",
+        )
+        .expect("config");
+
+        let paths = resolve_paths_from(
+            None,
+            None,
+            |key| match key {
+                "TODO_TUI_CONFIG" => Some(config_path.clone().into_os_string()),
+                _ => None,
+            },
+            Some(PathBuf::from("/tmp/ignored-home")),
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(paths.config_path, config_path);
+        assert_eq!(paths.db_path, PathBuf::from("/tmp/from-config/todui.db"));
+    }
+
+    #[test]
+    fn cli_db_override_wins_over_env_and_config() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "[database]\npath = \"/tmp/from-config/todui.db\"\n",
+        )
+        .expect("config");
+
+        let paths = resolve_paths_from(
+            None,
+            Some(PathBuf::from("/tmp/from-cli/todui.db")),
+            |key| match key {
+                "TODO_TUI_CONFIG" => Some(config_path.clone().into_os_string()),
+                "TODO_TUI_DB" => Some(OsString::from("/tmp/from-env/todui.db")),
+                _ => None,
+            },
+            Some(PathBuf::from("/tmp/ignored-home")),
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(paths.db_path, PathBuf::from("/tmp/from-cli/todui.db"));
+    }
+
+    #[test]
+    fn explicit_config_and_db_paths_do_not_require_home_dir() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let config_path = directory.path().join("config.toml");
+        fs::write(&config_path, "[theme]\nmode = \"dark\"\n").expect("config");
+
+        let paths = resolve_paths_from(
+            Some(config_path.clone()),
+            Some(PathBuf::from("/tmp/from-cli/todui.db")),
+            |_| None::<OsString>,
+            None,
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(paths.config_path, config_path);
+        assert_eq!(paths.db_path, PathBuf::from("/tmp/from-cli/todui.db"));
+    }
+
+    #[test]
+    fn config_path_override_wins_over_env_config_path() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let env_config_path = directory.path().join("env.toml");
+        let cli_config_path = directory.path().join("cli.toml");
+        fs::write(
+            &env_config_path,
+            "[database]\npath = \"/tmp/from-env-config/todui.db\"\n",
+        )
+        .expect("env config");
+        fs::write(
+            &cli_config_path,
+            "[database]\npath = \"/tmp/from-cli-config/todui.db\"\n",
+        )
+        .expect("cli config");
+
+        let paths = resolve_paths_from(
+            Some(cli_config_path.clone()),
+            None,
+            |key| match key {
+                "TODO_TUI_CONFIG" => Some(env_config_path.clone().into_os_string()),
+                _ => None,
+            },
+            Some(PathBuf::from("/tmp/ignored-home")),
+        )
+        .expect("paths should resolve");
+
+        assert_eq!(paths.config_path, cli_config_path);
+        assert_eq!(
+            paths.db_path,
+            PathBuf::from("/tmp/from-cli-config/todui.db")
+        );
     }
 }
