@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,12 @@ export function localBuildBinaryPaths(
   ];
 }
 
+function newestExistingPath(paths) {
+  return paths
+    .filter((path) => existsSync(path))
+    .sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0];
+}
+
 export function resolveBinaryPath(
   env = process.env,
   packageRoot = PACKAGE_ROOT,
@@ -60,7 +66,7 @@ export function resolveBinaryPath(
     return installedPath;
   }
 
-  return localBuildBinaryPaths(packageRoot, targetTriple).find((path) => existsSync(path)) ?? installedPath;
+  return newestExistingPath(localBuildBinaryPaths(packageRoot, targetTriple)) ?? installedPath;
 }
 
 export function main(argv = process.argv.slice(2), env = process.env) {

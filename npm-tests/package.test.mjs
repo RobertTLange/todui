@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -15,6 +22,10 @@ import {
   resolveTargetTriple,
   supportedTargetList,
 } from "../scripts/npm/shared.mjs";
+
+function touchFile(path, time) {
+  utimesSync(path, time, time);
+}
 
 test("resolveTargetTriple maps supported platforms", () => {
   assert.equal(resolveTargetTriple("darwin", "arm64"), "aarch64-apple-darwin");
@@ -128,7 +139,7 @@ test("launcher prefers a local cargo build in a source checkout", () => {
   );
 });
 
-test("launcher checks target-specific local release builds first", () => {
+test("launcher uses a target-specific local release build when it is the only build", () => {
   const packageRoot = mkdtempSync(join(tmpdir(), "todui-launcher-"));
   writeFileSync(join(packageRoot, "Cargo.toml"), "[package]\nname = \"todui\"\nversion = \"0.1.0\"\n");
 
@@ -139,6 +150,28 @@ test("launcher checks target-specific local release builds first", () => {
   assert.equal(
     resolveBinaryPath({}, packageRoot, "darwin", "x64"),
     targetReleasePath,
+  );
+});
+
+test("launcher prefers the newest local cargo build in a source checkout", () => {
+  const packageRoot = mkdtempSync(join(tmpdir(), "todui-launcher-"));
+  writeFileSync(join(packageRoot, "Cargo.toml"), "[package]\nname = \"todui\"\nversion = \"0.1.0\"\n");
+
+  const [targetReleasePath] = localBuildBinaryPaths(packageRoot, "x86_64-apple-darwin");
+  const debugPath = join(packageRoot, "target", "debug", "todui");
+  mkdirSync(join(packageRoot, "target", "x86_64-apple-darwin", "release"), { recursive: true });
+  mkdirSync(join(packageRoot, "target", "debug"), { recursive: true });
+  writeFileSync(targetReleasePath, "");
+  writeFileSync(debugPath, "");
+
+  const staleTime = new Date("2026-04-17T00:00:00Z");
+  const freshTime = new Date("2026-04-18T00:00:00Z");
+  touchFile(targetReleasePath, staleTime);
+  touchFile(debugPath, freshTime);
+
+  assert.equal(
+    resolveBinaryPath({}, packageRoot, "darwin", "x64"),
+    debugPath,
   );
 });
 
