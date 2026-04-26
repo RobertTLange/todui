@@ -13,6 +13,7 @@
   <img alt="Rust stable" src="https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white" />
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-local--first-003B57?logo=sqlite&logoColor=white" />
   <img alt="macOS and Linux" src="https://img.shields.io/badge/macOS%20%26%20Linux-x64%20%2F%20arm64-4CAF50" />
+  <a href="https://roberttlange.com/blog/04-todui"><img alt="Blog" src="https://img.shields.io/badge/Blog-read%20post-FF6B35" /></a>
 </p>
 
 When work spans shell scripts, scratch markdown, and half-finished terminal notes, preserving a clean session history gets noisy fast. `todui` gives you one local place to capture todo sessions, browse immutable revisions, keep notes close to the work, and stay in the terminal from quick CLI automation to full-screen planning.
