@@ -93,7 +93,7 @@ impl Default for Theme {
 
 impl Theme {
     pub fn from_config(config: &crate::config::Config) -> Self {
-        let accent = color_from_name(&config.theme.accent).unwrap_or(Color::Cyan);
+        let accent = accent_from_config(&config.theme.mode, &config.theme.accent);
 
         match config.theme.mode.as_str() {
             "light" => Self {
@@ -121,21 +121,21 @@ impl Theme {
                 accent_tag: Color::Rgb(73, 120, 176),
             },
             "beige" => Self {
-                fg_default: Color::Rgb(48, 39, 31),
-                fg_muted: Color::Rgb(112, 98, 82),
+                fg_default: Color::Rgb(54, 45, 35),
+                fg_muted: Color::Rgb(100, 84, 63),
                 fg_success: Color::Rgb(71, 112, 79),
                 fg_warning: Color::Rgb(144, 98, 40),
                 fg_error: Color::Rgb(156, 72, 66),
                 fg_accent: accent,
-                bg_app: Color::Rgb(220, 212, 196),
-                bg_panel: Color::Rgb(212, 203, 187),
-                bg_overlay: Color::Rgb(198, 187, 171),
-                bg_notice: Color::Rgb(220, 207, 171),
-                bg_danger: Color::Rgb(220, 195, 188),
-                bg_open_selected: Color::Rgb(173, 187, 194),
-                bg_completed_selected: Color::Rgb(204, 172, 166),
-                bg_history_selected: Color::Rgb(198, 181, 171),
-                border_default: Color::Rgb(154, 139, 120),
+                bg_app: Color::Rgb(202, 189, 158),
+                bg_panel: Color::Rgb(190, 176, 143),
+                bg_overlay: Color::Rgb(172, 157, 124),
+                bg_notice: Color::Rgb(205, 185, 130),
+                bg_danger: Color::Rgb(200, 166, 154),
+                bg_open_selected: Color::Rgb(146, 164, 161),
+                bg_completed_selected: Color::Rgb(184, 142, 132),
+                bg_history_selected: Color::Rgb(171, 148, 134),
+                border_default: Color::Rgb(128, 111, 83),
                 border_focus: accent,
                 accent_completed: Color::Rgb(156, 72, 66),
                 accent_details: Color::Rgb(136, 98, 49),
@@ -225,6 +225,29 @@ impl Theme {
         };
 
         Style::default().fg(color)
+    }
+}
+
+fn accent_from_config(mode: &str, name: &str) -> Color {
+    if mode.eq_ignore_ascii_case("beige") {
+        beige_accent_from_name(name).unwrap_or(Color::Rgb(34, 95, 112))
+    } else {
+        color_from_name(name).unwrap_or(Color::Cyan)
+    }
+}
+
+fn beige_accent_from_name(name: &str) -> Option<Color> {
+    match name.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Rgb(54, 45, 35)),
+        "blue" => Some(Color::Rgb(36, 82, 126)),
+        "cyan" => Some(Color::Rgb(34, 95, 112)),
+        "gray" => Some(Color::Rgb(91, 78, 61)),
+        "green" => Some(Color::Rgb(45, 98, 61)),
+        "magenta" => Some(Color::Rgb(119, 59, 105)),
+        "red" => Some(Color::Rgb(135, 55, 49)),
+        "white" => Some(Color::Rgb(246, 238, 220)),
+        "yellow" => Some(Color::Rgb(123, 84, 26)),
+        _ => None,
     }
 }
 
@@ -318,22 +341,26 @@ mod tests {
 
         let theme = Theme::from_config(&config);
 
-        assert_eq!(theme.fg_default, Color::Rgb(48, 39, 31));
+        assert_eq!(theme.fg_default, Color::Rgb(54, 45, 35));
         assert_eq!(
             theme.surface_style(SurfaceTone::Neutral).bg,
-            Some(Color::Rgb(212, 203, 187))
+            Some(Color::Rgb(190, 176, 143))
         );
         assert_eq!(
             theme.surface_style(SurfaceTone::Overlay).bg,
-            Some(Color::Rgb(198, 187, 171))
+            Some(Color::Rgb(172, 157, 124))
         );
         assert_eq!(
             theme.surface_border_style(SurfaceTone::Open).fg,
-            Some(Color::Blue)
+            Some(Color::Rgb(36, 82, 126))
+        );
+        assert_eq!(
+            theme.text_style(TextTone::Open).fg,
+            Some(Color::Rgb(36, 82, 126))
         );
         assert_eq!(
             theme.selection_style(SelectionTone::Open).bg,
-            Some(Color::Rgb(173, 187, 194))
+            Some(Color::Rgb(146, 164, 161))
         );
     }
 }
