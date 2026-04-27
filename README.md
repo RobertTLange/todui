@@ -84,7 +84,7 @@ CLI todo mutations default to agent provenance. Pass `--human` on `add` or `done
 
 | Setting | Default | Override order | Notes |
 | --- | --- | --- | --- |
-| Config file path | `~/.config/todui/config.toml` | `todui --config /absolute/path/to/config.toml` -> `TODO_TUI_CONFIG` -> default path | If the file does not exist, `todui` falls back to built-in defaults. |
+| Config file path | `~/.todui/config.toml` | `todui --config /absolute/path/to/config.toml` -> `TODO_TUI_CONFIG` -> default path | If the file does not exist, `todui` falls back to built-in defaults. |
 | Database path | `~/.local/share/todui/todui.db` | `TODO_TUI_DB` -> `[database].path` in the selected config file -> default path | Use an absolute path in config if you want the DB somewhere else. |
 
 The example config exposes four areas:
@@ -99,8 +99,8 @@ The example config exposes four areas:
 From a source checkout or unpacked npm tarball, seed a config file from the example:
 
 ```bash
-mkdir -p ~/.config/todui
-cp config.example.toml ~/.config/todui/config.toml
+mkdir -p ~/.todui
+cp config.example.toml ~/.todui/config.toml
 ```
 
 Minimal example:
