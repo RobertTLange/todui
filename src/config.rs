@@ -149,7 +149,7 @@ where
         home_dir
             .as_ref()
             .ok_or(AppError::HomeDirUnavailable)?
-            .join(".config/todui/config.toml")
+            .join(".todui/config.toml")
     };
     let config = load_from_path(&config_path)?;
     let db_path = if let Some(path) = db_path_override
@@ -237,7 +237,7 @@ mod tests {
 
         assert_eq!(
             paths.config_path,
-            PathBuf::from("/tmp/rob/.config/todui/config.toml")
+            PathBuf::from("/tmp/rob/.todui/config.toml")
         );
         assert_eq!(
             paths.db_path,
