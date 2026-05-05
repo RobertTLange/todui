@@ -2288,7 +2288,7 @@ fn session_create_footer_hint(
 
     let mut lines = vec![String::from("Existing sessions:")];
     lines.extend(suggestions.iter().enumerate().map(|(index, name)| {
-        if index == selected_index {
+        if suggestion_selected && index == selected_index {
             format!("> {name}")
         } else {
             format!("  {name}")
@@ -2747,7 +2747,7 @@ mod tests {
                 .unwrap();
         }
         let buffer = render_buffer(&mut screen, 120, 24);
-        assert!(buffer.contains("> finished-sprint"));
+        assert!(buffer.contains("  finished-sprint"));
 
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
@@ -2797,6 +2797,7 @@ mod tests {
         }
         let buffer = render_buffer(&mut screen, 120, 24);
         assert!(buffer.contains("alpha-done"));
+        assert!(!buffer.contains("> alpha-done"));
 
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
@@ -2848,10 +2849,15 @@ mod tests {
         assert!(buffer.contains("Existing sessions"));
         assert!(buffer.contains("alpha-done"));
         assert!(buffer.contains("alpine-done"));
+        assert!(!buffer.contains("> alpha-done"));
+        assert!(!buffer.contains("> alpine-done"));
 
         screen
             .handle_key(&mut database, key(KeyCode::Down))
             .expect("select second suggestion");
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("> alpha-done"));
+
         let exit = screen
             .handle_key(&mut database, key(KeyCode::Enter))
             .unwrap();
