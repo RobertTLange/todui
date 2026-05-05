@@ -41,6 +41,7 @@ const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
 const SESSION_METADATA_WIDTH: u16 = 60;
 const SESSION_METADATA_HEIGHT: u16 = 21;
+const SESSION_EDITOR_WIDTH: u16 = 60;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
 const NOTES_EDITOR_SEPARATOR_HEIGHT: u16 = 1;
@@ -685,7 +686,9 @@ impl OverviewScreen {
             frame.render_widget(self.session_metadata_modal(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
-            let width = 60;
+            let width = SESSION_EDITOR_WIDTH
+                .min(frame.area().width.saturating_sub(2))
+                .max(1);
             let area = centered_rect(frame.area(), width, self.session_editor_modal_height(width));
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(area.width), area);
@@ -2902,6 +2905,36 @@ mod tests {
         assert!(buffer.contains("match-0"));
         assert!(buffer.contains("match-5"));
         assert!(buffer.contains("Enter create/resume exact"));
+    }
+
+    #[test]
+    fn overview_new_session_modal_height_uses_clamped_width() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        for index in 0..6 {
+            database
+                .create_session(
+                    &format!("Match {index}"),
+                    Some("private"),
+                    None,
+                    1_711_275_700 + i64::from(index),
+                )
+                .expect("session");
+        }
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Match".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let buffer = render_buffer(&mut screen, 31, 30);
+        assert!(buffer.contains("match-5"));
+        assert!(buffer.contains("Esc cancel"));
     }
 
     #[test]
