@@ -14,7 +14,7 @@ use crate::db::Database;
 use crate::db::sessions::OverviewAggregateSnapshot;
 use crate::domain::github::github_repo_url;
 use crate::domain::pomodoro::{PomodoroKind, PomodoroRun, PomodoroState, remaining_seconds};
-use crate::domain::session::SessionOverview;
+use crate::domain::session::{SessionOverview, normalize_session_name};
 use crate::domain::todo::{Todo, TodoStatus};
 use crate::error::Result;
 use crate::timestamp::now_utc_timestamp;
@@ -25,7 +25,7 @@ use crate::tui::layout::centered_rect;
 use crate::tui::terminal::AppTerminal;
 use crate::tui::theme::{SelectionTone, SurfaceTone, TextTone, Theme};
 use crate::tui::widgets::details::{rect_contains, repo_hitbox, repo_line};
-use crate::tui::widgets::editor::{EditorField, EditorView, render_editor};
+use crate::tui::widgets::editor::{EditorField, EditorView, editor_height, render_editor};
 use crate::tui::widgets::markdown::{link_hitboxes, render_markdown};
 use crate::tui::widgets::pomodoro::{active_footer, active_footer_height};
 
@@ -41,6 +41,7 @@ const TODO_PREVIEW_TIME_WIDTH: usize = 11;
 const OPEN_TODO_PREVIEW_MAX_ITEMS: usize = 10;
 const SESSION_METADATA_WIDTH: u16 = 60;
 const SESSION_METADATA_HEIGHT: u16 = 21;
+const SESSION_EDITOR_WIDTH: u16 = 60;
 const NOTES_EDITOR_WIDTH: u16 = 72;
 const NOTES_EDITOR_HEIGHT: u16 = 18;
 const NOTES_EDITOR_SEPARATOR_HEIGHT: u16 = 1;
@@ -184,6 +185,11 @@ struct SessionEditorState {
     tag_cursor: usize,
     repo: String,
     repo_cursor: usize,
+    existing_sessions: Vec<String>,
+    suggested_sessions: Vec<String>,
+    selected_suggestion: usize,
+    suggestion_selected: bool,
+    footer_hint: String,
     focused_field: EditorField,
     error: Option<String>,
 }
@@ -205,6 +211,11 @@ impl Default for SessionEditorState {
             tag_cursor: 0,
             repo: String::new(),
             repo_cursor: 0,
+            existing_sessions: Vec::new(),
+            suggested_sessions: Vec::new(),
+            selected_suggestion: 0,
+            suggestion_selected: false,
+            footer_hint: String::new(),
             focused_field: EditorField::Primary,
             error: None,
         }
@@ -321,7 +332,7 @@ impl OverviewScreen {
                 None
             }
             KeyCode::Char('n') => {
-                self.open_session_editor();
+                self.open_session_editor(database)?;
                 None
             }
             KeyCode::Char('m') => {
@@ -460,9 +471,24 @@ impl OverviewScreen {
                 };
                 Ok(None)
             }
+            KeyCode::Up
+                if self.session_name_autocomplete_is_active()
+                    && !self.session_editor.suggested_sessions.is_empty() =>
+            {
+                self.move_session_editor_suggestion(-1);
+                Ok(None)
+            }
+            KeyCode::Down
+                if self.session_name_autocomplete_is_active()
+                    && !self.session_editor.suggested_sessions.is_empty() =>
+            {
+                self.move_session_editor_suggestion(1);
+                Ok(None)
+            }
             KeyCode::Enter => self.submit_session_editor(database),
             KeyCode::Backspace => {
                 self.backspace_session_editor_char();
+                self.refresh_session_editor_suggestions();
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -478,6 +504,7 @@ impl OverviewScreen {
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.insert_session_editor_char(resolved_text_char(&key, character));
+                self.refresh_session_editor_suggestions();
                 self.session_editor.error = None;
                 Ok(None)
             }
@@ -659,7 +686,10 @@ impl OverviewScreen {
             frame.render_widget(self.session_metadata_modal(), area);
         }
         if matches!(self.overlay, Some(OverviewOverlay::SessionEditor(_))) {
-            let area = centered_rect(frame.area(), 60, 11);
+            let width = SESSION_EDITOR_WIDTH
+                .min(frame.area().width.saturating_sub(2))
+                .max(1);
+            let area = centered_rect(frame.area(), width, self.session_editor_modal_height(width));
             frame.render_widget(Clear, area);
             frame.render_widget(self.session_editor_modal(area.width), area);
         }
@@ -925,7 +955,15 @@ impl OverviewScreen {
         .style(self.theme.surface_style(SurfaceTone::Overlay))
     }
 
+    fn session_editor_modal_height(&self, width: u16) -> u16 {
+        editor_height(&self.session_editor_view(), width)
+    }
+
     fn session_editor_modal(&self, width: u16) -> Paragraph<'_> {
+        render_editor(&self.theme, self.session_editor_view(), width)
+    }
+
+    fn session_editor_view(&self) -> EditorView<'_> {
         let (
             title,
             primary_label,
@@ -944,7 +982,7 @@ impl OverviewScreen {
                 Some(self.session_editor.tag.as_str()),
                 Some("Repo"),
                 Some(self.session_editor.repo.as_str()),
-                "Tab switch  Enter create  Esc cancel",
+                self.session_editor.footer_hint.as_str(),
             ),
             Some(OverviewOverlay::SessionEditor(SessionEditorMode::EditMetadata { .. })) => (
                 "Edit Session Metadata",
@@ -958,26 +996,22 @@ impl OverviewScreen {
             ),
             _ => ("Session", "Value", "", None, None, None, None, "Esc cancel"),
         };
-        render_editor(
-            &self.theme,
-            EditorView {
-                title,
-                primary_label,
-                primary_value,
-                primary_cursor: Some(self.session_editor.name_cursor),
-                secondary_label,
-                secondary_value,
-                secondary_cursor: Some(self.session_editor.tag_cursor),
-                tertiary_label,
-                tertiary_value,
-                tertiary_cursor: Some(self.session_editor.repo_cursor),
-                tertiary_value_style: None,
-                focused_field: self.session_editor.focused_field,
-                error: self.session_editor.error.as_deref(),
-                footer_hint,
-            },
-            width,
-        )
+        EditorView {
+            title,
+            primary_label,
+            primary_value,
+            primary_cursor: Some(self.session_editor.name_cursor),
+            secondary_label,
+            secondary_value,
+            secondary_cursor: Some(self.session_editor.tag_cursor),
+            tertiary_label,
+            tertiary_value,
+            tertiary_cursor: Some(self.session_editor.repo_cursor),
+            tertiary_value_style: None,
+            focused_field: self.session_editor.focused_field,
+            error: self.session_editor.error.as_deref(),
+            footer_hint,
+        }
     }
 
     fn session_metadata_modal(&self) -> Paragraph<'static> {
@@ -1305,9 +1339,19 @@ impl OverviewScreen {
         }
     }
 
-    fn open_session_editor(&mut self) {
+    fn open_session_editor(&mut self, database: &Database) -> Result<()> {
         self.overlay = Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create));
-        self.session_editor = SessionEditorState::default();
+        self.session_editor = SessionEditorState {
+            existing_sessions: database
+                .list_sessions()?
+                .into_iter()
+                .map(|session| session.name)
+                .collect(),
+            footer_hint: session_create_footer_hint(&[], 0, false),
+            ..SessionEditorState::default()
+        };
+        self.refresh_session_editor_suggestions();
+        Ok(())
     }
 
     fn open_session_metadata_editor(&mut self) {
@@ -1327,8 +1371,9 @@ impl OverviewScreen {
             name,
             tag,
             repo,
+            footer_hint: String::from("Empty clears  Enter save  Esc cancel"),
             focused_field: EditorField::Primary,
-            error: None,
+            ..SessionEditorState::default()
         };
     }
 
@@ -1386,6 +1431,68 @@ impl OverviewScreen {
                 character,
             ),
         }
+    }
+
+    fn session_name_autocomplete_is_active(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+        ) && matches!(self.session_editor.focused_field, EditorField::Primary)
+    }
+
+    fn refresh_session_editor_suggestions(&mut self) {
+        if !matches!(
+            self.overlay,
+            Some(OverviewOverlay::SessionEditor(SessionEditorMode::Create))
+        ) {
+            return;
+        }
+
+        let query = normalize_session_name(&self.session_editor.name);
+        let mut suggestions = if query.is_empty() {
+            Vec::new()
+        } else {
+            self.session_editor
+                .existing_sessions
+                .iter()
+                .filter(|name| name.contains(&query))
+                .cloned()
+                .collect()
+        };
+        suggestions.sort_by_key(|name| if *name == query { 0 } else { 1 });
+        suggestions.truncate(6);
+        self.session_editor.suggested_sessions = suggestions;
+        self.session_editor.selected_suggestion = 0;
+        self.session_editor.suggestion_selected = false;
+        self.session_editor.footer_hint = session_create_footer_hint(
+            &self.session_editor.suggested_sessions,
+            self.session_editor.selected_suggestion,
+            self.session_editor.suggestion_selected,
+        );
+    }
+
+    fn move_session_editor_suggestion(&mut self, delta: isize) {
+        let suggestion_count = self.session_editor.suggested_sessions.len();
+        if suggestion_count == 0 {
+            return;
+        }
+
+        self.session_editor.selected_suggestion = if delta.is_negative() {
+            self.session_editor
+                .selected_suggestion
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            min(
+                self.session_editor.selected_suggestion + delta as usize,
+                suggestion_count.saturating_sub(1),
+            )
+        };
+        self.session_editor.suggestion_selected = true;
+        self.session_editor.footer_hint = session_create_footer_hint(
+            &self.session_editor.suggested_sessions,
+            self.session_editor.selected_suggestion,
+            self.session_editor.suggestion_selected,
+        );
     }
 
     fn backspace_session_editor_char(&mut self) {
@@ -1565,6 +1672,20 @@ impl OverviewScreen {
                     return Ok(None);
                 }
 
+                if let Some(existing_name) = self.selected_or_exact_existing_session(name) {
+                    match database.mark_session_opened(&existing_name, now_utc_timestamp()) {
+                        Ok(session) => {
+                            self.reload(database)?;
+                            self.close_session_editor();
+                            return Ok(Some(self.open_session_exit(session.name)));
+                        }
+                        Err(error) => {
+                            self.session_editor.error = Some(error.to_string());
+                            return Ok(None);
+                        }
+                    }
+                }
+
                 match database.create_session(
                     name,
                     Some(self.session_editor.tag.as_str()),
@@ -1615,6 +1736,28 @@ impl OverviewScreen {
                 }
             }
             _ => Ok(None),
+        }
+    }
+
+    fn selected_or_exact_existing_session(&self, name: &str) -> Option<String> {
+        let normalized = normalize_session_name(name);
+        let exact = self
+            .session_editor
+            .existing_sessions
+            .iter()
+            .find(|session_name| **session_name == normalized)
+            .cloned();
+        if exact.is_some() {
+            return exact;
+        }
+
+        if self.session_editor.suggestion_selected {
+            self.session_editor
+                .suggested_sessions
+                .get(self.session_editor.selected_suggestion)
+                .cloned()
+        } else {
+            None
         }
     }
 
@@ -2132,6 +2275,33 @@ fn center_cell(text: &str, width: usize) -> String {
     )
 }
 
+fn session_create_footer_hint(
+    suggestions: &[String],
+    selected_index: usize,
+    suggestion_selected: bool,
+) -> String {
+    let base_hint = if suggestion_selected {
+        "Tab switch  Up/Down select  Enter resume selected  Esc cancel"
+    } else {
+        "Tab switch  Up/Down select  Enter create/resume exact  Esc cancel"
+    };
+    if suggestions.is_empty() {
+        return base_hint.to_string();
+    }
+
+    let mut lines = vec![String::from("Existing sessions:")];
+    lines.extend(suggestions.iter().enumerate().map(|(index, name)| {
+        if suggestion_selected && index == selected_index {
+            format!("> {name}")
+        } else {
+            format!("  {name}")
+        }
+    }));
+    lines.push(String::new());
+    lines.push(base_hint.to_string());
+    lines.join("\n")
+}
+
 fn open_preview_todos(todos: Vec<Todo>) -> Vec<Todo> {
     todos
         .into_iter()
@@ -2522,6 +2692,249 @@ mod tests {
                 .name,
             "inbox"
         );
+    }
+
+    #[test]
+    fn overview_new_session_exact_match_resumes_hidden_completed_session() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let completed = database
+            .create_session("Finished Sprint", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let completed_todo = database
+            .add_todo(&completed.name, "Done task", "", None, 1_711_275_710)
+            .expect("todo");
+        database
+            .set_todo_status(
+                completed_todo.id,
+                Some(&completed.name),
+                TodoStatus::Done,
+                1_711_275_720,
+            )
+            .expect("done");
+        let completed_extra = database
+            .create_session(
+                "Finished Sprint Extra",
+                Some("private"),
+                None,
+                1_711_275_800,
+            )
+            .expect("extra session");
+        let completed_extra_todo = database
+            .add_todo(
+                &completed_extra.name,
+                "Done extra task",
+                "",
+                None,
+                1_711_275_810,
+            )
+            .expect("extra todo");
+        database
+            .set_todo_status(
+                completed_extra_todo.id,
+                Some(&completed_extra.name),
+                TodoStatus::Done,
+                1_711_275_820,
+            )
+            .expect("extra done");
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        assert!(screen.sessions.is_empty());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Finished Sprint".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("  finished-sprint"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession {
+                session_name: String::from("finished-sprint"),
+                navigation: OverviewNavigationState {
+                    selected_index: 0,
+                    scroll_offset: 0,
+                },
+            })
+        );
+        assert!(database.get_session_by_name("finished-sprint").is_ok());
+        assert!(database.get_session_by_name("finished-sprint-1").is_err());
+    }
+
+    #[test]
+    fn overview_new_session_partial_match_without_selection_creates_session() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let completed = database
+            .create_session("Alpha Done", Some("private"), None, 1_711_275_700)
+            .expect("session");
+        let todo = database
+            .add_todo(&completed.name, "Done task", "", None, 1_711_275_710)
+            .expect("todo");
+        database
+            .set_todo_status(
+                todo.id,
+                Some(&completed.name),
+                TodoStatus::Done,
+                1_711_275_720,
+            )
+            .expect("done");
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Al".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("alpha-done"));
+        assert!(!buffer.contains("> alpha-done"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession {
+                session_name: String::from("al"),
+                navigation: OverviewNavigationState {
+                    selected_index: 0,
+                    scroll_offset: 0,
+                },
+            })
+        );
+        assert!(database.get_session_by_name("al").is_ok());
+    }
+
+    #[test]
+    fn overview_new_session_suggestions_can_select_hidden_session() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        for (name, now) in [
+            ("Alpha Done", 1_711_275_700),
+            ("Alpine Done", 1_711_275_800),
+        ] {
+            let session = database
+                .create_session(name, Some("private"), None, now)
+                .expect("session");
+            let todo = database
+                .add_todo(&session.name, "Done task", "", None, now + 10)
+                .expect("todo");
+            database
+                .set_todo_status(todo.id, Some(&session.name), TodoStatus::Done, now + 20)
+                .expect("done");
+        }
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        assert!(screen.sessions.is_empty());
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Al".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("Existing sessions"));
+        assert!(buffer.contains("alpha-done"));
+        assert!(buffer.contains("alpine-done"));
+        assert!(!buffer.contains("> alpha-done"));
+        assert!(!buffer.contains("> alpine-done"));
+
+        screen
+            .handle_key(&mut database, key(KeyCode::Down))
+            .expect("select second suggestion");
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("> alpha-done"));
+
+        let exit = screen
+            .handle_key(&mut database, key(KeyCode::Enter))
+            .unwrap();
+        assert_eq!(
+            exit,
+            Some(OverviewExit::OpenSession {
+                session_name: String::from("alpha-done"),
+                navigation: OverviewNavigationState {
+                    selected_index: 0,
+                    scroll_offset: 0,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn overview_new_session_modal_fits_six_suggestions() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        for index in 0..6 {
+            database
+                .create_session(
+                    &format!("Match {index}"),
+                    Some("private"),
+                    None,
+                    1_711_275_700 + i64::from(index),
+                )
+                .expect("session");
+        }
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Match".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let buffer = render_buffer(&mut screen, 120, 24);
+        assert!(buffer.contains("match-0"));
+        assert!(buffer.contains("match-5"));
+        assert!(buffer.contains("Enter create/resume exact"));
+    }
+
+    #[test]
+    fn overview_new_session_modal_height_uses_clamped_width() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        for index in 0..6 {
+            database
+                .create_session(
+                    &format!("Match {index}"),
+                    Some("private"),
+                    None,
+                    1_711_275_700 + i64::from(index),
+                )
+                .expect("session");
+        }
+
+        let mut screen = OverviewScreen::new(Config::default(), OverviewNavigationState::default());
+        screen.reload(&database).expect("reload");
+        screen
+            .handle_key(&mut database, key(KeyCode::Char('n')))
+            .unwrap();
+        for character in "Match".chars() {
+            screen
+                .handle_key(&mut database, key(KeyCode::Char(character)))
+                .unwrap();
+        }
+
+        let buffer = render_buffer(&mut screen, 31, 30);
+        assert!(buffer.contains("match-5"));
+        assert!(buffer.contains("Esc cancel"));
     }
 
     #[test]
