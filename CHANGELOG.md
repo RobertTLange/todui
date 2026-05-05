@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [TBD] - TBD
+
+### Added
+
+- The overview TUI's New Session modal now autocompletes existing session names, including completed sessions hidden from the overview, and can resume those sessions instead of creating duplicates.
+
 ## [0.1.2] - 2026-04-18
 
 ### Fixed
