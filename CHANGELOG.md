@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file.
 
 - The overview TUI's New Session modal now autocompletes existing session names, including completed sessions hidden from the overview, and can resume those sessions instead of creating duplicates.
 
+### Fixed
+
+- Note details now wrap long todo titles across multiple lines instead of clipping them at the panel edge.
+
 ## [0.1.2] - 2026-04-18
 
 ### Fixed
