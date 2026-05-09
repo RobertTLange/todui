@@ -1605,7 +1605,7 @@ impl SessionScreen {
         mode: DetailPanelMode,
     ) -> crate::tui::widgets::markdown::RenderedTextBlock {
         if let Some(todo) = self.current_todo() {
-            let (mut lines, _, effective_repo) = self.detail_summary_lines(todo);
+            let (mut lines, _, effective_repo) = self.detail_summary_lines(todo, width);
             let rendered_notes = render_labeled_text(
                 &self.theme,
                 "notes",
@@ -1710,7 +1710,8 @@ impl SessionScreen {
 
     fn detail_repo_hitbox(&self, area: Rect, _mode: DetailPanelMode) -> Option<Rect> {
         let todo = self.current_todo()?;
-        let (_, repo_line_index, effective_repo) = self.detail_summary_lines(todo);
+        let (_, repo_line_index, effective_repo) =
+            self.detail_summary_lines(todo, area.width.saturating_sub(2));
         repo_hitbox(area, repo_line_index, effective_repo.as_deref())
     }
 
@@ -1773,10 +1774,13 @@ impl SessionScreen {
     fn detail_summary_lines(
         &self,
         todo: &RevisionTodo,
+        width: u16,
     ) -> (Vec<Line<'static>>, u16, Option<String>) {
         let (effective_repo, repo_source) = self.current_todo_repo_details(todo);
-        let mut lines = vec![
-            Line::from(format!("title: {}", todo.title)),
+        let mut lines = render_labeled_text(&self.theme, "title", &todo.title, width)
+            .text
+            .lines;
+        lines.extend([
             Line::from(format!(
                 "status: {}",
                 if todo.status == TodoStatus::Done {
@@ -1792,7 +1796,7 @@ impl SessionScreen {
                     .map(TodoActorKind::as_str)
                     .unwrap_or("-")
             )),
-        ];
+        ]);
         let repo_line_index = lines.len() as u16;
         lines.push(repo_line(&self.theme, effective_repo.as_deref()));
         lines.push(Line::from(format!("repo source: {repo_source}")));
@@ -3053,6 +3057,49 @@ mod tests {
         let next = render_buffer(&screen, 120, 24);
         assert!(next.contains("title: Review bindings"));
         assert!(!next.contains("title: Draft spec"));
+    }
+
+    #[test]
+    fn inline_note_details_wraps_long_title() {
+        let (_directory, mut database, mut screen) = seeded_screen();
+        let first_todo = screen.current_todo().expect("todo").clone();
+        database
+            .update_todo(
+                first_todo.todo_id,
+                Some(&screen.session_name),
+                "Draft a very long architecture note that must wrap across lines cleanly",
+                &first_todo.notes,
+                None,
+                1_711_275_901,
+            )
+            .expect("update title");
+        database
+            .update_session_repo(
+                &screen.session_name,
+                Some("https://github.com/openai/codex"),
+                1_711_275_902,
+            )
+            .expect("set session repo");
+        screen.reload(&database).expect("reload");
+        reset_test_browser();
+
+        let rendered = render_buffer(&screen, 120, 24);
+        assert!(rendered.contains("title: Draft a very long architecture note that"));
+        assert!(rendered.contains("       must wrap across lines cleanly"));
+
+        let buffer = render_test_buffer(&screen, 120, 24);
+        let hitbox = find_text_position(&buffer, "openai/codex").expect("repo text position");
+        screen
+            .handle_mouse(
+                &mut database,
+                Rect::new(0, 0, 120, 24),
+                mouse(MouseEventKind::Down(MouseButton::Left), hitbox.0, hitbox.1),
+            )
+            .expect("click repo");
+        assert_eq!(
+            take_test_browser_opened_urls(),
+            vec![String::from("https://github.com/openai/codex")]
+        );
     }
 
     #[test]
