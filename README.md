@@ -65,6 +65,10 @@ todui resume writing-sprint
 todui session history writing-sprint
 # Export the current session, including notes, as markdown.
 todui export md writing-sprint --include-notes
+# List sessions and todos with their ids as JSON, for scripts and other apps.
+todui list --json --session writing-sprint
+# Move todo 2 to the top of its session.
+todui move 2 --to 1 --session writing-sprint
 ```
 
 CLI todo mutations default to agent provenance. Pass `--human` on `add` or `done` when the action should be recorded as human-authored.

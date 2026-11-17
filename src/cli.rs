@@ -10,10 +10,11 @@ use crate::db::Database;
 use crate::domain::todo::{TodoActorKind, TodoStatus};
 use crate::error::{AppError, Result};
 use crate::export::markdown::{self, MarkdownOptions};
+use crate::listing;
 use crate::timestamp::{format_export_local, now_utc_timestamp};
 use crate::tui;
 
-const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, `repo` to search todos by GitHub repository, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`\n  Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  CLI todo mutations default to agent provenance; pass `--human` to override.\n  `session list` prints tab-separated rows.\n  `repo` prints one matching todo per tab-separated row.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.";
+const CLI_LONG_ABOUT: &str = "Manage session-based todo lists from the CLI or full-screen TUI.\n\nRun `todui` without a subcommand to open the session overview. Use `resume` to jump straight into a session, `session` to manage sessions and history, `repo` to search todos by GitHub repository, and `export md` to write a markdown snapshot.\n\nAutomation recipes:\n  List sessions: `todui session list`\n  Add a todo with kwargs: `todui add \"Draft spec\" --session writing-sprint --note \"cover CLI\" --repo @exampleorg/todui-keymove`\n  Search todos by repo: `todui repo https://github.com/ExampleOrg/todui-keymove`\n  List sessions and todos with ids as JSON: `todui list --json --session writing-sprint`\n  Reorder a todo: `todui move 7 --to 1 --session writing-sprint`\n  Inspect todo titles and notes from the CLI: `todui export md writing-sprint --include-notes`\n  Open a session interactively: `todui resume writing-sprint`\n\nNotes:\n  CLI todo mutations default to agent provenance; pass `--human` to override.\n  `session list` prints tab-separated rows.\n  `repo` prints one matching todo per tab-separated row.\n  `add` prints the new todo id on stdout.\n  There is no dedicated `todo show <id>` command; use `export md`, `repo`, or `resume` for inspection.";
 
 const SESSION_LONG_ABOUT: &str = "Create, list, tag, assign repos, delete, and inspect revision history for sessions.\n\nUse `todui session list` to discover available session names before calling `add`, `resume`, `repo`, or `export md`.";
 
@@ -171,6 +172,27 @@ pub enum Command {
             long,
             help = "Session name. Defaults to the most recently opened session"
         )]
+        session: Option<String>,
+    },
+    #[command(about = "List todos (with ids) and sessions, as rows or JSON")]
+    List {
+        #[arg(long, help = "Only this session's todos. Defaults to all sessions")]
+        session: Option<String>,
+        #[arg(long = "open-only", help = "Leave out done todos")]
+        open_only: bool,
+        #[arg(
+            long,
+            help = "Print {\"sessions\": [...], \"todos\": [...]} as JSON instead of tab-separated todo rows"
+        )]
+        json: bool,
+    },
+    #[command(about = "Move a todo to a position in its session")]
+    Move {
+        #[arg(help = "Todo id to move")]
+        todo_id: i64,
+        #[arg(long, help = "New 1-based position; clamped to the session's todos")]
+        to: i64,
+        #[arg(long, help = "Session name the todo must belong to")]
         session: Option<String>,
     },
     #[command(about = "Open a session in the TUI", long_about = RESUME_LONG_ABOUT)]
@@ -418,6 +440,27 @@ fn execute_with_runner<W: Write>(
                 now_utc_timestamp(),
             )?;
             writeln!(writer, "{}\topen", todo.id)?;
+            Ok(())
+        }
+        Some(Command::List {
+            session,
+            open_only,
+            json,
+        }) => {
+            let todos = database.list_todos_with_sessions(session.as_deref(), open_only)?;
+            if json {
+                listing::write_json(writer, &database.list_sessions_with_counts()?, &todos)
+            } else {
+                listing::write_rows(writer, &todos)
+            }
+        }
+        Some(Command::Move {
+            todo_id,
+            to,
+            session,
+        }) => {
+            let todo = database.move_todo(todo_id, session.as_deref(), to, now_utc_timestamp())?;
+            writeln!(writer, "{}\t{}", todo.id, todo.position)?;
             Ok(())
         }
         Some(Command::Resume { session, revision }) => {

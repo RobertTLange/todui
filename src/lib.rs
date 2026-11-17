@@ -6,6 +6,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod export;
+pub mod listing;
 pub mod reducer;
 pub mod timestamp;
 pub mod tui;
