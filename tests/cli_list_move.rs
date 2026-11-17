@@ -44,6 +44,15 @@ impl TestEnv {
         args.extend_from_slice(extra);
         serde_json::from_str(&self.run(&args)).expect("valid json")
     }
+
+    fn titles(&self, session: &str) -> Vec<String> {
+        self.list_json(&["--session", session])["todos"]
+            .as_array()
+            .expect("todos")
+            .iter()
+            .map(|todo| todo["title"].as_str().expect("title").to_string())
+            .collect()
+    }
 }
 
 fn seed(env: &TestEnv) {
@@ -149,4 +158,66 @@ fn listing_does_not_change_the_last_opened_session() {
     let before = env.list_json(&[]);
     env.list_json(&["--session", "home"]);
     assert_eq!(env.list_json(&[])["sessions"], before["sessions"]);
+}
+
+#[test]
+fn move_reorders_within_the_session_and_clamps() {
+    let env = TestEnv::new();
+    seed(&env);
+
+    assert_eq!(
+        env.run(&["move", "3", "--to", "1", "--session", "work"]),
+        "3\t1\n"
+    );
+    assert_eq!(env.titles("work"), vec!["third", "first", "second"]);
+
+    env.run(&["move", "3", "--to", "3", "--session", "work"]);
+    assert_eq!(env.titles("work"), vec!["first", "second", "third"]);
+
+    assert_eq!(
+        env.run(&["move", "1", "--to", "99", "--session", "work"]),
+        "1\t3\n"
+    );
+    assert_eq!(env.titles("work"), vec!["second", "third", "first"]);
+    env.run(&["move", "1", "--to", "0", "--session", "work"]);
+    assert_eq!(env.titles("work"), vec!["first", "second", "third"]);
+
+    let positions: Vec<_> = env.list_json(&["--session", "work"])["todos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(positions, vec![1, 2, 3]);
+
+    env.command()
+        .args(["move", "1", "--to", "2", "--session", "home"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn move_records_a_revision() {
+    let env = TestEnv::new();
+    seed(&env);
+    let before = env.list_json(&["--session", "work"])["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["slug"] == "work")
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    env.run(&["move", "2", "--to", "1", "--session", "work"]);
+    let history = env.run(&["session", "history", "work"]);
+    assert!(history.contains("todo moved"));
+    let after = env.list_json(&[])["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["slug"] == "work")
+        .unwrap()["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(after, before + 1);
 }

@@ -263,6 +263,76 @@ impl Database {
         Ok(todo)
     }
 
+    /// Moves a todo to `position` (1-based, clamped to the session's todos),
+    /// shifting the todos in between by one. Returns the todo at its new place.
+    pub fn move_todo(
+        &mut self,
+        todo_id: i64,
+        session_name: Option<&str>,
+        position: i64,
+        now: i64,
+    ) -> Result<Todo> {
+        let transaction = self.connection.transaction()?;
+        let (session_id, current, slug): (i64, i64, String) = transaction
+            .query_row(
+                "SELECT todos.session_id, todos.position, sessions.slug
+                 FROM todos JOIN sessions ON sessions.id = todos.session_id
+                 WHERE todos.id = ?1",
+                [todo_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or(AppError::TodoNotFound(todo_id))?;
+        if let Some(expected) = session_name {
+            if expected != slug {
+                return Err(AppError::TodoSessionMismatch {
+                    todo_id,
+                    session: expected.to_string(),
+                });
+            }
+        }
+        let count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM todos WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let target = position.clamp(1, count.max(1));
+        if target != current {
+            // Positions are unique per session: park the todo at 0 and shift the
+            // others through negative values so no step collides.
+            transaction.execute("UPDATE todos SET position = 0 WHERE id = ?1", [todo_id])?;
+            let (low, high, step) = if target < current {
+                (target, current - 1, 1)
+            } else {
+                (current + 1, target, -1)
+            };
+            transaction.execute(
+                "UPDATE todos SET position = -(position + ?1)
+                 WHERE session_id = ?2 AND position BETWEEN ?3 AND ?4",
+                params![step, session_id, low, high],
+            )?;
+            transaction.execute(
+                "UPDATE todos SET position = -position WHERE session_id = ?1 AND position < 0",
+                [session_id],
+            )?;
+            transaction.execute(
+                "UPDATE todos SET position = ?1, updated_at = ?2 WHERE id = ?3",
+                params![target, now, todo_id],
+            )?;
+            transaction.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                params![now, session_id],
+            )?;
+            let revision = create_revision_snapshot(&transaction, session_id, "todo moved", now)?;
+            transaction.execute(
+                "UPDATE sessions SET current_revision = ?1 WHERE id = ?2",
+                params![revision.revision_number, session_id],
+            )?;
+        }
+        transaction.commit()?;
+        self.get_todo(todo_id)
+    }
+
     pub fn get_live_todos(&self, session_id: i64) -> Result<Vec<Todo>> {
         let mut statement = self.connection.prepare(
             "SELECT id, session_id, title, notes, repo, created_by_kind, completed_by_kind, status, position, created_at, updated_at, completed_at
@@ -373,6 +443,78 @@ impl TodoStatus {
 mod tests {
     use crate::db::Database;
     use crate::domain::todo::{TodoActorKind, TodoStatus};
+
+    #[test]
+    fn move_todo_keeps_positions_contiguous_in_both_directions() {
+        let (_directory, mut database) = Database::open_temp().expect("database");
+        let session = database
+            .create_session("Order", None, None, 1_711_275_600)
+            .expect("session");
+        let ids: Vec<i64> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|title| {
+                database
+                    .add_todo_with_actor(
+                        &session.name,
+                        title,
+                        "",
+                        None,
+                        TodoActorKind::Human,
+                        1_711_275_700,
+                    )
+                    .expect("todo")
+                    .id
+            })
+            .collect();
+        let order = |database: &Database| -> Vec<String> {
+            database
+                .get_live_todos(session.id)
+                .expect("todos")
+                .into_iter()
+                .map(|todo| todo.title)
+                .collect()
+        };
+
+        let moved = database
+            .move_todo(ids[1], Some("order"), 4, 1_711_275_800)
+            .expect("move down");
+        assert_eq!(moved.position, 4);
+        assert_eq!(order(&database), ["a", "c", "d", "b", "e"]);
+
+        database
+            .move_todo(ids[4], None, 1, 1_711_275_900)
+            .expect("move up");
+        assert_eq!(order(&database), ["e", "a", "c", "d", "b"]);
+
+        let positions: Vec<i64> = database
+            .get_live_todos(session.id)
+            .expect("todos")
+            .iter()
+            .map(|todo| todo.position)
+            .collect();
+        assert_eq!(positions, [1, 2, 3, 4, 5]);
+
+        let revision = database
+            .get_session_by_name("order")
+            .expect("session")
+            .current_revision;
+        database
+            .move_todo(ids[0], None, 2, 1_711_276_000)
+            .expect("no-op move");
+        assert_eq!(
+            database
+                .get_session_by_name("order")
+                .expect("session")
+                .current_revision,
+            revision,
+            "a move to the same place records no revision"
+        );
+        assert!(
+            database
+                .move_todo(ids[0], Some("other"), 1, 1_711_276_100)
+                .is_err()
+        );
+    }
 
     #[test]
     fn adds_todos_and_tracks_revisions() {
