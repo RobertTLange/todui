@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `todui list` prints todos with their ids (all sessions, or `--session`; `--open-only` drops done ones) as tab-separated rows, and with `--json` prints `{"sessions": [...], "todos": [...]}` including live open/done counts per session, for scripts and apps that need ids.
 - The overview TUI's New Session modal now autocompletes existing session names, including completed sessions hidden from the overview, and can resume those sessions instead of creating duplicates.
 
 ### Fixed

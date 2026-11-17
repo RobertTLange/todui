@@ -310,7 +310,7 @@ impl Database {
     }
 }
 
-fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
+pub(crate) fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
     let status = match row.get::<_, String>(7)?.as_str() {
         "done" => TodoStatus::Done,
         _ => TodoStatus::Open,
