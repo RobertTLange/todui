@@ -7,6 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - `todui list` prints todos with their ids (all sessions, or `--session`; `--open-only` drops done ones) as tab-separated rows, and with `--json` prints `{"sessions": [...], "todos": [...]}` including live open/done counts per session, for scripts and apps that need ids.
+- `todui session rename <NAME> --to <NEW>` renames a session, keeping its tag, repo, todos and history, and prints the new name.
+- `todui notes` prints the overview's general notes; `--set <TEXT>` replaces and `--clear` removes them.
 - `todui move <ID> --to <N>` moves a todo to a 1-based position in its session (clamped to the session), shifting the todos in between and recording a revision.
 - The overview TUI's New Session modal now autocompletes existing session names, including completed sessions hidden from the overview, and can resume those sessions instead of creating duplicates.
 

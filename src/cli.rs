@@ -186,6 +186,17 @@ pub enum Command {
         )]
         json: bool,
     },
+    #[command(about = "Print, set or clear the overview's general notes")]
+    Notes {
+        #[arg(
+            long,
+            conflicts_with = "clear",
+            help = "Replace the notes with this text"
+        )]
+        set: Option<String>,
+        #[arg(long, conflicts_with = "set", help = "Remove the notes")]
+        clear: bool,
+    },
     #[command(about = "Move a todo to a position in its session")]
     Move {
         #[arg(help = "Todo id to move")]
@@ -246,6 +257,13 @@ pub enum SessionCommand {
     History {
         #[arg(help = "Session name. Defaults to the most recently opened session")]
         session: Option<String>,
+    },
+    #[command(about = "Rename a session, keeping its tag, repo, todos and history")]
+    Rename {
+        #[arg(help = "Session to rename")]
+        session: String,
+        #[arg(long, help = "New name; normalized like `session new`")]
+        to: String,
     },
     #[command(about = "Set or clear the grouping tag for a session")]
     Tag {
@@ -454,6 +472,19 @@ fn execute_with_runner<W: Write>(
                 listing::write_rows(writer, &todos)
             }
         }
+        Some(Command::Notes { set, clear }) => {
+            if clear {
+                database.save_overview_notes("")?;
+            } else if let Some(notes) = set {
+                database.save_overview_notes(&notes)?;
+            } else {
+                let notes = database.get_overview_notes()?;
+                if !notes.is_empty() {
+                    writeln!(writer, "{notes}")?;
+                }
+            }
+            Ok(())
+        }
         Some(Command::Move {
             todo_id,
             to,
@@ -580,6 +611,18 @@ fn handle_session_command<W: Write>(
                     revision.done_count
                 )?;
             }
+            Ok(())
+        }
+        SessionCommand::Rename { session, to } => {
+            let current = database.get_session_by_name(&session)?;
+            let renamed = database.edit_session(
+                &current.name,
+                &to,
+                current.tag.as_deref(),
+                current.repo.as_deref(),
+                now_utc_timestamp(),
+            )?;
+            writeln!(writer, "{}", renamed.name)?;
             Ok(())
         }
         SessionCommand::Tag {

@@ -69,6 +69,11 @@ todui export md writing-sprint --include-notes
 todui list --json --session writing-sprint
 # Move todo 2 to the top of its session.
 todui move 2 --to 1 --session writing-sprint
+# Rename a session; tag, repo, todos and history stay.
+todui session rename writing-sprint --to writing-retreat
+# Set, then print, the overview's general notes.
+todui notes --set "Call the printer shop"
+todui notes
 ```
 
 CLI todo mutations default to agent provenance. Pass `--human` on `add` or `done` when the action should be recorded as human-authored.
